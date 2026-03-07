@@ -1,0 +1,11 @@
+gdrive-service-account.json
+.secrets/
+.env
+.DS_Store
+node_modules/
+trade_logs/
+btc_5m_data/
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
