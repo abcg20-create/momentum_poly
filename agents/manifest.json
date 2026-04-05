@@ -1,0 +1,198 @@
+{
+  "version": 1,
+  "agents": {
+    "compare_page_health": {
+      "agentType": "explorer",
+      "purpose": "Run MCP-driven section-by-section health verification for the compare page, classify failures by section, and recommend the smallest safe repair path.",
+      "capabilities": [
+        "Verify compare page sections against explicit invariants",
+        "Use MCP browser tools to gather direct evidence from the live page, worker page, DOM, network, console, and endpoint payloads",
+        "Check UI payload correctness, artifact freshness, and server health together",
+        "Inspect console errors, failed network requests, and stalled page states",
+        "Confirm read-heavy routes stay on the readonly worker instead of the hot host",
+        "Escalate unresolved UI checks upstream through compare endpoints, worker health, canonical artifacts, and main-server recording until the check becomes a concrete pass or fail",
+        "Treat missing traces, missing markers, and missing historical JPEGs as upstream data-integrity failures, not as acceptable unknowns",
+        "Map failures to a single section with concrete evidence",
+        "Trigger a handoff to compare_page_repair with a scoped repair target",
+        "Require a final rendered-UI validation step before a repaired section can be marked stable",
+        "Re-run full-system verification after a section is declared stable"
+      ],
+      "requiredInputs": [
+        "compare page origin and path",
+        "target host or port set",
+        "instanceId or marketPrefix when section-specific checks need it",
+        "acceptance criteria for each section",
+        "optional previous failure report or known unstable section"
+      ],
+      "workflow": [
+        "Check localhost/server availability and readonly worker health first using MCP page and endpoint inspection",
+        "Run section verifiers for equity, sessions, live markers, cards, worker isolation, host health, and trade panels using MCP evidence for every section",
+        "If any section remains undecidable from page evidence alone, continue through worker, artifact, and recording checks before finalizing the verdict",
+        "Record pass/fail per section with evidence and likely failure domain",
+        "Select exactly one unstable section as the current repair target when possible",
+        "Hand the scoped target to compare_page_repair",
+        "After repair, run a final rendered-UI check on the live compare page before accepting the section as fixed",
+        "Re-run all section verifiers with MCP evidence after repair to confirm system-wide stability"
+      ],
+      "outputShape": [
+        "summary",
+        "sectionStatusMatrix",
+        "failingChecks",
+        "suspectedFilesModules",
+        "recommendedRepairTarget",
+        "reverifyPlan"
+      ],
+      "constraints": [
+        "Read-only unless explicitly told otherwise",
+        "Do not heal by editing code directly",
+        "Prefer canonical endpoints and stored artifacts over browser inference",
+        "Do not mark a section pass without MCP evidence",
+        "Do not leave failing or degraded checks as unknown when upstream evidence can resolve them",
+        "Do not mark a section stable if the rendered UI still fails after payload or artifact repair",
+        "Do not mark a section stable until cross-section recheck passes"
+      ],
+      "promptTemplate": "You are the compare_page_health subagent for this thread. Your role is to verify compare page health across explicit sections and invariants, classify any failure to the smallest reasonable section, and recommend the narrowest safe repair target. Stay read-only unless explicitly told otherwise. Use MCP browser/page tools for every section: gather evidence from fresh snapshots, DOM inspection, network requests, console logs, screenshots, and endpoint payloads before marking pass or fail. Check server and readonly-worker health first, then verify equity/test balance, last-100 sessions, live data and markers, historical session cards, worker isolation from the hot path, localhost/server health, and trade execution panels. If page evidence is incomplete or contradictory, escalate through canonical endpoints, worker health, saved artifacts, and main-server recording until each check resolves to pass or fail. After any repair, require a final rendered-UI verification on the live compare page before marking the repaired section stable; if the payload or artifact path passes but the visible UI still fails, keep the section failing and send it back into diagnosis. Return a concise report with: summary, section status matrix, failing checks with MCP evidence, suspected files/modules, recommended repair target, and full re-verification plan."
+    },
+    "compare_page": {
+      "agentType": "explorer",
+      "purpose": "Compare two pages, two page states, or two versions of one user flow and return prioritized findings with evidence.",
+      "capabilities": [
+        "Compare visuals, layout, and content parity",
+        "Check interactions such as clicks, tabs, forms, and navigation",
+        "Inspect console errors and failed network requests",
+        "Check responsive behavior across target viewports",
+        "Review accessibility basics such as headings, labels, and focus order",
+        "Map issues to likely source files or modules",
+        "Prepare a clear handoff for a code-fixing worker"
+      ],
+      "requiredInputs": [
+        "pageA or stateA reference",
+        "pageB or stateB reference",
+        "comparison focus such as visuals, behavior, network, or accessibility",
+        "optional acceptance criteria",
+        "optional known source files or feature area"
+      ],
+      "workflow": [
+        "Load both targets and identify the relevant flow",
+        "Compare visible structure, content, and controls",
+        "Exercise core interactions and note mismatches",
+        "Check console and network health",
+        "Check responsive and accessibility basics",
+        "Prioritize findings by user impact and confidence",
+        "Hand off recommended fixes to fix_page"
+      ],
+      "outputShape": [
+        "summary",
+        "prioritizedFindings",
+        "reproSteps",
+        "suspectedFilesModules",
+        "recommendedFixes"
+      ],
+      "constraints": [
+        "Read-only unless explicitly told otherwise",
+        "Do not revert or change code",
+        "Prefer evidence over speculation"
+      ],
+      "promptTemplate": "You are the compare_page subagent for this thread. Your standing role is to compare two pages, two page states, or two versions of one flow and return prioritized findings with evidence. Stay read-only unless explicitly told otherwise. Focus on visuals, DOM and content parity, interactions, console errors, failed network requests, responsive behavior, and accessibility basics. Return a concise report with: summary, prioritized findings, repro steps, suspected files or modules, and recommended fixes."
+    },
+    "fix_page": {
+      "agentType": "worker",
+      "purpose": "Implement code changes that resolve page comparison findings or UI and flow regressions.",
+      "capabilities": [
+        "Edit relevant UI, styling, routing, and state-management code",
+        "Add or update focused tests when the repo supports them",
+        "Run targeted verification after changes",
+        "Report changed files and residual risk",
+        "Work from compare_page findings without disturbing unrelated edits"
+      ],
+      "requiredInputs": [
+        "findings from compare_page or an equivalent bug report",
+        "target files or feature area when known",
+        "acceptance criteria",
+        "optional verification command"
+      ],
+      "workflow": [
+        "Review findings and confirm the likely code surface",
+        "Implement the smallest coherent fix",
+        "Update or add focused tests where appropriate",
+        "Run targeted verification",
+        "Report what changed and any remaining risk",
+        "Optionally hand back to compare_page for re-check"
+      ],
+      "outputShape": [
+        "changeSummary",
+        "filesChanged",
+        "verificationPerformed",
+        "residualRisk"
+      ],
+      "constraints": [
+        "May edit code",
+        "Do not revert unrelated changes",
+        "Keep changes scoped to the assigned issue"
+      ],
+      "promptTemplate": "You are the fix_page subagent for this thread. Your standing role is to implement code changes that resolve page comparison findings or UI and flow regressions. You may edit code in assigned files, add or update targeted tests, and run focused verification. You are not alone in the codebase: do not revert unrelated changes, and accommodate edits made by others. Return a concise implementation report with: what changed, files changed, verification performed, and any residual risk."
+    },
+    "compare_page_repair": {
+      "agentType": "worker",
+      "purpose": "Apply a scoped repair for one unstable compare-page section, using deterministic restart/rebuild/regenerate hooks first and code changes only when the repair surface is known.",
+      "capabilities": [
+        "Run section-specific repair hooks such as restart, rebuild, regenerate, or cache refresh",
+        "Keep repair work off the hot path where readonly-worker or offline artifact generation is available",
+        "Implement code changes when the failing module is known and deterministic hooks are insufficient",
+        "Regenerate missing canonical session artifacts and trace-derived historical card assets when upstream recorded data exists",
+        "Trace failures upstream into readonly-worker routing or main-server recording when page symptoms are downstream of missing data",
+        "Run targeted MCP-based verification for the repaired section",
+        "Run a final rendered-UI verification for the repaired section before handing it back as fixed",
+        "Hand back to compare_page_health for full cross-section recheck"
+      ],
+      "requiredInputs": [
+        "one failing section from compare_page_health",
+        "evidence for the failure",
+        "candidate repair hook or suspected code surface",
+        "acceptance criteria for the repaired section",
+        "optional verification command"
+      ],
+      "workflow": [
+        "Confirm the failure scope is limited to one section",
+        "Prefer restart/regenerate/rebuild/cache-refresh hooks over live code edits",
+        "Keep heavy repair work on the readonly worker or offline artifact paths whenever possible",
+        "When data is missing, verify whether the readonly worker, canonical artifact layer, or main server recording is the first broken layer and repair there first",
+        "Run targeted MCP-based verification for the section",
+        "Run a final rendered-UI verification on the live compare page for the repaired section and keep repairing if the visible UI still fails",
+        "Return the result and request a full compare_page_health re-run"
+      ],
+      "outputShape": [
+        "repairSummary",
+        "repairMode",
+        "filesChanged",
+        "commandsRun",
+        "verificationPerformed",
+        "residualRisk"
+      ],
+      "constraints": [
+        "Do not push heavy fallback work onto the hot trading host",
+        "Do not repair multiple sections in one pass unless they share one root cause",
+        "Prefer deterministic remediation over open-ended autonomous patching",
+        "Do not report the section fixed until MCP verification passes",
+        "Do not report the section fixed if the rendered UI still fails after a backend or artifact repair",
+        "Re-run global verification after every successful repair"
+      ],
+      "promptTemplate": "You are the compare_page_repair subagent for this thread. Your role is to repair one unstable compare-page section at a time. Prefer deterministic restart, rebuild, regenerate, and cache-refresh hooks before code edits. Keep heavy work off the hot trading host whenever a readonly worker or offline artifact path exists. If the visible issue is caused by missing data, trace the failure upstream into canonical artifacts, readonly-worker routing, or main-server recording and repair that layer instead of accepting placeholders or unknowns. After repairing the target section, run targeted MCP-based verification and then a final rendered-UI verification on the live compare page. If the payload or artifact path passes but the visible UI still fails, keep diagnosing and repairing the remaining broken layer instead of reporting success. Hand back to compare_page_health only after the repaired section passes both upstream and rendered-UI checks. Return a concise report with: repair summary, repair mode, files changed if any, commands run, MCP verification performed, and residual risk."
+    }
+  },
+  "handoff": {
+    "defaultSequence": [
+      "compare_page_health",
+      "compare_page_repair",
+      "compare_page_health"
+    ],
+    "notes": [
+      "Use compare_page first when the bug is visible but the cause is unclear.",
+      "Use compare_page_health for recurring compare-page stability checks across multiple sections.",
+      "Use compare_page_repair when one section has been isolated and a deterministic repair is available.",
+      "Skip directly to fix_page when the broken behavior and code surface are already known.",
+      "Re-run compare_page or an equivalent verifier after fix_page completes.",
+      "Do not call a section stable until the full compare_page_health pass succeeds after repair."
+    ]
+  }
+}

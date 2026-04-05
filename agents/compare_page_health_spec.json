@@ -1,0 +1,342 @@
+{
+  "version": 1,
+  "goal": "Continuously verify compare-page data integrity, rendering continuity, and off-hot-path stability before declaring the page healthy.",
+  "principles": [
+    "Verify each section at least once per session.",
+    "If one section fails, isolate that section and repair only that section first.",
+    "After a targeted repair, rerun all sections and declare stability only when the full sweep passes.",
+    "After every repair and before declaring stability, perform a final rendered-UI verification on the live compare page for the repaired section and the affected cross-sections.",
+    "If endpoint or artifact data passes but the rendered UI still fails, keep the section in fail state and continue the diagnose-repair loop until the visible UI passes.",
+    "Never heal compare-page issues by moving heavy work onto the live trading host.",
+    "Do not mark a section pass without MCP evidence from the live page, worker page, console, network, DOM, or endpoint payload.",
+    "Do not leave a check as unknown when the page is unhealthy; escalate from page evidence to worker, artifact, and main-server recording evidence until the check becomes pass or fail."
+  ],
+  "mcpVerificationPolicy": {
+    "requiredPerSection": [
+      "Open the relevant page or worker surface with MCP.",
+      "Capture a fresh MCP snapshot before evaluating the section.",
+      "Use MCP to inspect at least one of DOM state, network requests, console logs, page freeze symptoms, screenshots, or endpoint payloads.",
+      "Attach MCP evidence to the section result.",
+      "Use MCP again when rerunning a repaired section.",
+      "After a repair, perform a final rendered-UI check on the live compare page and fail the section if the visible UI still does not reflect the repaired state.",
+      "When UI evidence is incomplete or contradictory, escalate through the upstream evidence ladder instead of returning an undecided result."
+    ],
+    "upstreamEvidenceLadder": [
+      "Live page DOM and rendered controls",
+      "Live page network requests and console messages",
+      "Canonical compare endpoints such as chart-history, session-history, run-index, latest-session-card, focused-live-session, and session-card-image",
+      "Readonly worker health, routing, and artifact ownership",
+      "Canonical saved artifacts on disk",
+      "Main server recording paths and run/session persistence"
+    ],
+    "preferredTools": [
+      "mcp__chrome_devtools__navigate_page",
+      "mcp__chrome_devtools__take_snapshot",
+      "mcp__chrome_devtools__evaluate_script",
+      "mcp__chrome_devtools__list_network_requests",
+      "mcp__chrome_devtools__list_console_messages",
+      "mcp__chrome_devtools__wait_for",
+      "mcp__chrome_devtools__take_screenshot"
+    ]
+  },
+  "sections": [
+    {
+      "id": "equity_curve_test_balance",
+      "label": "Equity Curve and Test Balance",
+      "mcpChecks": [
+        "Use MCP snapshot or evaluate_script to count rendered equity markers and visible balance labels.",
+        "Use MCP page-context fetch or network inspection to compare rendered marker count against the canonical session-history payload since runStartMs.",
+        "Use MCP screenshot or refreshed snapshot to confirm the curve persists across reload.",
+        "If marker parity is not provable from the page alone, escalate to chart-history, run-index, artifact presence, and server recording until the section is marked pass or fail."
+      ],
+      "escalationChecks": [
+        "Compare rendered marker count against run-index completed-session count for the same run start.",
+        "If chart-history total disagrees with run-index sessions, inspect which source is stale or incomplete and fail the section.",
+        "If run-index lacks usable timing or balance fields, inspect whether the main server is recording session close data correctly and fail the section.",
+        "If page rendering is stale relative to upstream data, repair the page binding or cache path and rerun the section."
+      ],
+      "verify": [
+        "Does the equity curve show one visible marker per session since the run start time?",
+        "Does the number of rendered markers match the number of sessions returned since runStartMs?",
+        "Does the first plotted balance begin at the run baseline rather than at a later session?",
+        "Does every marker map to a real session slug and start timestamp?",
+        "Does each step in the curve reflect the corresponding session pnl within rounding tolerance?",
+        "Does the last plotted balance equal the latest cumulative balance shown elsewhere on the page?",
+        "Does a refresh preserve the same marker count and curve shape when no new session has arrived?",
+        "Are sessions from before the current run start excluded from the curve?",
+        "Do missing trace details avoid silently dropping the session-level balance marker?",
+        "If trace hydration is unavailable, does session-level balance still render correctly from compact history data?"
+      ]
+    },
+    {
+      "id": "last_100_sessions",
+      "label": "Last 100 Sessions Data",
+      "mcpChecks": [
+        "Use MCP snapshot or evaluate_script to read visible last-100 rows, order, pnl values, and cumulative balances.",
+        "Use MCP page-context fetch or network inspection to compare the visible table with the canonical endpoint payload.",
+        "Use MCP console and network inspection to verify the table loaded cleanly.",
+        "Use MCP to compare adjacent row slugs and timestamps so the table can be checked for strict newest-to-oldest 5-minute cadence.",
+        "Use MCP to compare the newest visible row time against the current Pacific-time closed-session window so stale or timezone-shifted history is marked as a failure.",
+        "Use MCP network inspection to verify the last-100 table can load and append independently of historical-card, JPEG, or latest-session-card requests."
+      ],
+      "verify": [
+        "Does the table show the most recent 100 sessions in descending time order?",
+        "Do the session slugs and timestamps descend in chronological 5-minute steps from the most recent closed session, with one expected session row per 5-minute bucket unless an explicit exclusion explains a gap?",
+        "Are there no missing 5-minute session rows in the sequence, and if a session had no trade does it still appear with a 0 dollar pnl instead of being omitted?",
+        "Does each row show the correct realized pnl from the canonical session source?",
+        "Does each row show the correct cumulative balance since the active run start time?",
+        "Does each cumulative balance equal prior balance plus current row pnl?",
+        "Do row slug, timestamp, run number, and instance scope all align?",
+        "Does the newest visible row timestamp make sense in Pacific time relative to the current time and the latest closed 5-minute bucket, rather than being hours stale or timezone-shifted?",
+        "Do pagination and offset rules avoid duplicates, silent skips, and unexplained missing 5-minute buckets around the 100-row boundary?",
+        "Does the last-100 table update independently of historical session cards, latest-session-card payloads, and JPEG/card materialization so card failures cannot block session rows from appearing?",
+        "Does each newly closed session append into the last-100 table directly from session-close summary data without waiting for historical-card generation or other heavy artifact work?",
+        "If a session has no trade and zero pnl, does the P/L per hour column show a concise no-trade reason such as stale live gap, no EMA cross, or another canonical blocker instead of a blank or misleading dollar value?",
+        "Does the session slug in each last-100 row link directly to that slug's session audit review file for the same run identity?",
+        "For any session slug that appears both in the selected historical session card and in the last-100 table, does the row pnl match the session-card pnl within 5 percent of value, failing the section if the card is right and the table drifts materially?",
+        "If a no-trade reason is shown in the P/L per hour column, is that reason derived from canonical blocker evidence such as entry_blocked events, decision-snapshot failure reasons, or compact session-audit blockers rather than browser-invented text?",
+        "Does clicking a last-100 session slug open the matching session audit for the same run identity and slug, without drifting to another run or a stale fallback review?",
+        "If a historical session card is selected, does the card-level last-100 panel still populate from canonical summary rows instead of showing an empty no recent session-history message while valid rows exist upstream?",
+        "If the selected card slug is older or stale, does the card-level last-100 panel still stay aligned to the active instance and recent closed-session sequence rather than inheriting the stale card slug or stale browser cache?",
+        "Does a refresh preserve ordering and balances when the session set is unchanged?",
+        "Are negative pnl rows shown with the correct sign and magnitude?",
+        "If a card is still materializing, does the row still show real pnl and balance values instead of null placeholders?",
+        "For overlapping sessions, does the last-100 table agree with the equity curve marker set?"
+      ]
+    },
+    {
+      "id": "live_data_markers",
+      "label": "Price Feed, Live Data and Markers",
+      "mcpChecks": [
+        "Use MCP snapshot or evaluate_script to count visible trace SVGs, lines, and live markers.",
+        "Use MCP page-context fetch to inspect focused-live-session and live-markers payloads.",
+        "Use MCP console and network inspection to catch marker or trace refresh failures.",
+        "Use MCP network inspection and endpoint payloads to verify the live price feed is websocket-driven, not rest-driven, for trade decisions and high-fidelity recording.",
+        "Use MCP endpoint payloads to verify runtime lag stays within the required live tolerance and fail the section if runtime lag exceeds 50 milliseconds.",
+        "Use MCP DOM inspection and repeated snapshots to verify the stop clock and other live session timers advance smoothly without visible pauses, jumps, or freezes."
+      ],
+      "verify": [
+        "Is the live price feed for this host running in websocket mode with streamEnabled true, streamConnected true, and an authoritative websocket quote source rather than a rest fallback source?",
+        "If websocket connectivity is lost, does the section fail loudly instead of silently treating rest_pump, rest_fallback, or other non-websocket quote sources as acceptable for trade decisions?",
+        "Does the rendered live price feed change directly with websocket updates instead of lagging behind a stale cached or fallback value?",
+        "Is high-fidelity price data being recorded from websocket-driven quotes at 50 millisecond cadence or faster wherever samples exist, rather than being downsampled to the trace cadence?",
+        "Does runtime lag for the live price-feed path stay at 50 milliseconds or less in the healthy case, and does the section fail if runtime lag rises above that tolerance?",
+        "Does the live session card Plotly trace render the primary live price series as dots only, with no connecting lines drawn between quote points on the session card?",
+        "Does the live trace remain dots only even when continuity backfill is applied, with backfilled points added as dots rather than synthetic connecting lines that would hide real quote gaps?",
+        "If there are gaps in the raw live trace, does the display trace backfill those gaps from canonical continuity data instead of leaving visible holes or disconnected islands when backfill data exists?",
+        "Does the displayed live session-card trace stay within a throttling window of 50 to 200 milliseconds per rendered dot, avoiding both over-rendering that harms CPU health and under-rendering that makes the card stale?",
+        "Does websocket-driven trade-decision data remain as fast as possible even when the visible session-card trace is throttled, with trace throttling explicitly prevented from slowing quote ingestion or execution inputs?",
+        "Does the live session card feel visually smooth and responsive in real time, with dot updates arriving naturally enough that the trace does not appear choppy, frozen, or several beats behind the current websocket-driven price feed?",
+        "If the live trace is visibly choppy or delayed even while websocket execution data is healthy, does the section fail and push the repair agent either to improve live trace responsiveness or to throttle the visible trace further until the card looks naturally real time instead of half-updating?",
+        "Does the stop clock advance continuously without lag, pause, or visible catch-up jumps, so the live session card feels smooth and synchronized with the active session state?",
+        "Does the focused live session render a continuous trace without avoidable gaps?",
+        "When a gap exists, is it filled from canonical continuity data instead of browser-only synthetic replay when possible?",
+        "Does an entry marker appear immediately after an entry event is recorded?",
+        "Does an exit marker appear immediately after an exit event is recorded?",
+        "Do marker timestamps align with the visible trace rather than floating off the timeline?",
+        "Does the focused-live-session payload provide trace, displayTrace, markers, runtime, and invariants together?",
+        "If runtime.entered is true, do invariants confirm that an entry marker is present?",
+        "Does refresh preserve continuity and marker visibility for the active live session?",
+        "Do authoritative markers default to visible unless explicitly filtered out?",
+        "If trace rendering is intentionally throttled to protect CPU, does that throttling stay within a 50 to 200 millisecond rendered-dot window?",
+        "Does trace throttling remain isolated from the trade-decision feed so websocket execution data can stay faster than the visible trace?",
+        "Under transient CPU pressure, does the page degrade gracefully instead of dropping to an empty or near-empty live trace?"
+      ]
+    },
+    {
+      "id": "historical_session_cards",
+      "label": "Historical Session Cards",
+      "mcpChecks": [
+        "Use MCP snapshot or evaluate_script to inspect visible historical cards, slugs, timestamps, and image URLs.",
+        "Use MCP network inspection to verify JPEG/image requests succeed and resolve to the expected artifact path.",
+        "Use MCP screenshot or DOM inspection to confirm the card image is not blank or replaced by a placeholder.",
+        "If a card or JPEG is missing, escalate to readonly-worker health, canonical session artifact presence, and main-server trace recording before closing the check."
+      ],
+      "escalationChecks": [
+        "Verify the selected slug exists in run-index and or session-history for the active instance.",
+        "Verify canonical low-fidelity and high-fidelity session artifacts exist for the selected slug.",
+        "Verify low_fidelity_trace.svg and low_fidelity_trace.jpg can be materialized from the canonical session artifact.",
+        "If canonical artifacts are missing, verify the main server recorded the direct session trace and trigger deterministic artifact regeneration off the hot path when possible."
+      ],
+      "verify": [
+        "Does each historical card show a complete trace rather than a partial or placeholder trace?",
+        "Does each card JPEG exist for the expected session slug and load successfully?",
+        "Is the most recent closed session card available according to the current timestamp?",
+        "Does latest-session-card select the expected recent closed slug for the active instance instead of drifting to a much older stale artifact slug?",
+        "If expectedSlug points to the most recent closed bucket, does the selected historical card stay on that slug or the nearest valid recent closed slug instead of jumping backward by hours?",
+        "Do card slug, time, and pnl match the corresponding session-history row?",
+        "Does the displayed card balance match the canonical continuity or balance value for the selected slug rather than a stale balance from another session or cache entry?",
+        "Does the displayed card pnl match the canonical actual pnl for the selected slug rather than a stale corrected or unrelated session value?",
+        "If latest-session-card already includes a usable inline trace payload, does the UI render that trace immediately even when historicalCardReady is false, instead of showing a blank, fragmented, or trace-less card while waiting for JPEG readiness?",
+        "Is one canonical trace source used consistently across refreshes?",
+        "Do closed sessions avoid showing a no-trace placeholder when compact trace data exists?",
+        "Does refresh preserve the same ordering and availability of recent cards?",
+        "Are JPEGs written to the expected artifact directory instead of a temp or missing path?",
+        "Do card links to session or run audits resolve for the current run?",
+        "When the newest closed session arrives, does its card materialize without hot-host fallback reconstruction?"
+      ]
+    },
+    {
+      "id": "non_essential_worker",
+      "label": "Non Essential Worker",
+      "mcpChecks": [
+        "Use MCP to open the worker activity or health page and verify the worker is live.",
+        "Use MCP network inspection on compare-page heavy reads to verify readonly-worker routing.",
+        "Use MCP page-context fetches to inspect worker health and activity payloads.",
+        "Use readonly-worker evidence to confirm historical trace filling and artifact generation are being performed off the hot path."
+      ],
+      "verify": [
+        "Is the non-essential worker healthy on its own health endpoint?",
+        "Are heavy compare-page reads routed to the readonly worker instead of the trading host?",
+        "Do readonly-worker requests use allowHot only for intentional upstream proxy reads?",
+        "Are host-side warm jobs disabled when offload mode is enabled?",
+        "Is the worker caching heavy responses instead of repeatedly hitting the upstream host?",
+        "Do activity logs show the worker doing historical and report work?",
+        "Are there any fallbacks that silently move heavy work back onto the hot host?",
+        "If the readonly worker is unavailable, does the system fail loudly instead of quietly shifting the load locally?",
+        "Are parity generation, run-audit generation, and closed-session artifacts owned by the worker or another off-hot-path process?",
+        "Does request and CPU accounting distinguish readonly-proxy work from hot-path HTTP work?"
+      ]
+    },
+    {
+      "id": "localhost_server_health",
+      "label": "Local Host Is Up Running",
+      "mcpChecks": [
+        "Use MCP navigate, wait, and snapshot to confirm the compare page loads and keeps updating.",
+        "Use MCP page-context fetch to inspect /api/health for freshness and connectivity fields.",
+        "Use MCP console and network inspection to distinguish freeze, endpoint failure, and access-path failure.",
+        "Use MCP endpoint payloads to verify runtime lag and CPU health stay inside the host tolerance budget."
+      ],
+      "verify": [
+        "Is the compare page reachable on the expected localhost origin and port?",
+        "If reachable, does the page continue updating instead of freezing after initial load?",
+        "Does /api/health return ok, current slug, and quote-feed connectivity?",
+        "Does host runtime lag stay at 50 milliseconds or less in the healthy case, and does the section fail if runtime lag exceeds that tolerance?",
+        "Does host CPU health stay below 80 percent sustained usage in the healthy case, and does the section fail if sustained CPU reaches 90 percent or higher or drives runtime lag beyond 50 milliseconds?",
+        "Do supervisor, child, and listener processes exist for the expected port?",
+        "If the page is down, does the manager or uptime guard recover it successfully?",
+        "Are complete data artifacts being written to the expected run directory for the active session?",
+        "Are low-fidelity and high-fidelity price feed values non-empty in saved artifacts where required?",
+        "Does health verification check data freshness and not only listener presence?",
+        "After restart, does compare-page access recover without leaving the page in a stale frozen state?",
+        "Are localhost or tunnel failures clearly separated from actual server-health failures?"
+      ]
+    },
+    {
+      "id": "strategy_trade_execution_integrity",
+      "label": "Strategy and Trade Execution Integrity",
+      "mcpChecks": [
+        "Use MCP snapshot or evaluate_script to read the rendered strategy id, runtime state, quote-source fields, and trade execution status on the live compare page.",
+        "Use MCP page-context fetch or network inspection to inspect health, state, bot-detail, focused-live-session, and execution payloads for pairPure, pairSynthetic, streamEnabled, quote source, runtime action, execution status, feed age, quote lag, and price lag.",
+        "Use MCP console and network inspection to verify the active strategy is consuming websocket-primary quotes for trade decisions and to fail the section if decision logic is being driven by rest_pump, rest_fallback, or other fallback quote paths.",
+        "Use MCP to compare live websocket or feed timestamps against rendered quote telemetry so the strategy section fails if trade-execution quote ingress is slower than the allowed live thresholds.",
+        "Use MCP endpoint payloads to verify runtime lag stays below the required execution tolerance and fail the section if runtime lag exceeds 50 milliseconds.",
+        "Use MCP repeated DOM reads to verify session timers such as the stop clock advance smoothly and do not pause while strategy or execution data is updating.",
+        "When UI evidence is incomplete, escalate to runtime snapshots, strategy decision snapshots, entry-block logs, order-placement events, execution logs, and quote-source evidence before closing the section."
+      ],
+      "escalationChecks": [
+        "Verify the active bot instance is pinned to the expected strategy id and strategy path for the host and run.",
+        "Verify websocket mode is enabled and connected for trade decisions, and fail the section if execution logic is relying on any fallback quote source.",
+        "Verify the runtime is receiving fresh quotes at the required live cadence and that quote gating is not silently rejecting the only available usable quote source.",
+        "Verify live execution is being driven by quote data with a preferred ingress age of 25 milliseconds or less and fail the section if live trade execution gaps exceed 100 milliseconds.",
+        "Verify runtime lag stays at 50 milliseconds or less for execution health and repair the host if runtime lag exceeds that tolerance.",
+        "Verify the rendered price feed on the compare page changes with live websocket quote updates rather than lagging behind a stale cached value.",
+        "Verify the live session card and execution timers remain visually smooth and responsive, and if the trace looks choppy or delayed, either improve responsiveness or increase visible throttling without harming websocket execution data.",
+        "Verify the stop clock and related live timers advance continuously without pause, freeze, or catch-up jumps.",
+        "Verify high-fidelity websocket price recording continues at 50 millisecond cadence or faster even when the visible trace is downsampled for CPU protection.",
+        "Verify strategy decision snapshots show entry evaluation is actually occurring on fresh ticks rather than idling with blocked quote inputs.",
+        "Verify whether EMA-based entry logic is being gated or filtered and determine from decision-window and signal evidence whether that gating is justified.",
+        "Verify session-audit or equivalent canonical decision evidence for the active or most relevant recent session, and fail the section if the audit view suggests a valid entry should have occurred but the runtime produced no trade.",
+        "Verify strategy runtime state accumulation remains populated through the live session and fail the section if observed or resampled state resets, empties, or stalls while live ticks continue.",
+        "Verify quote acceptance and quote-seq gating are not rejecting fresh websocket quotes because of stale last-accepted sequence state, stream restarts, or sequence regressions.",
+        "Verify decision snapshot construction reflects the same live strategy state the runtime is using, rather than exporting empty windows or reset state during active quote flow.",
+        "Verify session-audit parity between live inputs and backtest or audit inputs so the section fails if the audit path shows valid entries that the live runtime never evaluates or executes.",
+        "Verify accepted synthetic quote counters or equivalent runtime evidence advance when pairPure is false and pairSynthetic is true.",
+        "Verify live trace or execution-line updates stay within the throttled display budget and fail the section if trace lag exceeds 200 milliseconds, while confirming that trace throttling does not slow trade-decision inputs.",
+        "Verify entry_signal, enter_order, enter, exit_order, and exit events appear in canonical bot-run events when the strategy should be trading.",
+        "If trades are missing, verify whether the failure is EMA gating, strategy gating, quote freshness, execution routing, venue rejection, or host freeze and repair only that cause."
+      ],
+      "verify": [
+        "Is the bot running the expected strategy id and strategy file for this host, run, and compare-page session?",
+        "Does the runtime show quote-source fields that make sense for the host, including pairPure, pairSynthetic, streamEnabled, and quote source labels?",
+        "Is websocket mode mandatory and active for trade decisions on this host, with streamEnabled true, streamConnected true, and no healthy-state allowance for fallback quote modes?",
+        "Is the live quote stream feeding trade execution arriving with a preferred ingress age of 25 milliseconds or less, and does the section fail if the live execution gap exceeds 100 milliseconds?",
+        "Does runtime lag for the trade-decision path stay at 50 milliseconds or less, and does the section fail if runtime lag exceeds that tolerance?",
+        "Does the rendered price feed reflect live websocket or authoritative quote updates directly, changing in step with the incoming quote stream rather than staying stale?",
+        "Does the strategy consume websocket-primary execution data rather than rest_pump, rest_fallback, or other fallback quote sources when deciding entries and exits?",
+        "If websocket execution data is unavailable, does the section fail instead of silently allowing fallback quote sources to drive trade decisions?",
+        "Are real trades actually getting executed when valid setups occur, rather than the strategy appearing alive while producing no real enter, fill, or exit activity?",
+        "Do the live session card and execution surfaces feel smooth and responsive enough that strategy state, quote state, and visible timer motion appear naturally real time rather than choppy or intermittently frozen?",
+        "Does the stop clock advance continuously without lag, pause, or catch-up jumps while the strategy is running and execution data is updating?",
+        "Do strategy decision snapshots, lastAction fields, or equivalent runtime evidence prove that entry logic is actively evaluating current quotes rather than sitting alive-but-idle?",
+        "Is EMA-based entry logic being gated or filtered for the current session, and if so does the diagnostic evidence show that this gating is justified rather than suppressing a valid setup?",
+        "Does the Session Audit or equivalent canonical session-decision evidence indicate that the bot should have entered, and if so does the section fail until the gating or execution cause is identified and repaired?",
+        "Does strategy runtime state accumulation remain populated and advancing during the live session rather than resetting to empty observed or resampled state while ticks continue?",
+        "Is quote acceptance or quote-seq gating rejecting fresh websocket quotes because the last-accepted sequence state is stale, regressed, or inconsistent with the current stream?",
+        "Does decision snapshot construction expose the same live decision state the runtime is using, instead of exporting empty windows or reset state during active quote flow?",
+        "Does live session-audit parity with equivalent backtest or canonical decision evidence show that entries are being evaluated and executed when they should be, and if not does the section fail until that mismatch is repaired?",
+        "Is high-fidelity websocket price data being recorded at 50 millisecond cadence or faster independently of any visible trace downsampling?",
+        "When the market reaches valid entry conditions, does the system emit entry_signal and enter_order evidence before claiming the strategy is healthy, and when a trade should fill do enter, exit_order, exit, and related execution events appear with real timestamps, prices, and sides?",
+        "Do live trace or execution-line updates stay within the throttled display budget, with a maximum acceptable gap of 200 milliseconds?",
+        "Does trace throttling remain isolated from trade execution so a downsampled chart never slows or suppresses decision-quality websocket inputs?",
+        "If no trades occurred in a session, is there explicit evidence that the strategy evaluated websocket-fed quotes and correctly chose no trade, rather than silently failing to process the available quote stream?"
+      ]
+    },
+    {
+      "id": "trade_execution_panels",
+      "label": "Trade Execution Panels",
+      "mcpChecks": [
+        "Use MCP snapshot or evaluate_script to read visible execution-panel values for CPU, quote lag, price lag, and trade state.",
+        "Use MCP page-context fetch or network inspection to compare panel values with their source payloads.",
+        "Use MCP console and network inspection to confirm the panels are updating without client-side errors.",
+        "Use MCP to compare the panel quote lag, price lag, and trace freshness against incoming live feed timestamps so the section fails on unacceptable live delay.",
+        "Use MCP to compare panel CPU and runtime lag telemetry against their tolerances so the section fails when CPU or loop lag is too high for safe execution."
+      ],
+      "verify": [
+        "Do all execution-panel fields populate with current input data instead of null placeholders?",
+        "Does CPU telemetry appear, refresh with recent samples, and stay below 80 percent sustained usage in the healthy case?",
+        "Does the section fail when sustained CPU reaches 90 percent or higher or when CPU pressure drives runtime lag above 50 milliseconds?",
+        "Does quote-lag telemetry appear, match recent health or runtime feed data, and stay at 25 milliseconds or less in the healthy case?",
+        "Does the section fail when live trade-execution quote lag exceeds 100 milliseconds instead of silently treating it as acceptable?",
+        "Does price-lag telemetry appear, update over time, and reflect the live websocket-driven price feed rather than stale cached values?",
+        "Does runtime-lag telemetry appear, match recent health or runtime data, and stay at 50 milliseconds or less in the healthy case?",
+        "Do trade-entry, trade-exit, and stop fields match the current runtime and session state?",
+        "Are panel values consistent with the same host and run displayed elsewhere on the page?",
+        "Does refresh preserve populated execution-panel data when the host stays healthy?",
+        "Are panel charts and series derived from real recorded input data rather than empty defaults?",
+        "If trace or execution-line updates are intentionally throttled, do they still stay within a 200 millisecond maximum gap?",
+        "If telemetry is delayed, does the panel surface degraded status clearly instead of blanking out?",
+        "Do execution panels stay responsive while the historical sections are also loading?"
+      ]
+    }
+  ],
+  "repairProtocol": {
+    "detect": [
+      "Run one verification pass per section.",
+      "Record evidence from MCP snapshots, endpoint payloads, artifacts, UI state, network failures, console errors, and freeze symptoms.",
+      "When a UI check cannot be answered from the page, continue upward through worker and server recording evidence until the check resolves to pass or fail."
+    ],
+    "isolate": [
+      "Choose exactly one failing section as the active repair target.",
+      "Map it to the smallest code, endpoint, or artifact pipeline that can explain the failure."
+    ],
+    "repair": [
+      "Use compare_page_repair for the scoped fix.",
+      "Prefer readonly-worker, artifact-generation, restart, or endpoint fixes before broader UI rewrites.",
+      "Do not add a fallback that shifts heavy historical work onto the hot path.",
+      "For equity or historical-card failures, the repair agent may inspect and repair canonical artifact generation, session trace materialization, and main-server recording paths when they are the true root cause.",
+      "For strategy and trade-execution failures, the repair agent must distinguish quote gating, strategy pinning, execution routing, venue rejection, and host freeze before patching, and it must not treat alive-but-not-evaluating runtime state as healthy.",
+      "For live execution data failures, the repair agent must verify quote ingress cadence, websocket-to-price-feed propagation, runtime-lag tolerance, and trace throttling thresholds before declaring the section healthy.",
+      "For price-feed and strategy failures, the repair agent must treat websocket mode as mandatory for trade decisions, must fail rather than fallback to rest-driven execution inputs, and must preserve 50 millisecond high-fidelity websocket recording even when traces are downsampled.",
+      "For last-100 failures, the repair agent must keep the table independent from historical-card generation and repair the session-close summary path rather than coupling row updates to card/JPEG materialization."
+    ],
+    "reverify": [
+      "Rerun the repaired section with fresh MCP evidence.",
+      "Run a final rendered-UI verification on the live compare page for the repaired section and any directly affected cross-sections.",
+      "If the data path passes but the visible UI still fails, keep the section in fail state and continue diagnosis on the UI-binding, caching, worker, artifact, or recording layer that still breaks the visible result.",
+      "Do not stop with an undecided result for an explicit verification question when upstream evidence can still be checked.",
+      "If that section passes, rerun every section in one full-system sweep.",
+      "Declare stable only when the full-system sweep passes."
+    ]
+  }
+}
