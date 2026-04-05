@@ -32240,9 +32240,8 @@ function overlaySyntheticSettleIntoContinuitySession(sessionLike: any, traceLike
     const entryPx = Number(first?.entryPx);
     const remainingShares = Number(last?.sharesRemaining);
     if (!(Number.isFinite(entryPx) && entryPx > 0 && Number.isFinite(remainingShares) && remainingShares > 1e-6)) return sess;
-    const lastSidePx = lastTraceSidePxForCorrectedAccounting(traceLike, side);
-    if (!Number.isFinite(Number(lastSidePx))) return sess;
-    const settlePx = Math.max(0, Math.min(1, Number(lastSidePx)));
+    const settlePx = correctedSettlePxForOutcomeTrace(traceLike, side);
+    if (!Number.isFinite(Number(settlePx))) return sess;
     const grossPnlUsd = Number(((settlePx - entryPx) * remainingShares).toFixed(10));
     const synthLane = {
       side,
@@ -32400,6 +32399,12 @@ function lastTraceSidePxForCorrectedAccounting(traceLike: any, sideLike: any): n
   }
 }
 
+function correctedSettlePxForOutcomeTrace(traceLike: any, sideLike: any): number | null {
+  const lastSidePx = lastTraceSidePxForCorrectedAccounting(traceLike, sideLike);
+  if (!Number.isFinite(Number(lastSidePx))) return null;
+  return Number(lastSidePx) > 0.5 ? 1 : 0;
+}
+
 function buildCorrectedSessionAccountingFromCompact(sessionLike: any, compact: any, traceLike: any): any | null {
   try {
     if (!compact || typeof compact !== "object") return null;
@@ -32490,9 +32495,8 @@ function buildCorrectedSessionAccountingFromCompact(sessionLike: any, compact: a
       }
 
       if (remainingShares > 1e-6) {
-        const lastSidePx = lastTraceSidePxForCorrectedAccounting(traceLike, side);
-        if (Number.isFinite(Number(lastSidePx))) {
-          const settlePx = Math.max(0, Math.min(1, Number(lastSidePx)));
+        const settlePx = correctedSettlePxForOutcomeTrace(traceLike, side);
+        if (Number.isFinite(Number(settlePx))) {
           const settleGross = (Number(settlePx) - Number(entryPx)) * remainingShares;
           settleNetPnlUsd += settleGross;
           correctedGrossPnlUsd += settleGross;
@@ -32640,9 +32644,8 @@ function buildCorrectedSessionAccountingFromEvents(
         correctedBits.add("projected_exit_fill");
       }
       if (remainingShares > 1e-6) {
-        const lastSidePx = lastTraceSidePxForCorrectedAccounting(traceLike, side);
-        if (Number.isFinite(Number(lastSidePx))) {
-          const settlePx = Number(lastSidePx) > 0.5 ? 1 : 0;
+        const settlePx = correctedSettlePxForOutcomeTrace(traceLike, side);
+        if (Number.isFinite(Number(settlePx))) {
           const settleGross = (Number(settlePx) - Number(entryPx)) * remainingShares;
           settleNetPnlUsd += settleGross;
           correctedGrossPnlUsd += settleGross;
