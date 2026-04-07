@@ -4104,7 +4104,8 @@
         min-height:620px;
         max-height:none;
       }
-      .mobileLiveHeroMount .mobileLiveFeedOverlay{
+      .mobileLiveHeroMount .mobileLiveFeedOverlay,
+      #mobileLiveTradeOverlay.mobileLiveFeedOverlay{
         --mobile-live-box-w:62px;
         --mobile-live-box-pad-y:3px;
         --mobile-live-box-pad-x:3px;
@@ -4126,8 +4127,9 @@
       .mobileLiveHeroMount .mobileLiveFeedOverlay.dragging{
         cursor:grabbing;
       }
-      .mobileLiveHeroMount .mobileLiveFeedOverlay.left{
-        --mobile-live-stack-h:176px;
+      .mobileLiveHeroMount .mobileLiveFeedOverlay.left,
+      #mobileLiveTradeOverlay.mobileLiveFeedOverlay.left{
+        --mobile-live-stack-h:220px;
         left:max(6px, calc(var(--safe-left) + 2px));
         right:auto;
         align-items:center;
@@ -4211,6 +4213,9 @@
       .mobileLiveFeedOverlayValue.trade{
         color:#eef3f9;
       }
+      .mobileLiveFeedOverlayValue.bet{
+        color:#f0d35b;
+      }
       .mobileLiveFeedOverlayValue.partial{
         color:#34d17b;
       }
@@ -4220,12 +4225,15 @@
       .mobileLiveFeedOverlayValue.exit.stop{
         color:#f05a74;
       }
-      .mobileLiveHeroMount .mobileLiveFeedOverlay.left > *:not(:last-child){
+      .mobileLiveHeroMount .mobileLiveFeedOverlay.left > *:not(:last-child),
+      #mobileLiveTradeOverlay.mobileLiveFeedOverlay.left > *:not(:last-child){
         border-bottom:1px solid rgba(255,255,255,.07);
       }
-      .mobileLiveHeroMount .mobileLiveFeedOverlay.left .mobileLiveFeedOverlayRow{
+      .mobileLiveHeroMount .mobileLiveFeedOverlay.left .mobileLiveFeedOverlayRow,
+      #mobileLiveTradeOverlay.mobileLiveFeedOverlay.left .mobileLiveFeedOverlayRow{
         width:100%;
         min-width:100%;
+        min-height:0;
         flex:1 1 0;
         display:flex;
         flex-direction:column;
@@ -4239,10 +4247,12 @@
         backdrop-filter:none;
         text-align:center;
       }
-      .mobileLiveHeroMount .mobileLiveFeedOverlay.left .mobileLiveFeedOverlayLabel{
+      .mobileLiveHeroMount .mobileLiveFeedOverlay.left .mobileLiveFeedOverlayLabel,
+      #mobileLiveTradeOverlay.mobileLiveFeedOverlay.left .mobileLiveFeedOverlayLabel{
         font-size:6px;
       }
-      .mobileLiveHeroMount .mobileLiveFeedOverlay.left .mobileLiveFeedOverlayValue{
+      .mobileLiveHeroMount .mobileLiveFeedOverlay.left .mobileLiveFeedOverlayValue,
+      #mobileLiveTradeOverlay.mobileLiveFeedOverlay.left .mobileLiveFeedOverlayValue{
         font-size:21px;
       }
       .mobileLiveHeroMount .mobileLiveFeedOverlay.right > *:not(:last-child){
@@ -4701,6 +4711,7 @@
         pointer-events:none;
       }
       .mobileHistoryImageCard{
+        position:relative;
         margin:0;
         border:1px solid rgba(255,255,255,.08);
         border-radius:18px;
@@ -4712,11 +4723,15 @@
         min-height:180px;
       }
       .mobileHistoryImageHead{
+        position:absolute;
+        top:12px;
+        left:12px;
+        right:12px;
+        z-index:2;
         display:flex;
         align-items:center;
         justify-content:space-between;
         gap:10px;
-        padding:10px 12px 8px;
       }
       .mobileHistoryImageTitle{
         color:#f0d35b;
@@ -4737,6 +4752,7 @@
         padding:6px 10px;
       }
       .mobileHistoryImageButton{
+        position:relative;
         display:block;
         width:100%;
         margin:0;
@@ -4747,10 +4763,81 @@
       .mobileHistoryImageEl{
         display:block;
         width:100%;
-        height:auto;
+        height:100%;
         aspect-ratio:16 / 9;
         object-fit:cover;
         background:#090a0c;
+      }
+      .mobileHistoryImageMeta{
+        position:absolute;
+        left:14px;
+        right:14px;
+        bottom:14px;
+        z-index:2;
+        display:flex;
+        flex-direction:row;
+        justify-content:center;
+        align-items:flex-end;
+        gap:10px;
+        text-align:center;
+        pointer-events:none;
+      }
+      .mobileHistoryImageMetaPanel{
+        max-width:unset;
+        padding:10px 12px;
+        border-radius:16px;
+        background:linear-gradient(180deg, rgba(7,8,10,.78), rgba(7,8,10,.58));
+        border:1px solid rgba(255,255,255,.08);
+        backdrop-filter:blur(10px);
+        -webkit-backdrop-filter:blur(10px);
+      }
+      .mobileHistoryImageMetaTime{
+        color:#eef3f9;
+        font-size:17px;
+        font-weight:900;
+        letter-spacing:-.03em;
+        line-height:1;
+      }
+      .mobileHistoryImageMetaSlug{
+        display:none;
+        color:#8f9aab;
+        font-size:10px;
+        font-weight:800;
+        line-height:1.2;
+        word-break:break-word;
+      }
+      .mobileHistoryImageMetaStats{
+        display:flex;
+        gap:10px;
+        flex-wrap:wrap;
+        justify-content:center;
+      }
+      .mobileHistoryImageMetaStat{
+        min-width:0;
+        padding:8px 10px;
+        border-radius:12px;
+        background:rgba(7,8,10,.72);
+        border:1px solid rgba(255,255,255,.08);
+      }
+      .mobileHistoryImageMetaLabel{
+        color:#8f9aab;
+        font-size:9px;
+        font-weight:900;
+        letter-spacing:.12em;
+        text-transform:uppercase;
+      }
+      .mobileHistoryImageMetaValue{
+        margin-top:4px;
+        color:#eef3f9;
+        font-size:15px;
+        font-weight:900;
+        line-height:1;
+      }
+      .mobileHistoryImageMetaValue.pos{
+        color:#53df96;
+      }
+      .mobileHistoryImageMetaValue.neg{
+        color:#ff7d7d;
       }
       .mobileHistoryImagePlaceholder{
         display:flex;
@@ -4826,6 +4913,74 @@
         font-weight:800;
         letter-spacing:.06em;
         text-transform:uppercase;
+      }
+      .mobileHistoryHeroViewerMeta{
+        position:absolute;
+        left:max(12px, calc(var(--safe-left) + 8px));
+        right:max(12px, calc(var(--safe-right) + 8px));
+        bottom:max(52px, calc(var(--safe-bottom) + 44px));
+        z-index:2;
+        display:flex;
+        justify-content:space-between;
+        align-items:flex-end;
+        gap:12px;
+        pointer-events:none;
+      }
+      .mobileHistoryHeroViewerMetaPanel{
+        max-width:min(34vw, 260px);
+        padding:12px 14px;
+        border-radius:18px;
+        background:linear-gradient(180deg, rgba(7,8,10,.82), rgba(7,8,10,.58));
+        border:1px solid rgba(255,255,255,.1);
+        backdrop-filter:blur(12px);
+        -webkit-backdrop-filter:blur(12px);
+      }
+      .mobileHistoryHeroViewerMetaTime{
+        color:#eef3f9;
+        font-size:32px;
+        font-weight:900;
+        letter-spacing:-.03em;
+        line-height:1;
+      }
+      .mobileHistoryHeroViewerMetaSlug{
+        display:none;
+        color:#8f9aab;
+        font-size:12px;
+        font-weight:800;
+        line-height:1.3;
+        word-break:break-word;
+      }
+      .mobileHistoryHeroViewerMetaStats{
+        display:flex;
+        gap:10px;
+        flex-wrap:wrap;
+        justify-content:flex-end;
+      }
+      .mobileHistoryHeroViewerMetaStat{
+        padding:10px 12px;
+        border-radius:14px;
+        background:rgba(7,8,10,.72);
+        border:1px solid rgba(255,255,255,.1);
+      }
+      .mobileHistoryHeroViewerMetaLabel{
+        color:#8f9aab;
+        font-size:10px;
+        font-weight:900;
+        letter-spacing:.12em;
+        text-transform:uppercase;
+      }
+      .mobileHistoryHeroViewerMetaValue{
+        margin-top:5px;
+        color:#eef3f9;
+        font-size:18px;
+        font-weight:900;
+        line-height:1;
+      }
+      .mobileHistoryHeroViewerMetaValue.pos{
+        color:#53df96;
+      }
+      .mobileHistoryHeroViewerMetaValue.neg{
+        color:#ff7d7d;
       }
       @media (orientation: portrait){
         .mobileHistoryHeroViewerStage{
@@ -5297,6 +5452,22 @@
     <button id="mobileHistoryHeroViewerClose" class="mobileHistoryHeroViewerClose" type="button" aria-label="Close expanded historical session card">×</button>
     <div class="mobileHistoryHeroViewerStage">
       <img id="mobileHistoryHeroViewerImg" class="mobileHistoryHeroViewerImg" alt="Expanded historical session card" />
+      <div id="mobileHistoryHeroViewerMeta" class="mobileHistoryHeroViewerMeta">
+        <div class="mobileHistoryHeroViewerMetaPanel">
+          <div id="mobileHistoryHeroViewerMetaTime" class="mobileHistoryHeroViewerMetaTime">—</div>
+          <div id="mobileHistoryHeroViewerMetaSlug" class="mobileHistoryHeroViewerMetaSlug">—</div>
+        </div>
+        <div class="mobileHistoryHeroViewerMetaStats">
+          <div class="mobileHistoryHeroViewerMetaStat">
+            <div class="mobileHistoryHeroViewerMetaLabel">Actual P/L</div>
+            <div id="mobileHistoryHeroViewerMetaPnl" class="mobileHistoryHeroViewerMetaValue">—</div>
+          </div>
+          <div class="mobileHistoryHeroViewerMetaStat">
+            <div class="mobileHistoryHeroViewerMetaLabel">Balance</div>
+            <div id="mobileHistoryHeroViewerMetaBalance" class="mobileHistoryHeroViewerMetaValue">—</div>
+          </div>
+        </div>
+      </div>
       <div id="mobileHistoryHeroViewerTitle" class="mobileHistoryHeroViewerTitle">Last Session</div>
     </div>
   </div>
@@ -5516,6 +5687,10 @@
           <div class="mobileLiveFeedOverlayRow">
             <span class="mobileLiveFeedOverlayLabel">TRADE</span>
             <span id="mobileLiveOverlayTrade" class="mobileLiveFeedOverlayValue trade">—</span>
+          </div>
+          <div class="mobileLiveFeedOverlayRow">
+            <span class="mobileLiveFeedOverlayLabel">BET</span>
+            <span id="mobileLiveOverlayBet" class="mobileLiveFeedOverlayValue bet">—</span>
           </div>
           <div class="mobileLiveFeedOverlayRow">
             <span class="mobileLiveFeedOverlayLabel">ENTRY</span>
@@ -7050,6 +7225,7 @@
   let mmxStartupHeavyHydrationScheduled = false;
   let mmxStartupHeavyHydrationDone = false;
   let mmxMobileLiveOverlayPositions = { trade: null, feed: null };
+  let mmxMobileLiveOverlayTradeHeightPx = 0;
   let mmxMobileLiveOverlayDragState = null;
   let mmxBootMinimalReady = false;
   let mmxBootDeferredWorkScheduled = false;
@@ -7238,7 +7414,7 @@
   const MMX_MOBILE_HISTORY_OVERLAY_WARM_DELAY_MS = 2000;
   function mmxMobileHistoryHeroImageUrl(slugLike, opts = {}){
     const slug = String(slugLike || "").trim();
-    const instanceId = String(opts?.instanceId || "").trim();
+    const instanceId = String(opts?.instanceId || opts?.heroRow?.instanceId || "").trim();
     const marketPrefix = String(opts?.marketPrefix || "").trim();
     const forceFresh = !!(opts && opts.forceFresh === true);
     if (!slug || !instanceId) return "";
@@ -7248,24 +7424,86 @@
     params.set("format", "jpeg");
     params.set("refresh", "1");
     params.set("cb", String(forceFresh ? Date.now() : `${slug}-tradefull-v1`));
-    return mmxOverlayWorkerApiUrl(`/api/v2/bots/${encodeURIComponent(instanceId)}/latest-session-card-image?${params.toString()}`);
+    return mmxDirectReadOnlyApiUrl(`/api/v2/bots/${encodeURIComponent(instanceId)}/latest-session-card-image?${params.toString()}`);
+  }
+  async function mmxFetchMobileHistorySessionsViaReadOnlyWorker(instanceIdLike, marketPrefixLike, forceFresh = false){
+    const instanceId = String(instanceIdLike || "").trim();
+    const marketPrefix = String(marketPrefixLike || "").trim();
+    const params = new URLSearchParams();
+    params.set("engine", "paper");
+    params.set("scope", "runs");
+    params.set("runs", "300");
+    params.set("includeTrace", "0");
+    params.set("maxSessions", "300");
+    params.set("global", "1");
+    if (instanceId) params.set("instanceId", instanceId);
+    if (marketPrefix) params.set("marketPrefix", marketPrefix);
+    if (forceFresh) params.set("refresh", "1");
+    params.set("cb", String(forceFresh ? Date.now() : `${instanceId || "global"}|${marketPrefix || "all"}|mobile-history-v1`));
+    const payload = await mmxFetchReadOnlyJsonViaWorker(`/api/session-history?${params.toString()}`, {
+      timeoutMs: forceFresh ? 14000 : 9000,
+    });
+    return Array.isArray(payload?.sessions) ? payload.sessions : [];
+  }
+  async function mmxFetchMobileHistoryExactSessionViaReadOnlyWorker(instanceIdLike, slugLike, forceFresh = false){
+    const instanceId = String(instanceIdLike || "").trim();
+    const slug = String(slugLike || "").trim();
+    if (!slug) return null;
+    if (instanceId) {
+      const continuityParams = new URLSearchParams();
+      continuityParams.set("includeTrace", "1");
+      continuityParams.set("maxSessions", "24");
+      if (forceFresh) continuityParams.set("refresh", "1");
+      continuityParams.set("cb", String(forceFresh ? Date.now() : `${instanceId}|${slug}|mobile-history-hero-continuity-v1`));
+      try {
+        const continuityPayload = await mmxFetchReadOnlyJsonViaWorker(
+          `/api/v2/bots/${encodeURIComponent(instanceId)}/continuity-history?${continuityParams.toString()}`,
+          { timeoutMs: forceFresh ? 14000 : 9000 }
+        );
+        const continuitySessions = Array.isArray(continuityPayload?.sessions) ? continuityPayload.sessions : [];
+        const exactContinuityRow = continuitySessions.find((row) => String(row?.slug || "").trim() === slug) || null;
+        if (exactContinuityRow) return exactContinuityRow;
+      } catch {}
+    }
+    const params = new URLSearchParams();
+    params.set("engine", "paper");
+    params.set("scope", "runs");
+    params.set("runs", "50");
+    params.set("includeTrace", "1");
+    params.set("maxSessions", "8");
+    params.set("marketSlug", slug);
+    if (instanceId) params.set("instanceId", instanceId);
+    if (forceFresh) params.set("refresh", "1");
+    params.set("cb", String(forceFresh ? Date.now() : `${instanceId || "global"}|${slug}|mobile-history-hero-v1`));
+    const payload = await mmxFetchReadOnlyJsonViaWorker(`/api/session-history?${params.toString()}`, {
+      timeoutMs: forceFresh ? 14000 : 9000,
+    });
+    const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+    return sessions.find((row) => String(row?.slug || "").trim() === slug) || null;
+  }
+  function mmxMobileHistoryRowHasTraceVisual(rowLike){
+    const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+    if (!row) return false;
+    if (row?.trace && typeof row.trace === "object" && !Array.isArray(row.trace) && Array.isArray(row.trace?.xMs) && row.trace.xMs.length >= 2) {
+      return true;
+    }
+    if (Array.isArray(row.trace) && row.trace.length >= 2) return true;
+    if (Array.isArray(row.sidePaths) && row.sidePaths.some((pathLike) => Array.isArray(pathLike?.points) && pathLike.points.length >= 2)) return true;
+    if (Array.isArray(row.lanes) && row.lanes.some((laneLike) => Array.isArray(laneLike?.points) && laneLike.points.length >= 2)) return true;
+    return Number.isFinite(Number(row.entryPx)) && Number.isFinite(Number(row.exitPx));
   }
   function mmxResolveMobileHistoryHeroMeta(rowsLike, opts = {}){
     const rows = Array.isArray(rowsLike) ? rowsLike : [];
     const heroRow =
-      rows.find((row) =>
-        row &&
-        row.noTrade !== true &&
-        Array.isArray(row.lanes) &&
-        row.lanes.length > 0
-      ) ||
+      rows.find((row) => row && row.noTrade !== true && mmxMobileHistoryRowHasTraceVisual(row)) ||
+      rows.find((row) => row && mmxMobileHistoryRowHasTraceVisual(row)) ||
       rows[0] ||
       null;
     const heroSlug = String(heroRow?.slug || "").trim();
     return {
       heroRow,
       heroSlug,
-      heroImageUrl: heroSlug ? mmxMobileHistoryHeroImageUrl(heroSlug, opts) : "",
+      heroImageUrl: heroSlug ? mmxMobileHistoryHeroImageUrl(heroSlug, { ...(opts || {}), heroRow }) : "",
     };
   }
   function mmxMobileHistoryOverlayFormatTime(rowLike){
@@ -7293,10 +7531,314 @@
     if (!Number.isFinite(value)) return "neu";
     return value > 0 ? "pos" : (value < 0 ? "neg" : "neu");
   }
+  function mmxMobileHistoryOverlayResolvedPnlUsd(rowLike){
+    const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+    const corrected = Number(row?.correctedPnlUsd);
+    if (Number.isFinite(corrected)) return corrected;
+    const pnl = Number(row?.pnlUsd);
+    if (Number.isFinite(pnl)) return pnl;
+    const actual = Number(row?.actualPnlUsd);
+    if (Number.isFinite(actual)) return actual;
+    return NaN;
+  }
   function mmxMobileHistoryOverlayUsd(valueLike){
     const value = Number(valueLike);
     if (!Number.isFinite(value)) return "—";
     return `${value >= 0 ? "+" : "-"}$${Math.abs(value).toFixed(2)}`;
+  }
+  function mmxMobileHistoryHeroOverlayMeta(rowLike, slugLike){
+    const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+    const slug = String(slugLike || row?.slug || "").trim();
+    const timeText = mmxMobileHistoryOverlayFormatTime(row);
+    const pnlValue = mmxMobileHistoryOverlayResolvedPnlUsd(row);
+    const balValue = Number(row?.balanceUsd ?? row?.continuityBalanceUsd);
+    return {
+      slug,
+      timeText,
+      pnlText: mmxMobileHistoryOverlayUsd(pnlValue),
+      pnlTone: mmxMobileHistoryOverlayToneClass(pnlValue),
+      balText: mmxMobileHistoryOverlayUsd(balValue),
+      balTone: mmxMobileHistoryOverlayToneClass(balValue),
+    };
+  }
+  function mmxMobileHistoryFallbackTracePoints(rowLike){
+    const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+    const traceObj = row?.trace && typeof row.trace === "object" && !Array.isArray(row.trace) ? row.trace : null;
+    if (traceObj && Array.isArray(traceObj?.xMs) && traceObj.xMs.length >= 2) {
+      const sideHint = String(
+        row?.side ||
+        row?.sidePaths?.[0]?.side ||
+        row?.lanes?.find((laneLike) => String(laneLike?.side || "").trim())?.side ||
+        ""
+      ).trim().toUpperCase();
+      const upSeries = Array.isArray(traceObj?.up) ? traceObj.up : [];
+      const downSeries = Array.isArray(traceObj?.down) ? traceObj.down : [];
+      let chosenSeries = [];
+      if (sideHint === "UP") chosenSeries = upSeries;
+      else if (sideHint === "DOWN") chosenSeries = downSeries;
+      else {
+        const entryPx = Number(row?.entryPx);
+        const firstUp = Number(upSeries.find((v) => Number.isFinite(Number(v))));
+        const firstDown = Number(downSeries.find((v) => Number.isFinite(Number(v))));
+        if (Number.isFinite(entryPx) && Number.isFinite(firstUp) && Number.isFinite(firstDown)) {
+          chosenSeries = Math.abs(entryPx - firstUp) <= Math.abs(entryPx - firstDown) ? upSeries : downSeries;
+        } else {
+          chosenSeries = upSeries.length >= downSeries.length ? upSeries : downSeries;
+        }
+      }
+      const objectTracePoints = traceObj.xMs
+        .map((tsLike, idx) => {
+          const tsMs = Number(tsLike);
+          const px = Number(chosenSeries[idx]);
+          if (!Number.isFinite(tsMs) || !Number.isFinite(px)) return null;
+          return { tsMs, px };
+        })
+        .filter(Boolean);
+      if (objectTracePoints.length >= 2) return objectTracePoints;
+    }
+    const rawTrace = Array.isArray(row?.trace) ? row.trace : [];
+    const tracePoints = rawTrace
+      .map((pointLike) => {
+        const tsMs = Number(pointLike?.tsMs ?? pointLike?.t ?? pointLike?.timeMs ?? 0);
+        const px = Number(pointLike?.px ?? pointLike?.price ?? pointLike?.y ?? pointLike?.value);
+        if (!Number.isFinite(tsMs) || !Number.isFinite(px)) return null;
+        return { tsMs, px };
+      })
+      .filter(Boolean);
+    if (tracePoints.length >= 2) return tracePoints;
+    const sidePaths = Array.isArray(row?.sidePaths) ? row.sidePaths : [];
+    const sidePathPoints = sidePaths
+      .flatMap((pathLike) => Array.isArray(pathLike?.points) ? pathLike.points : [])
+      .map((pointLike) => {
+        const tsMs = Number(pointLike?.tsMs ?? pointLike?.t ?? 0);
+        const px = Number(pointLike?.px ?? pointLike?.price ?? 0);
+        if (!Number.isFinite(tsMs) || !Number.isFinite(px)) return null;
+        return { tsMs, px };
+      })
+      .filter(Boolean);
+    if (sidePathPoints.length >= 2) return sidePathPoints;
+    const lanes = Array.isArray(row?.lanes) ? row.lanes : [];
+    const lanePoints = lanes
+      .flatMap((laneLike) => Array.isArray(laneLike?.points) ? laneLike.points : [])
+      .map((pointLike) => {
+        const tsMs = Number(pointLike?.tsMs ?? pointLike?.t ?? 0);
+        const px = Number(pointLike?.px ?? pointLike?.price ?? 0);
+        if (!Number.isFinite(tsMs) || !Number.isFinite(px)) return null;
+        return { tsMs, px };
+      })
+      .filter(Boolean);
+    if (lanePoints.length >= 2) return lanePoints;
+    const startTsMs = Number(row?.startMs ?? row?.entryTsMs ?? row?.attemptTsMs ?? row?.firstTsMs ?? 0);
+    const endTsMs = Number(row?.endMs ?? row?.exitTsMs ?? row?.lastTsMs ?? (startTsMs + 300000));
+    const entryPx = Number(row?.entryPx);
+    const exitPx = Number(row?.exitPx);
+    if (Number.isFinite(startTsMs) && Number.isFinite(endTsMs) && Number.isFinite(entryPx) && Number.isFinite(exitPx)) {
+      return [
+        { tsMs: startTsMs, px: entryPx },
+        { tsMs: endTsMs, px: exitPx },
+      ];
+    }
+    return [];
+  }
+  function mmxMobileHistoryFallbackObjectTraceSeries(rowLike){
+    const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+    const traceObj = row?.trace && typeof row.trace === "object" && !Array.isArray(row.trace) ? row.trace : null;
+    if (!(traceObj && Array.isArray(traceObj?.xMs) && traceObj.xMs.length >= 2)) return [];
+    const buildSeries = (valuesLike, color) => {
+      const values = Array.isArray(valuesLike) ? valuesLike : [];
+      const points = traceObj.xMs
+        .map((tsLike, idx) => {
+          const tsMs = Number(tsLike);
+          const px = Number(values[idx]);
+          if (!Number.isFinite(tsMs) || !Number.isFinite(px)) return null;
+          return { tsMs, px };
+        })
+        .filter(Boolean);
+      return points.length >= 2 ? { color, points } : null;
+    };
+    return [
+      buildSeries(traceObj?.up, "#53df96"),
+      buildSeries(traceObj?.down, "#ff7d7d"),
+    ].filter(Boolean);
+  }
+  function mmxMobileHistoryFallbackTradeSeries(rowLike){
+    const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+    const makeEvent = (tsMsLike, pxLike, eventType, sideLike, pnlLike = null) => {
+      const tsMs = Number(tsMsLike);
+      const px = Number(pxLike);
+      if (!(Number.isFinite(tsMs) && Number.isFinite(px))) return null;
+      return {
+        tsMs,
+        px,
+        eventType: String(eventType || "").toLowerCase(),
+        side: String(sideLike || "").toUpperCase(),
+        pnlUsd: Number.isFinite(Number(pnlLike)) ? Number(pnlLike) : null,
+      };
+    };
+    const colorForSide = (sideLike) => String(sideLike || "").toUpperCase() === "DOWN" ? "#ff9f5c" : "#46acff";
+    const sidePaths = Array.isArray(row?.sidePaths) ? row.sidePaths : [];
+    const builtFromSidePaths = sidePaths.map((sp) => {
+      const side = String(sp?.side || "").toUpperCase();
+      const points = (Array.isArray(sp?.points) ? sp.points : []).map((pt) => makeEvent(
+        pt?.tsMs,
+        pt?.px,
+        pt?.partial ? "partial_exit" : (pt?.exitType || pt?.kind || pt?.action || "event"),
+        side,
+        pt?.pnlUsd ?? pt?.realizedPnlUsd
+      )).filter(Boolean);
+      if (points.length >= 2) return { side, color: colorForSide(side), points };
+      return null;
+    }).filter(Boolean);
+    if (builtFromSidePaths.length) return builtFromSidePaths;
+    const lanes = Array.isArray(row?.lanes) ? row.lanes : [];
+    const laneGroups = new Map();
+    for (const ln of lanes) {
+      const side = String(ln?.side || "").toUpperCase();
+      const entryTsMs = Number(ln?.entryTsMs);
+      const entryPx = Number(ln?.entryPx);
+      if (!(side && Number.isFinite(entryTsMs) && Number.isFinite(entryPx))) continue;
+      const key = `${side}|${entryTsMs}|${entryPx}`;
+      if (!laneGroups.has(key)) {
+        laneGroups.set(key, {
+          side,
+          color: colorForSide(side),
+          entry: makeEvent(entryTsMs, entryPx, "entry", side, 0),
+          exits: [],
+        });
+      }
+      const exitType = String(ln?.exitType || "").toLowerCase();
+      const exitEvent = makeEvent(
+        ln?.exitTsMs,
+        ln?.exitPx,
+        ln?.partial ? "partial_exit" : (exitType === "tp" ? "tp" : (exitType === "sl" || exitType === "stop" ? "sl" : "final_exit")),
+        side,
+        ln?.pnlUsd
+      );
+      if (exitEvent) laneGroups.get(key).exits.push(exitEvent);
+    }
+    const builtFromLanes = [...laneGroups.values()].map((group) => {
+      const exitPoints = group.exits
+        .slice()
+        .sort((a, b) => Number(a.tsMs) - Number(b.tsMs));
+      const points = [group.entry].concat(exitPoints).filter(Boolean);
+      if (points.length >= 2) return { side: group.side, color: group.color, points };
+      return null;
+    }).filter(Boolean);
+    return builtFromLanes;
+  }
+  function mmxMobileHistoryFallbackTraceSvg(rowLike){
+    const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+    const chartLeft = 54;
+    const chartTop = 72;
+    const chartWidth = 1092;
+    const chartHeight = 536;
+    const flatY = chartTop + chartHeight * 0.58;
+    const toSvgPath = (pts) => pts.map((pt, idx) => `${idx === 0 ? "M" : "L"} ${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`).join(" ");
+    const objectSeries = mmxMobileHistoryFallbackObjectTraceSeries(row);
+    if (objectSeries.length) {
+      const allPoints = objectSeries.flatMap((series) => series.points);
+      const tradeSeries = mmxMobileHistoryFallbackTradeSeries(row);
+      const tradePoints = tradeSeries.flatMap((series) => series.points);
+      const minTs = Math.min(...allPoints.map((pt) => Number(pt.tsMs)));
+      const maxTs = Math.max(...allPoints.map((pt) => Number(pt.tsMs)));
+      const minPx = Math.min(...allPoints.map((pt) => Number(pt.px)));
+      const maxPx = Math.max(...allPoints.map((pt) => Number(pt.px)));
+      const tsSpan = Math.max(1, maxTs - minTs);
+      const pxSpan = Math.max(0.0001, maxPx - minPx);
+      const marketSvg = objectSeries.map((series, idx) => {
+        const svgPoints = series.points.map((pt) => ({
+          x: chartLeft + ((Number(pt.tsMs) - minTs) / tsSpan) * chartWidth,
+          y: chartTop + chartHeight - ((Number(pt.px) - minPx) / pxSpan) * chartHeight,
+        }));
+        const linePath = toSvgPath(svgPoints);
+        const areaPath = `${linePath} L ${(chartLeft + chartWidth).toFixed(1)} ${(chartTop + chartHeight).toFixed(1)} L ${chartLeft.toFixed(1)} ${(chartTop + chartHeight).toFixed(1)} Z`;
+        const areaFill = series.color === "#53df96" ? "rgba(83,223,150,0.12)" : "rgba(255,125,125,0.08)";
+        return `
+          <path d="${areaPath}" fill="${areaFill}"/>
+          <path d="${linePath}" fill="none" stroke="${series.color}" stroke-width="${idx === 0 ? 4 : 3.5}" stroke-linecap="round" stroke-linejoin="round"/>
+        `.trim();
+      }).join("");
+      const eventColor = (eventType) => {
+        const ev = String(eventType || "").toLowerCase();
+        if (ev === "entry") return "#46acff";
+        if (ev === "partial_exit") return "#3de5ff";
+        if (ev === "tp") return "#58d26b";
+        if (ev === "sl") return "#ff6b7a";
+        return "#ffffff";
+      };
+      const eventRadius = (eventType) => {
+        const ev = String(eventType || "").toLowerCase();
+        if (ev === "entry") return 8;
+        if (ev === "partial_exit") return 7;
+        return 6;
+      };
+      const tradeSvg = tradeSeries.map((series) => {
+        const svgPoints = series.points.map((pt) => ({
+          ...pt,
+          x: chartLeft + ((Number(pt.tsMs) - minTs) / tsSpan) * chartWidth,
+          y: chartTop + chartHeight - ((Number(pt.px) - minPx) / pxSpan) * chartHeight,
+        }));
+        const linePath = toSvgPath(svgPoints);
+        const markers = svgPoints.map((pt) => `
+          <circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${eventRadius(pt.eventType)}" fill="${eventColor(pt.eventType)}" stroke="#ffffff" stroke-width="1.5"/>
+        `.trim()).join("");
+        return `
+          <path d="${linePath}" fill="none" stroke="${series.color}" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="0"/>
+          ${markers}
+        `.trim();
+      }).join("");
+      return `${marketSvg}${tradeSvg}`;
+    }
+    const points = mmxMobileHistoryFallbackTracePoints(row);
+    if (!points.length) {
+      return `
+        <line x1="${chartLeft}" y1="${flatY.toFixed(1)}" x2="${(chartLeft + chartWidth).toFixed(1)}" y2="${flatY.toFixed(1)}" stroke="rgba(240,211,91,0.22)" stroke-width="10" stroke-linecap="round"/>
+        <line x1="${chartLeft}" y1="${flatY.toFixed(1)}" x2="${(chartLeft + chartWidth).toFixed(1)}" y2="${flatY.toFixed(1)}" stroke="#f0d35b" stroke-width="4" stroke-linecap="round"/>
+      `.trim();
+    }
+    const sorted = points
+      .slice()
+      .sort((a, b) => Number(a.tsMs) - Number(b.tsMs));
+    const minTs = Math.min(...sorted.map((pt) => Number(pt.tsMs)));
+    const maxTs = Math.max(...sorted.map((pt) => Number(pt.tsMs)));
+    const minPx = Math.min(...sorted.map((pt) => Number(pt.px)));
+    const maxPx = Math.max(...sorted.map((pt) => Number(pt.px)));
+    const tsSpan = Math.max(1, maxTs - minTs);
+    const pxSpan = Math.max(0.0001, maxPx - minPx);
+    const svgPoints = sorted.map((pt) => {
+      const x = chartLeft + ((Number(pt.tsMs) - minTs) / tsSpan) * chartWidth;
+      const y = chartTop + chartHeight - ((Number(pt.px) - minPx) / pxSpan) * chartHeight;
+      return { x, y };
+    });
+    const linePath = toSvgPath(svgPoints);
+    const areaPath = `${linePath} L ${(chartLeft + chartWidth).toFixed(1)} ${(chartTop + chartHeight).toFixed(1)} L ${chartLeft.toFixed(1)} ${(chartTop + chartHeight).toFixed(1)} Z`;
+    const stroke = Number(mmxMobileHistoryOverlayResolvedPnlUsd(row)) < 0 ? "#ff7d7d" : "#61e39b";
+    return `
+      <path d="${areaPath}" fill="rgba(97,227,155,0.12)"/>
+      <path d="${linePath}" fill="none" stroke="${stroke}" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="${svgPoints[0].x.toFixed(1)}" cy="${svgPoints[0].y.toFixed(1)}" r="6" fill="${stroke}"/>
+      <circle cx="${svgPoints[svgPoints.length - 1].x.toFixed(1)}" cy="${svgPoints[svgPoints.length - 1].y.toFixed(1)}" r="7" fill="${stroke}"/>
+    `.trim();
+  }
+  function mmxMobileHistoryFallbackSvgDataUrl(rowLike, slugLike){
+    const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+    const traceSvg = mmxMobileHistoryFallbackTraceSvg(row);
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680">
+        <defs>
+          <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#14171d"/>
+            <stop offset="100%" stop-color="#0a0d12"/>
+          </linearGradient>
+        </defs>
+        <rect width="1200" height="680" rx="36" fill="url(#bg)"/>
+        <rect x="22" y="22" width="1156" height="636" rx="30" fill="none" stroke="rgba(255,255,255,0.08)"/>
+        <rect x="54" y="72" width="1092" height="536" rx="32" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.06)"/>
+        <line x1="54" y1="340" x2="1146" y2="340" stroke="rgba(255,255,255,0.06)" stroke-width="2"/>
+        ${traceSvg}
+      </svg>
+    `.trim();
+    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
   }
   function mmxRenderMobileHistoryOverlayList(rowsLike){
     const rows = Array.isArray(rowsLike) ? rowsLike : [];
@@ -7325,7 +7867,7 @@
       if (Number.isFinite(authoritativeBalanceUsd)) {
         runningBalanceUsd = authoritativeBalanceUsd;
       } else {
-        const pnlUsd = Number(row?.correctedPnlUsd ?? row?.actualPnlUsd ?? row?.pnlUsd);
+        const pnlUsd = mmxMobileHistoryOverlayResolvedPnlUsd(row);
         if (!row?.excludeFromPnl && Number.isFinite(pnlUsd)) runningBalanceUsd += pnlUsd;
       }
       if (slug) displayBalanceBySlug.set(slug, Number(runningBalanceUsd.toFixed(4)));
@@ -7340,7 +7882,7 @@
       .slice(0, 100)
       .map((row) => {
         const slug = String(row?.slug || "").trim();
-        const pnlUsd = Number(row?.correctedPnlUsd ?? row?.actualPnlUsd ?? row?.pnlUsd);
+        const pnlUsd = mmxMobileHistoryOverlayResolvedPnlUsd(row);
         const authoritativeBalanceUsd = Number(row?.balanceUsd ?? row?.continuityBalanceUsd);
         const balanceUsd = Number.isFinite(authoritativeBalanceUsd)
           ? authoritativeBalanceUsd
@@ -7382,9 +7924,12 @@
   function mmxRenderMobileHistoryHeroImage(payloadLike = {}, opts = {}){
     const heroSlug = String(payloadLike?.heroSlug || payloadLike?.heroRow?.slug || "").trim();
     const heroImageUrl = String(payloadLike?.heroImageUrl || "").trim();
+    const fallbackImageUrl = heroSlug ? mmxMobileHistoryFallbackSvgDataUrl(payloadLike?.heroRow || null, heroSlug) : "";
+    const displayImageUrl = fallbackImageUrl || heroImageUrl;
+    const meta = mmxMobileHistoryHeroOverlayMeta(payloadLike?.heroRow || null, heroSlug);
     const loading = opts && opts.loading === true;
     const message = String(opts?.message || "").trim();
-    if (!heroSlug || !heroImageUrl) {
+    if (!heroSlug || (!heroImageUrl && !fallbackImageUrl)) {
       return `
         <div class="mobileHistoryImageCard isEmpty">
           <div class="mobileHistoryImageHead">
@@ -7395,13 +7940,29 @@
       `;
     }
     return `
-      <div class="mobileHistoryImageCard" data-history-hero-slug="${mmxCompareEsc(heroSlug)}" data-history-hero-img="${mmxCompareEsc(heroImageUrl)}">
+      <div class="mobileHistoryImageCard" data-history-hero-slug="${mmxCompareEsc(heroSlug)}" data-history-hero-img="${mmxCompareEsc(displayImageUrl)}" data-history-hero-time="${mmxCompareEsc(meta.timeText)}" data-history-hero-pnl="${mmxCompareEsc(meta.pnlText)}" data-history-hero-pnl-tone="${mmxCompareEsc(meta.pnlTone)}" data-history-hero-balance="${mmxCompareEsc(meta.balText)}" data-history-hero-balance-tone="${mmxCompareEsc(meta.balTone)}">
         <div class="mobileHistoryImageHead">
           <div class="mobileHistoryImageTitle">Last Session</div>
           <button type="button" class="mobileHistoryImageExpand" data-history-hero-expand="1" aria-label="Expand historical session card">Expand</button>
         </div>
         <button type="button" class="mobileHistoryImageButton" data-history-hero-expand="1" aria-label="Expand historical session card">
-          <img class="mobileHistoryImageEl" src="${mmxCompareEsc(heroImageUrl)}" alt="${mmxCompareEsc(`Historical session card for ${heroSlug}`)}" loading="${loading ? "lazy" : "eager"}" decoding="async" fetchpriority="low">
+          <img class="mobileHistoryImageEl" src="${mmxCompareEsc(displayImageUrl)}" alt="${mmxCompareEsc(`Historical session card for ${heroSlug}`)}" loading="${loading ? "lazy" : "eager"}" decoding="async" fetchpriority="low">
+          <div class="mobileHistoryImageMeta">
+            <div class="mobileHistoryImageMetaPanel">
+              <div class="mobileHistoryImageMetaTime">${mmxCompareEsc(meta.timeText)}</div>
+              <div class="mobileHistoryImageMetaSlug">${mmxCompareEsc(heroSlug)}</div>
+            </div>
+            <div class="mobileHistoryImageMetaStats">
+              <div class="mobileHistoryImageMetaStat">
+                <div class="mobileHistoryImageMetaLabel">Actual P/L</div>
+                <div class="mobileHistoryImageMetaValue ${mmxCompareEsc(meta.pnlTone)}">${mmxCompareEsc(meta.pnlText)}</div>
+              </div>
+              <div class="mobileHistoryImageMetaStat">
+                <div class="mobileHistoryImageMetaLabel">Balance</div>
+                <div class="mobileHistoryImageMetaValue ${mmxCompareEsc(meta.balTone)}">${mmxCompareEsc(meta.balText)}</div>
+              </div>
+            </div>
+          </div>
         </button>
       </div>
     `;
@@ -7448,16 +8009,7 @@
       return cached;
     }
     const listRows = await (async () => {
-      if (!wantedInstance) return [];
-      const params = new URLSearchParams();
-      if (marketPrefix) params.set("marketPrefix", marketPrefix);
-      params.set("limit", "100");
-      if (forceFresh) params.set("refresh", "1");
-      const payload = await mmxFetchMobileOverlayJsonViaWorker(
-        `/api/v2/bots/${encodeURIComponent(wantedInstance)}/last-session-history?${params.toString()}`,
-        { timeoutMs: forceFresh ? 14000 : 9000 }
-      );
-      return Array.isArray(payload?.sessions) ? payload.sessions : [];
+      return await mmxFetchMobileHistorySessionsViaReadOnlyWorker(wantedInstance, marketPrefix, forceFresh);
     })();
     const filteredRows = listRows
       .filter((row) => {
@@ -7474,19 +8026,30 @@
         const ta = Number(a?.exitTsMs ?? a?.endMs ?? a?.entryTsMs ?? a?.attemptTsMs ?? a?.startMs ?? 0);
         const tb = Number(b?.exitTsMs ?? b?.endMs ?? b?.entryTsMs ?? b?.attemptTsMs ?? b?.startMs ?? 0);
         return tb - ta;
-      })
-      .slice(0, 100);
+      });
     const heroMeta = mmxResolveMobileHistoryHeroMeta(filteredRows, { forceFresh, instanceId: wantedInstance, marketPrefix });
+    let heroRow = heroMeta.heroRow;
+    if (heroRow && !mmxMobileHistoryRowHasTraceVisual(heroRow)) {
+      try {
+        const exactHeroRow = await mmxFetchMobileHistoryExactSessionViaReadOnlyWorker(wantedInstance, heroMeta.heroSlug, forceFresh);
+        if (exactHeroRow) {
+          heroRow = { ...heroRow, ...exactHeroRow };
+        }
+      } catch {}
+    }
+    const displayRows = filteredRows.slice(0, 100);
     const next = {
       key: cacheKey,
       wantedInstance,
       marketPrefix,
-      heroRow: heroMeta.heroRow,
-      heroSlug: heroMeta.heroSlug,
-      heroImageUrl: heroMeta.heroImageUrl,
-      listRows: filteredRows,
+      heroRow,
+      heroSlug: String(heroRow?.slug || heroMeta.heroSlug || "").trim(),
+      heroImageUrl: String(heroRow?.slug || heroMeta.heroSlug || "").trim()
+        ? mmxMobileHistoryHeroImageUrl(String(heroRow?.slug || heroMeta.heroSlug || "").trim(), { forceFresh, instanceId: wantedInstance, marketPrefix, heroRow })
+        : "",
+      listRows: displayRows,
     };
-    if (heroMeta.heroImageUrl || filteredRows.length) {
+    if (heroMeta.heroImageUrl || displayRows.length) {
       mmxMobileHistoryOverlayCache.set(cacheKey, next);
     }
     return next;
@@ -7540,18 +8103,7 @@
         listRows: cached.listRows.slice(),
       };
     }
-    if (!wantedInstance) {
-      return { key: cacheKey, wantedInstance, marketPrefix, heroRow: null, heroSlug: "", heroImageUrl: "", listRows: [] };
-    }
-    const params = new URLSearchParams();
-    if (marketPrefix) params.set("marketPrefix", marketPrefix);
-    params.set("limit", "100");
-    if (forceFresh) params.set("refresh", "1");
-    const payload = await mmxFetchMobileOverlayJsonViaWorker(
-      `/api/v2/bots/${encodeURIComponent(wantedInstance)}/last-session-history?${params.toString()}`,
-      { timeoutMs: forceFresh ? 14000 : 9000 }
-    );
-    const listRows = (Array.isArray(payload?.sessions) ? payload.sessions : [])
+    const listRows = (await mmxFetchMobileHistorySessionsViaReadOnlyWorker(wantedInstance, marketPrefix, forceFresh))
       .filter((row) => {
         const slug = String(row?.slug || "").trim().toLowerCase();
         if (!slug) return false;
@@ -7782,6 +8334,10 @@
     const viewer = $("mobileHistoryHeroViewer");
     const img = $("mobileHistoryHeroViewerImg");
     const title = $("mobileHistoryHeroViewerTitle");
+    const timeEl = $("mobileHistoryHeroViewerMetaTime");
+    const slugEl = $("mobileHistoryHeroViewerMetaSlug");
+    const pnlEl = $("mobileHistoryHeroViewerMetaPnl");
+    const balEl = $("mobileHistoryHeroViewerMetaBalance");
     if (!(viewer instanceof HTMLElement) || !(img instanceof HTMLImageElement)) return;
     const next = !!open;
     viewer.hidden = !next;
@@ -7790,14 +8346,49 @@
     if (next) {
       const src = String(opts?.src || img.getAttribute("src") || "").trim();
       const slug = String(opts?.slug || viewer.dataset.slug || "").trim();
+      const timeText = String(opts?.timeText || viewer.dataset.timeText || "—").trim() || "—";
+      const pnlText = String(opts?.pnlText || viewer.dataset.pnlText || "—").trim() || "—";
+      const pnlTone = String(opts?.pnlTone || viewer.dataset.pnlTone || "").trim();
+      const balText = String(opts?.balText || viewer.dataset.balText || "—").trim() || "—";
+      const balTone = String(opts?.balTone || viewer.dataset.balTone || "").trim();
       if (src) img.src = src;
       if (slug) viewer.dataset.slug = slug;
+      viewer.dataset.timeText = timeText;
+      viewer.dataset.pnlText = pnlText;
+      viewer.dataset.pnlTone = pnlTone;
+      viewer.dataset.balText = balText;
+      viewer.dataset.balTone = balTone;
       img.alt = slug ? `Expanded historical session card for ${slug}` : "Expanded historical session card";
       if (title instanceof HTMLElement) title.textContent = slug ? `Last Session · ${slug}` : "Last Session";
+      if (timeEl instanceof HTMLElement) timeEl.textContent = timeText;
+      if (slugEl instanceof HTMLElement) slugEl.textContent = slug || "—";
+      if (pnlEl instanceof HTMLElement) {
+        pnlEl.textContent = pnlText;
+        pnlEl.className = `mobileHistoryHeroViewerMetaValue ${pnlTone}`.trim();
+      }
+      if (balEl instanceof HTMLElement) {
+        balEl.textContent = balText;
+        balEl.className = `mobileHistoryHeroViewerMetaValue ${balTone}`.trim();
+      }
       return;
     }
     viewer.dataset.slug = "";
+    viewer.dataset.timeText = "";
+    viewer.dataset.pnlText = "";
+    viewer.dataset.pnlTone = "";
+    viewer.dataset.balText = "";
+    viewer.dataset.balTone = "";
     if (title instanceof HTMLElement) title.textContent = "Last Session";
+    if (timeEl instanceof HTMLElement) timeEl.textContent = "—";
+    if (slugEl instanceof HTMLElement) slugEl.textContent = "—";
+    if (pnlEl instanceof HTMLElement) {
+      pnlEl.textContent = "—";
+      pnlEl.className = "mobileHistoryHeroViewerMetaValue";
+    }
+    if (balEl instanceof HTMLElement) {
+      balEl.textContent = "—";
+      balEl.className = "mobileHistoryHeroViewerMetaValue";
+    }
   }
   function mmxMarkBootMinimalReady(){
     mmxBootMinimalReady = true;
@@ -7934,8 +8525,7 @@
     return Math.max(0, safeTop);
   }
   function mmxMobileStickyEquityGapPx(){
-    // Slight overlap so the shelf top edge shares the sticky summary bottom seam.
-    return -1;
+    return 0;
   }
   function mmxMobileEquityShelfHeightPx(){
     if (!mmxIsMobileViewport() || mmxMobileEquityCollapsed) return 0;
@@ -8001,7 +8591,7 @@
     el.style.top = `${next.y}px`;
     el.style.right = "auto";
     el.style.bottom = "auto";
-    el.style.transform = "none";
+    el.style.transform = key === "trade" ? "scale(.85)" : "none";
   }
   function mmxResetMobileLiveOverlayPositions(){
     if (!mmxIsMobileViewport()) return;
@@ -8044,12 +8634,25 @@
         el.style.transform = "";
       }
       mmxMobileLiveOverlayPositions = { trade: null, feed: null };
+      mmxMobileLiveOverlayTradeHeightPx = 0;
       return;
     }
-    if (forceDefault || !mmxMobileLiveOverlayPositions.trade || !mmxMobileLiveOverlayPositions.feed) {
+    const tradeHeightPx = Math.max(1, Number(tradeEl.offsetHeight || tradeEl.getBoundingClientRect?.().height || 0));
+    const tradeOverlayVisible =
+      document.body?.classList?.contains("mobileBootStage-values") ||
+      document.body?.classList?.contains("mobileBootStage-overlay") ||
+      !document.body?.classList?.contains("mobileBootStaged");
+    const tradeHeightChanged =
+      Number.isFinite(tradeHeightPx) &&
+      tradeHeightPx > 0 &&
+      Number(mmxMobileLiveOverlayTradeHeightPx || 0) > 0 &&
+      Math.abs(tradeHeightPx - Number(mmxMobileLiveOverlayTradeHeightPx || 0)) > 1;
+    if (forceDefault || tradeHeightChanged || !mmxMobileLiveOverlayPositions.trade || !mmxMobileLiveOverlayPositions.feed) {
+      if (tradeOverlayVisible) mmxMobileLiveOverlayTradeHeightPx = tradeHeightPx;
       mmxResetMobileLiveOverlayPositions();
       return;
     }
+    if (tradeOverlayVisible) mmxMobileLiveOverlayTradeHeightPx = tradeHeightPx;
     mmxSetMobileLiveOverlayPosition("trade", mmxMobileLiveOverlayPositions.trade);
     mmxSetMobileLiveOverlayPosition("feed", mmxMobileLiveOverlayPositions.feed);
   }
@@ -8097,6 +8700,7 @@
     const revealBtn = $("mobileEquityRevealBtn");
     const historySheet = $("mobileHistorySheet");
     const historyToggle = $("mobileHistorySheetToggle");
+    const stickyShell = $("mobileStickyShell");
     if (!mmxUseMobileAppShell()) {
       if (shelf instanceof HTMLElement) shelf.style.top = "";
       if (revealBtn instanceof HTMLElement) revealBtn.style.top = "";
@@ -8108,7 +8712,11 @@
       if (historyToggle instanceof HTMLElement) historyToggle.style.transform = "";
       return;
     }
-    const stickyBottom = mmxStickyTopOffsetPx() + mmxMobileStickyShellHeightPx();
+    const stickyRect = stickyShell instanceof HTMLElement ? stickyShell.getBoundingClientRect?.() : null;
+    const stickyBottom =
+      Number.isFinite(Number(stickyRect?.bottom)) && Number(stickyRect?.bottom) > 0
+        ? Math.ceil(Number(stickyRect.bottom))
+        : (mmxStickyTopOffsetPx() + mmxMobileStickyShellHeightPx());
     if (shelf instanceof HTMLElement) shelf.style.top = `${stickyBottom + mmxMobileStickyEquityGapPx()}px`;
     if (revealBtn instanceof HTMLElement) {
       revealBtn.style.top = `${Math.max(mmxStickyTopOffsetPx() + 6, stickyBottom - 1)}px`;
@@ -8469,7 +9077,7 @@
     }
     if (mmxMobileHistorySheetOpen && mmxUseMobileAppShell()) {
       setTimeout(() => {
-        void mmxPopulateMobileHistoryOverlay("sheet_open", { forceFresh: false });
+        void mmxPopulateMobileHistoryOverlay("sheet_open", { forceFresh: true });
       }, 0);
     }
   }
@@ -9223,9 +9831,14 @@
     if (!(host instanceof HTMLElement)) return;
     const src = String(host.getAttribute("data-history-hero-img") || "").trim();
     const slug = String(host.getAttribute("data-history-hero-slug") || "").trim();
+    const timeText = String(host.getAttribute("data-history-hero-time") || "").trim();
+    const pnlText = String(host.getAttribute("data-history-hero-pnl") || "").trim();
+    const pnlTone = String(host.getAttribute("data-history-hero-pnl-tone") || "").trim();
+    const balText = String(host.getAttribute("data-history-hero-balance") || "").trim();
+    const balTone = String(host.getAttribute("data-history-hero-balance-tone") || "").trim();
     if (!src) return;
     ev.preventDefault();
-    mmxSetMobileHistoryHeroViewerOpen(true, { src, slug });
+    mmxSetMobileHistoryHeroViewerOpen(true, { src, slug, timeText, pnlText, pnlTone, balText, balTone });
   });
   $("execToggle").onclick = () => {
     const container = $("execContainer");
@@ -13085,6 +13698,49 @@
     });
   }
 
+  function mmxCanonicalRunEquitySnapshot(rowsLike = null, botLike = null){
+    const bot = botLike && typeof botLike === "object"
+      ? botLike
+      : ((typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null);
+    const startBalanceUsd = mmxCompareStartBalanceUsd(bot);
+    const rows = Array.isArray(rowsLike) && rowsLike.length
+      ? mmxCanonicalRunEquityRows(rowsLike)
+      : mmxResolveAvailableRunEquityRows();
+    const segments = mmxCanonicalRunEquitySegments(rows);
+    let running = startBalanceUsd;
+    let peak = startBalanceUsd;
+    let maxBalanceUsd = startBalanceUsd;
+    let maxDrawdownUsd = 0;
+    if (!segments.length) {
+      return {
+        startBalanceUsd,
+        endBalanceUsd: startBalanceUsd,
+        totalPnlUsd: 0,
+        maxBalanceUsd,
+        maxDrawdownUsd,
+        sessionCount: 0,
+        segments: [],
+      };
+    }
+    for (const seg of segments) {
+      const endBalanceUsd = Number(seg?.y1);
+      if (!Number.isFinite(endBalanceUsd)) continue;
+      running = endBalanceUsd;
+      peak = Math.max(peak, running);
+      maxBalanceUsd = Math.max(maxBalanceUsd, running);
+      maxDrawdownUsd = Math.max(maxDrawdownUsd, peak - running);
+    }
+    return {
+      startBalanceUsd,
+      endBalanceUsd: running,
+      totalPnlUsd: running - startBalanceUsd,
+      maxBalanceUsd,
+      maxDrawdownUsd,
+      sessionCount: segments.length,
+      segments,
+    };
+  }
+
   function mmxCompressEquitySegmentsForDisplay(sessionSegmentsLike, maxCountLike = EQUITY_MAX_DISPLAY_SEGMENTS){
     const source = Array.isArray(sessionSegmentsLike) ? sessionSegmentsLike.filter(Boolean) : [];
     const maxCount = Math.max(1, Math.floor(Number(maxCountLike) || 0));
@@ -13191,7 +13847,6 @@
 
   function renderEquityCurveFromRows(rowsLike){
     try {
-      const resolvedPnlUsd = (row) => mmxResolvedSessionAuditPnlUsd(row);
       const sessionStartMs = (row) => {
         return mmxSessionStartMs(row);
       };
@@ -13203,15 +13858,16 @@
       const focusedRunId = String(focused?.runId || "").trim();
       const cutoffMs = Number(equityCurveCanonicalRunStartMs());
       if (equityCurveUsesRunStart()) {
-        const canonicalSegments = mmxCanonicalRunEquitySegments(rowsLike);
+        const canonicalSnapshot = mmxCanonicalRunEquitySnapshot(rowsLike, focused);
+        const canonicalSegments = Array.isArray(canonicalSnapshot?.segments) ? canonicalSnapshot.segments : [];
         if (!canonicalSegments.length) return false;
         const displaySegments = mmxCompressEquitySegmentsForDisplay(canonicalSegments, EQUITY_MAX_DISPLAY_SEGMENTS);
-        const nowV = Number(canonicalSegments[canonicalSegments.length - 1]?.y1);
-        const runMaxV = canonicalSegments.reduce((max, seg) => {
-          const y0 = Number(seg?.y0);
-          const y1 = Number(seg?.y1);
-          return Math.max(max, Number.isFinite(y0) ? y0 : 100, Number.isFinite(y1) ? y1 : 100);
-        }, 100);
+        const nowV = Number(canonicalSnapshot?.endBalanceUsd);
+        const runMaxV = Number(canonicalSnapshot?.maxBalanceUsd);
+        const focusedInstanceId = String(focused?.instanceId || "").trim();
+        if (focusedInstanceId && Number.isFinite(Number(canonicalSnapshot?.maxDrawdownUsd))) {
+          mmxCurveMaxDdByInstance.set(focusedInstanceId, Number(canonicalSnapshot.maxDrawdownUsd));
+        }
         return renderEquityCurveFromSessionSegments(displaySegments, {
           updateRangeUi: false,
           minV: 100,
@@ -13228,7 +13884,7 @@
         })
         .map((row) => ({
           ...row,
-          pnlUsd: resolvedPnlUsd(row),
+          pnlUsd: mmxResolvedSessionAuditPnlUsd(row),
         }));
       const ordered = orderedRaw;
       if (!ordered.length) return false;
@@ -13236,7 +13892,7 @@
       if (!equityCurveUsesRunStart()) {
         for (const row of ordered) {
           if (!!row?.excludeFromPnl) continue;
-          const pnl = resolvedPnlUsd(row);
+          const pnl = mmxResolvedSessionAuditPnlUsd(row);
           const balRaw = row?.continuityBalanceUsd ?? row?.balanceUsd;
           const bal = (balRaw == null || balRaw === "") ? NaN : Number(balRaw);
           if (Number.isFinite(pnl) && Number.isFinite(bal)) {
@@ -13261,7 +13917,7 @@
       }
       const includedPnlSum = ordered.reduce((sum, row) => {
         if (row?.excludeFromPnl) return sum;
-        const pnl = resolvedPnlUsd(row);
+        const pnl = mmxResolvedSessionAuditPnlUsd(row);
         return sum + (Number.isFinite(pnl) ? pnl : 0);
       }, 0);
       const sessionSegments = [];
@@ -13272,7 +13928,7 @@
         const endMs = Number.isFinite(endMsRaw) ? endMsRaw : startMs;
         if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) continue;
         const ignored = !!row?.excludeFromPnl;
-        const pnl = resolvedPnlUsd(row);
+        const pnl = mmxResolvedSessionAuditPnlUsd(row);
         const explicitEndRaw = row?.continuityBalanceUsd ?? row?.balanceUsd;
         const explicitEnd = (explicitEndRaw == null || explicitEndRaw === "") ? NaN : Number(explicitEndRaw);
         const endBal = equityCurveUsesRunStart()
@@ -20705,10 +21361,11 @@
 
   function mmxUpdateMobileLiveTradeOverlay(instanceIdLike, sessionSlugLike){
     const tradeEl = $("mobileLiveOverlayTrade");
+    const betEl = $("mobileLiveOverlayBet");
     const entryEl = $("mobileLiveOverlayEntry");
     const partialEl = $("mobileLiveOverlayPartial");
     const exitEl = $("mobileLiveOverlayExit");
-    if (!tradeEl && !entryEl && !partialEl && !exitEl) return;
+    if (!tradeEl && !betEl && !entryEl && !partialEl && !exitEl) return;
     const setValue = (el, valueText, extraClasses = []) => {
       if (!el) return;
       el.textContent = valueText;
@@ -20716,6 +21373,7 @@
       extraClasses.forEach((cls) => el.classList.add(cls));
     };
     setValue(tradeEl, "—");
+    setValue(betEl, "—");
     setValue(entryEl, "—");
     setValue(partialEl, "—");
     setValue(exitEl, "—");
@@ -20728,6 +21386,11 @@
     const trade = Array.isArray(trades) && trades.length ? trades[trades.length - 1] : null;
     if (tradeEl) tradeEl.textContent = Array.isArray(trades) && trades.length ? String(trades.length) : "—";
     if (!trade) return;
+    const focusedBot = (typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null;
+    const betUsd = Number.isFinite(Number(focusedBot?.betUsd))
+      ? Number(focusedBot.betUsd)
+      : Number($("betUsd")?.value);
+    if (betEl) betEl.textContent = Number.isFinite(betUsd) ? `$${Math.round(betUsd)}` : "—";
 
     const fmtPx = (v) => Number.isFinite(Number(v)) ? Number(v).toFixed(2) : "—";
     setValue(entryEl, fmtPx(trade?.entry_filled));
@@ -24104,44 +24767,6 @@
     card.appendChild(header);
     card.insertAdjacentHTML("beforeend", tradeSummaryHtml);
 
-    if (!SHOW_HISTORY_SESSION_CARD_CHART) {
-      if (replaceEl && replaceEl.parentElement === history) {
-        replaceEl.replaceWith(card);
-      } else if (String(insertMode).toLowerCase() === "append") {
-        history.appendChild(card);
-      } else {
-        history.prepend(card);
-      }
-      wireManualAuditClicks();
-      if (mmxCompletedSessionCardNeedsCanonicalUpgrade(snapshot)) {
-        void mmxRequestCanonicalCompletedSessionCard(snapshot, { insertMode, replaceNode: card });
-      }
-      if (persist && shouldPersistSessionCardSnapshot(snapshot)) storeSessionCard(snapshot);
-      if (animate) {
-        const liveCard = $('liveCard');
-        const tl = gsap.timeline();
-        tl.to(liveCard, {
-          y: 40,
-          opacity: 0.2,
-          duration: UI_GLIDE_DUR,
-          ease: UI_GLIDE_EASE,
-        });
-        tl.fromTo(
-          card,
-          { y: -20, opacity: 0 },
-          { y: 0, opacity: 1, duration: UI_GLIDE_DUR, ease: UI_GLIDE_EASE },
-          "<0.12"
-        );
-        tl.fromTo(
-          liveCard,
-          { y: -24, opacity: 0 },
-          { y: 0, opacity: 1, duration: UI_GLIDE_DUR, ease: UI_GLIDE_EASE },
-          "<0.38"
-        );
-      }
-      return card;
-    }
-
     const box = document.createElement('div');
     box.className = 'chartBox';
     box.style.position = "relative";
@@ -24563,25 +25188,6 @@
                 });
                 fetched = filterCompactCandidateRows(fetched);
               }
-              if (!fetched.length) {
-                fetched = await tryLoadCompactRows(async () => {
-                  const runIndexPayload = await fetchHotJson(
-                    `/api/v2/bots/${encodeURIComponent(wantedInstance)}/run-index`
-                  );
-                  return normalizeRunIndexCompactRows(runIndexPayload?.sessions);
-                });
-                fetched = filterCompactCandidateRows(fetched);
-              }
-              if (!fetched.length) {
-                fetched = await tryLoadCompactRows(async () => {
-                  const params = buildWorkerHistoryParams();
-                  const payload = await fetchReadOnlyJson(
-                    `/api/v2/bots/${encodeURIComponent(wantedInstance)}/last-session-history?${params.toString()}`
-                  );
-                  return payload?.sessions;
-                });
-                fetched = filterCompactCandidateRows(fetched);
-              }
               return fetched;
             }
             return await tryLoadCompactRows(async () => {
@@ -24756,6 +25362,36 @@
       }
       return false;
     };
+    if (!SHOW_HISTORY_SESSION_CARD_CHART) {
+      void scheduleCompactPnlHydration({}, { force: true });
+      if (mmxCompletedSessionCardNeedsCanonicalUpgrade(snapshot)) {
+        void mmxRequestCanonicalCompletedSessionCard(snapshot, { insertMode, replaceNode: card });
+      }
+      if (persist && shouldPersistSessionCardSnapshot(snapshot)) storeSessionCard(snapshot);
+      if (animate) {
+        const liveCard = $('liveCard');
+        const tl = gsap.timeline();
+        tl.to(liveCard, {
+          y: 40,
+          opacity: 0.2,
+          duration: UI_GLIDE_DUR,
+          ease: UI_GLIDE_EASE,
+        });
+        tl.fromTo(
+          card,
+          { y: -20, opacity: 0 },
+          { y: 0, opacity: 1, duration: UI_GLIDE_DUR, ease: UI_GLIDE_EASE },
+          "<0.12"
+        );
+        tl.fromTo(
+          liveCard,
+          { y: -24, opacity: 0 },
+          { y: 0, opacity: 1, duration: UI_GLIDE_DUR, ease: UI_GLIDE_EASE },
+          "<0.38"
+        );
+      }
+      return card;
+    }
     let pointInspectorLocked = null;
     const percentileSorted = (vals, p) => {
       const rows = (Array.isArray(vals) ? vals : []).map((v) => Number(v)).filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
@@ -29985,9 +30621,24 @@
     if (!p) return "";
     return MMX_TUNNEL_PORT_TO_HOST_PORT[p] || p;
   }
+  function mmxIsPublicTunnelHost(hostLike = ""){
+    const host = String(hostLike || "").trim().toLowerCase();
+    if (!host) return false;
+    return (
+      host.endsWith(".ngrok-free.dev") ||
+      host.endsWith(".ngrok.app") ||
+      host.endsWith(".ngrok.dev") ||
+      host.endsWith(".ngrok.io")
+    );
+  }
   function mmxCurrentViewPort(){
     const p = Number(window.location.port);
-    return Number.isFinite(p) && p > 0 ? String(Math.floor(p)) : "";
+    if (Number.isFinite(p) && p > 0) return String(Math.floor(p));
+    try {
+      const host = String(window.location.hostname || "").trim().toLowerCase();
+      if (mmxIsPublicTunnelHost(host)) return "28888";
+    } catch {}
+    return "";
   }
   function mmxCurrentHostPort(){
     return mmxLogicalHostPort(mmxCurrentViewPort());
@@ -30007,6 +30658,11 @@
   function mmxBuildOriginForPort(portLike){
     const hostPort = mmxLogicalHostPort(portLike);
     if (!hostPort) return window.location.origin;
+    try {
+      const here = new URL(window.location.origin);
+      const host = String(here.hostname || "").trim().toLowerCase();
+      if (mmxIsPublicTunnelHost(host)) return here.origin;
+    } catch {}
     const currentViewPort = mmxCurrentViewPort();
     const targetPort = MMX_HOST_PORT_TO_TUNNEL_PORT[hostPort] && MMX_TUNNEL_PORT_TO_HOST_PORT[currentViewPort]
       ? MMX_HOST_PORT_TO_TUNNEL_PORT[hostPort]
@@ -30088,6 +30744,9 @@
       const here = new URL(window.location.origin);
       const host = String(here.hostname || "").trim().toLowerCase();
       const port = String(here.port || "").trim();
+      if (mmxIsPublicTunnelHost(host)) {
+        return here.origin;
+      }
       if ((host === "127.0.0.1" || host === "localhost") && (port === "28888" || port === "8788")) {
         const workerOrigin = String(typeof mmxBuildOriginForPort === "function" ? mmxBuildOriginForPort("8790") : "").trim();
         if (workerOrigin && workerOrigin !== here.origin) return workerOrigin;
@@ -31086,11 +31745,34 @@
       : Number(continuityStartMs);
     return Number.isFinite(rawStartMs) && rawStartMs > 0 ? rawStartMs : NaN;
   }
-  function mmxCompareStartBalanceUsd(bot){
-    const v = Number(bot?.startBalanceUsd);
-    return Number.isFinite(v) && v > 0 ? v : 100;
+function mmxCompareStartBalanceUsd(bot){
+  const v = Number(bot?.startBalanceUsd);
+  return Number.isFinite(v) && v > 0 ? v : 100;
+}
+function mmxResolveFocusedSummaryBot(botLike = null){
+  const bot = botLike && typeof botLike === "object" ? botLike : null;
+  if (!bot) return null;
+  const instanceId = String(bot?.instanceId || "").trim();
+  if (!instanceId) return bot;
+  const lastGoodBot = (() => {
+    if (!mmxLastGoodFocusedBotSnapshot || typeof mmxLastGoodFocusedBotSnapshot !== "object") return null;
+    const lastGoodId = String(mmxLastGoodFocusedBotSnapshot?.instanceId || "").trim();
+    if (!lastGoodId || lastGoodId !== instanceId) return null;
+    if (!Number.isFinite(Number(mmxLastGoodFocusedBotAtMs || 0))) return null;
+    const ageMs = Date.now() - Number(mmxLastGoodFocusedBotAtMs || 0);
+    if (!Number.isFinite(ageMs) || ageMs > MMX_FOCUSED_UI_RETENTION_MS) return null;
+    return mmxLastGoodFocusedBotSnapshot;
+  })();
+  if (!lastGoodBot) return bot;
+  const startBal = Number(bot?.startBalanceUsd);
+  const snapshotStartBal = Number(lastGoodBot?.startBalanceUsd);
+  if (Number.isFinite(snapshotStartBal) && snapshotStartBal > 0 && (!Number.isFinite(startBal) || startBal <= 0)) {
+    const merged = mmxCompareEnrichBotWithLiveState(bot, lastGoodBot);
+    return Number.isFinite(Number(merged?.startBalanceUsd)) && Number(merged.startBalanceUsd) > 0 ? merged : bot;
   }
-  function mmxCompareActualBalanceAtCutoff(bot, sessionsLike, cutoffMs = NaN){
+  return bot;
+}
+function mmxCompareActualBalanceAtCutoff(bot, sessionsLike, cutoffMs = NaN){
     const sessions = Array.isArray(sessionsLike) ? sessionsLike.slice() : [];
     const ordered = sessions
       .filter((sess) => !!sess && !sess?.excludeFromPnl && !mmxCompareIsLaunchPartialSession(bot, sess))
@@ -32184,6 +32866,32 @@
   function mmxComputeTestSummarySnapshot(botLike, maxDdUsdOverride = NaN){
     const bot = botLike && typeof botLike === "object" ? botLike : null;
     if (!bot) return null;
+    if (equityCurveUsesRunStart()) {
+      const snapshot = mmxCanonicalRunEquitySnapshot(null, bot);
+      const startBal = Number(snapshot?.startBalanceUsd);
+      const bal = Number(snapshot?.endBalanceUsd);
+      const totalPnlUsd = Number(snapshot?.totalPnlUsd);
+      const maxDd = Number.isFinite(Number(maxDdUsdOverride))
+        ? Number(maxDdUsdOverride)
+        : Number(snapshot?.maxDrawdownUsd);
+      const elapsedHours = mmxCompareElapsedHoursAdjusted(bot, Number(bot?.launchedAtMs));
+      const phr = Number.isFinite(elapsedHours) && elapsedHours > 0
+        ? (totalPnlUsd / elapsedHours)
+        : NaN;
+      return {
+        startBalanceUsd: startBal,
+        totalPnlUsd,
+        balanceUsd: bal,
+        perHourUsd: phr,
+        maxDdUsd: maxDd,
+        balanceText: Number.isFinite(bal) ? `$${bal.toFixed(2)}` : "$—",
+        perHourText: Number.isFinite(phr) ? `${phr >= 0 ? "+" : "-"}$${Math.abs(phr).toFixed(2)}` : "—",
+        maxDdText: Number.isFinite(maxDd) ? `-$${Math.abs(maxDd).toFixed(2)}` : "—",
+        balanceTone: Number.isFinite(bal) ? (bal > startBal ? "pos" : (bal < startBal ? "neg" : "neu")) : "neu",
+        perHourTone: Number.isFinite(phr) ? (phr > 0 ? "pos" : (phr < 0 ? "neg" : "neu")) : "neu",
+        maxDdTone: Number.isFinite(maxDd) ? (maxDd > 0 ? "neg" : "neu") : "neu",
+      };
+    }
     const mark = mmxComputeBotMarkToMarket(bot);
     const liveBalanceUsd = Number(mark?.balanceUsd);
     const startBal = mmxCompareStartBalanceUsd(bot);
@@ -32206,12 +32914,14 @@
       maxDdTone: Number.isFinite(maxDd) ? (maxDd > 0 ? "neg" : "neu") : "neu",
     };
   }
-  function renderTestSummaryPanel(botLike = null){
-    const balanceEl = $("testSummaryBalance");
-    const phrEl = $("testSummaryPhr");
-    const maxDdEl = $("testSummaryMaxDd");
-    if (!balanceEl || !phrEl || !maxDdEl) return;
-    const bot = botLike || ((typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null) || null;
+function renderTestSummaryPanel(botLike = null){
+  const balanceEl = $("testSummaryBalance");
+  const phrEl = $("testSummaryPhr");
+  const maxDdEl = $("testSummaryMaxDd");
+  if (!balanceEl || !phrEl || !maxDdEl) return;
+  const bot = mmxResolveFocusedSummaryBot(
+    botLike || ((typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null) || null
+  );
     if (!bot) {
       mmxSetLatestTestSummarySnapshot(null);
       balanceEl.textContent = "$—";
@@ -38238,6 +38948,11 @@ self.onmessage = async (ev) => {
 
   function mmxReadFocusedEquityBalance(){
     try {
+      if (equityCurveUsesRunStart()) {
+        const snapshot = mmxCanonicalRunEquitySnapshot();
+        const endBalanceUsd = Number(snapshot?.endBalanceUsd);
+        return Number.isFinite(endBalanceUsd) ? endBalanceUsd : NaN;
+      }
       if (!Array.isArray(equitySeries) || !equitySeries.length) return NaN;
       const last = equitySeries[equitySeries.length - 1];
       const v = Number(last?.v);
@@ -38961,6 +39676,7 @@ self.onmessage = async (ev) => {
     if (liveSessionLabelEl) liveSessionLabelEl.textContent = mmxBuildLiveSessionLabel(slug);
     const liveParamEl = $("liveParamLine");
     if (liveParamEl) liveParamEl.textContent = "";
+    try { mmxUpdateMobileLiveTradeOverlay(instId, String(slug || "").trim()); } catch {}
     renderLiveStrategyBadge(b?.strategyId);
     const preferredLiveTrace = mmxPreferredLiveTraceForBot(b, slug, MMX_LIVE_TRACE_MAX_POINTS);
     if (instId && slug && preferredLiveTrace && typeof preferredLiveTrace === "object") {
@@ -40407,6 +41123,12 @@ self.onmessage = async (ev) => {
 
   // ===== initial chart =====
   initLiveChart(null, "startup:boot");
+  if (mmxIsMobileViewport()) {
+    mmxScheduleMobileRelayout("post_chart_boot", 40);
+    setTimeout(() => {
+      try { mmxScheduleMobileRelayout("post_chart_boot_retry", 0); } catch {}
+    }, 220);
+  }
   syncAnalysisPanelHeight();
 
   // ===== Sync UI from server =====

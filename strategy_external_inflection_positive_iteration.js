@@ -6,10 +6,9 @@
   const PRESET = Object.freeze({
     name: 'INFLECTION_POSITIVE_ITERATION_V1',
     strategyId: 'inflection_positive_iteration',
+    sizingProfile: 'default',
     minEntrySec: 100,
     entryBreakoutThr: 0.55,
-    trade1PostGatePriceOverrideThr: 0.55,
-    trade1PostGatePriceOverrideMaxThr: 0.91,
     crossReentryThr: 0.55,
     maxEntriesPerSession: 3,
     bet: 25,
@@ -52,6 +51,25 @@
     entryConfirmTimeoutMs: 1500,
     acceptSyntheticQuoteMaxAgeMs: 2000,
     immediateDualTpOnFill: true,
+  });
+
+  const GOLD_BETS_V1_WINDOWS = Object.freeze({
+    1: Object.freeze([
+      Object.freeze({ startSec: 180, endSec: 210, betUsd: 100 }),
+      Object.freeze({ startSec: 210, endSec: 240, betUsd: 100 }),
+      Object.freeze({ startSec: 240, endSec: 270, betUsd: 100 }),
+      Object.freeze({ startSec: 270, endSec: 297, betUsd: 100 }),
+    ]),
+    2: Object.freeze([
+      Object.freeze({ startSec: 210, endSec: 240, betUsd: 100 }),
+      Object.freeze({ startSec: 240, endSec: 270, betUsd: 100 }),
+      Object.freeze({ startSec: 270, endSec: 297, betUsd: 100 }),
+    ]),
+    3: Object.freeze([
+      Object.freeze({ startSec: 210, endSec: 240, betUsd: 100 }),
+      Object.freeze({ startSec: 240, endSec: 270, betUsd: 100 }),
+      Object.freeze({ startSec: 270, endSec: 297, betUsd: 100 }),
+    ]),
   });
 
   function toNum(v, d) {
@@ -334,6 +352,7 @@
 
     const cfg = {
       ...PRESET,
+      sizingProfile: String(params && params.sizingProfile || PRESET.sizingProfile).trim() || PRESET.sizingProfile,
       minEntrySec: PRESET.minEntrySec,
       entryBreakoutThr: PRESET.entryBreakoutThr,
       crossReentryThr: PRESET.crossReentryThr,
@@ -409,7 +428,6 @@
         };
 
     let entriesThisSession = Math.max(0, seedInt('entriesThisSession', 0));
-    let nonEmaThresholdEntryUsedThisSession = !!(seed && seed.nonEmaThresholdEntryUsedThisSession);
     let pureObservedTicks = Math.max(0, seedInt('pureObservedTicks', 0));
     let nonPureSkippedTicks = Math.max(0, seedInt('nonPureSkippedTicks', 0));
     let acceptedSyntheticTicks = Math.max(0, seedInt('acceptedSyntheticTicks', 0));
@@ -441,9 +459,14 @@
 
     function betUsdForTradeNum(_tradeNum) {
       const tradeNum = Math.max(1, Math.floor(Number(_tradeNum) || 1));
-      if (String(cfg.sizingProfile || '').toLowerCase() === 'gold_c') {
-        if (tradeNum === 1 && lastElapsedSec >= 100 && lastElapsedSec < 120) {
-          return Math.max(cfg.bet, Math.min(toNum(params && params.maxBetUsd, cfg.bet), 100));
+      const profile = String(cfg.sizingProfile || '').trim().toLowerCase();
+      if (profile === 'gold_bets_v1' || profile === 'gold bets v1') {
+        const windows = GOLD_BETS_V1_WINDOWS[tradeNum] || [];
+        for (let i = 0; i < windows.length; i += 1) {
+          const w = windows[i];
+          if (lastElapsedSec >= Number(w.startSec) && lastElapsedSec < Number(w.endSec)) {
+            return Math.max(cfg.bet, Number(w.betUsd));
+          }
         }
       }
       return cfg.bet;
@@ -780,33 +803,6 @@
     function maybeSelectEntry(upBid, downBid) {
       if (activeTrade) return null;
       if (!(entriesThisSession < cfg.maxEntriesPerSession)) return null;
-      if (!nonEmaThresholdEntryUsedThisSession && entriesThisSession === 0 && lastElapsedSec >= cfg.minEntrySec) {
-        const trade1Candidates = [];
-        if (
-          !rearmBlocked.UP &&
-          Number.isFinite(upBid) &&
-          upBid > cfg.trade1PostGatePriceOverrideThr &&
-          upBid < cfg.trade1PostGatePriceOverrideMaxThr
-        ) {
-          trade1Candidates.push({ side: 'UP', px: upBid, tag: 'NON EMA THRESHOLD ENTRY' });
-        }
-        if (
-          !rearmBlocked.DOWN &&
-          Number.isFinite(downBid) &&
-          downBid > cfg.trade1PostGatePriceOverrideThr &&
-          downBid < cfg.trade1PostGatePriceOverrideMaxThr
-        ) {
-          trade1Candidates.push({ side: 'DOWN', px: downBid, tag: 'NON EMA THRESHOLD ENTRY' });
-        }
-        if (trade1Candidates.length) {
-          trade1Candidates.sort((a, b) => {
-            if (Number(b.px) !== Number(a.px)) return Number(b.px) - Number(a.px);
-            return String(a.side).localeCompare(String(b.side));
-          });
-          nonEmaThresholdEntryUsedThisSession = true;
-          return trade1Candidates[0];
-        }
-      }
       const candidates = [];
       const upSignal = buildIterationSignal(resampled, cfg, 'UP');
       const dnSignal = buildIterationSignal(resampled, cfg, 'DOWN');
@@ -885,7 +881,6 @@
           inflectStateBySide.UP = { peakVal: NaN, peakIdx: -1, negStreak: 0, lastEmitPeakIdx: -1 };
           inflectStateBySide.DOWN = { peakVal: NaN, peakIdx: -1, negStreak: 0, lastEmitPeakIdx: -1 };
           entriesThisSession = 0;
-          nonEmaThresholdEntryUsedThisSession = false;
           rearmBlocked.UP = false;
           rearmBlocked.DOWN = false;
           activeTrade = null;
@@ -1162,8 +1157,7 @@
           cfg: {
             minEntrySec: cfg.minEntrySec,
             entryBreakoutThr: cfg.entryBreakoutThr,
-            trade1PostGatePriceOverrideThr: cfg.trade1PostGatePriceOverrideThr,
-            trade1PostGatePriceOverrideMaxThr: cfg.trade1PostGatePriceOverrideMaxThr,
+            sizingProfile: cfg.sizingProfile,
             crossReentryThr: cfg.crossReentryThr,
             maxEntriesPerSession: cfg.maxEntriesPerSession,
             bet: cfg.bet,
@@ -1202,7 +1196,6 @@
             lastResampleSourceTsMs,
             observedSearchStartIdx,
             entriesThisSession: entriesThisSession,
-            nonEmaThresholdEntryUsedThisSession,
             pureObservedTicks,
             nonPureSkippedTicks,
             acceptedSyntheticTicks,

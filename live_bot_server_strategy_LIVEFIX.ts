@@ -7592,6 +7592,33 @@ function botRunIndexPath(strategyId: string, runNum: number): string {
   return path.join(botRunDir(rn), `index_${sid}_run_${rn}.json`);
 }
 
+function botRunStrategySourcePath(runNum: number, strategyPathLike: any): string {
+  const rn = Math.floor(Number(runNum));
+  const srcBase = path.basename(String(strategyPathLike || "").trim() || "strategy.js");
+  const safeBase = String(srcBase || "strategy.js").replace(/[^A-Za-z0-9._-]+/g, "_") || "strategy.js";
+  return path.join(botRunDir(rn), `strategy_source_${safeBase}`);
+}
+
+function ensureBotRunStrategySourceCopy(instance: Pick<BotInstance, "runNum" | "strategyPath"> | null | undefined): string | null {
+  try {
+    const runNum = Math.floor(Number(instance?.runNum));
+    const strategyPath = String(instance?.strategyPath || "").trim();
+    if (!(Number.isFinite(runNum) && runNum > 0 && strategyPath)) return null;
+    if (!fs.existsSync(strategyPath)) return null;
+    const outPath = botRunStrategySourcePath(runNum, strategyPath);
+    const srcText = fs.readFileSync(strategyPath, "utf8");
+    const srcHash = crypto.createHash("sha256").update(srcText).digest("hex");
+    const priorText = fs.existsSync(outPath) ? fs.readFileSync(outPath, "utf8") : null;
+    const priorHash = priorText != null ? crypto.createHash("sha256").update(priorText).digest("hex") : null;
+    if (priorHash !== srcHash) {
+      atomicWriteUtf8(outPath, srcText);
+    }
+    return outPath;
+  } catch {
+    return null;
+  }
+}
+
 function expectedLatestClosedSessionSlugForInstance(instance: BotInstance | null | undefined): string {
   try {
     const currentSlug = String(instance?.marketSlug || "").trim().toLowerCase();
@@ -8177,6 +8204,7 @@ function writeBotRunIndex(instance: BotInstance, rt: BotRuntime | null) {
     );
     const srt = botStrategyRuntimes.get(instance.instanceId) || null;
     const identity = rt ? recoverBotOpenEntryIdentity(instance, rt, srt?.lastSnapshot ?? null) : null;
+    const strategySourcePath = ensureBotRunStrategySourceCopy(instance);
     const payload = {
       schemaVersion: "run-index.v1",
       generatedAtMs: nowMs(),
@@ -8192,6 +8220,7 @@ function writeBotRunIndex(instance: BotInstance, rt: BotRuntime | null) {
         instanceId: instance.instanceId,
         strategyId: instance.strategyId,
         strategyPath: instance.strategyPath,
+        strategySourcePath,
         marketSlug: instance.marketSlug,
         marketTitle: instance.marketTitle,
         mode: instance.mode,
@@ -8221,6 +8250,7 @@ function writeBotRunIndex(instance: BotInstance, rt: BotRuntime | null) {
         telemetryJsonl: botRunTelemetryPath(runNum),
         summaryJson: path.join(dir, "summary.json"),
         ignoredSessionsJson: botRunIgnoredSessionsPath(runNum),
+        strategySource: strategySourcePath,
       },
       ignoredSessions: readBotRunIgnoredSessions(runNum),
       sessions,
@@ -13103,6 +13133,7 @@ function writeBotRunSummary(instance: BotInstance, rt: BotRuntime) {
   try {
     const dir = botRunDir(instance.runNum);
     fs.mkdirSync(dir, { recursive: true });
+    const strategySourcePath = ensureBotRunStrategySourceCopy(instance);
     const summary = {
       schemaVersion: "1.0",
       runId: instance.runId,
@@ -13118,6 +13149,7 @@ function writeBotRunSummary(instance: BotInstance, rt: BotRuntime) {
       marketTitle: instance.marketTitle,
       strategyId: instance.strategyId,
       strategyPath: instance.strategyPath,
+      strategySourcePath,
       expectedStrategyHash: instance.expectedStrategyHash,
       expectedDeclaredStrategyId: instance.expectedDeclaredStrategyId,
       executionModel: instance.executionModel,
@@ -34415,9 +34447,18 @@ app.get("/api/compare/run-artifact", (req, res) => {
       return res.send(fs.readFileSync(tracePath, "utf8"));
     }
     if (kind === "strategy") {
-      const strategyPath = canonicalStrategyPathForDisplay(
-        String(summary?.strategyId || "").trim().toLowerCase(),
-        String(summary?.strategyPath || "").trim()
+      const preservedStrategyPath = String(
+        summary?.strategySourcePath
+        || summary?.files?.strategySource
+        || ""
+      ).trim();
+      const strategyPath = (
+        preservedStrategyPath && fs.existsSync(preservedStrategyPath)
+          ? preservedStrategyPath
+          : canonicalStrategyPathForDisplay(
+              String(summary?.strategyId || "").trim().toLowerCase(),
+              String(summary?.strategyPath || "").trim()
+            )
       );
       if (!strategyPath || !fs.existsSync(strategyPath)) {
         return res.status(404).json({ ok: false, error: "strategy source not found", strategyPath });
