@@ -32626,7 +32626,7 @@ app.get("/api/compare/host-continuity", (req, res) => {
     const includeTrace = String(req.query.includeTrace || "0") === "1";
     const maxSessionsRaw = Number(req.query.maxSessions ?? 0);
     const maxSessions = Number.isFinite(maxSessionsRaw) && maxSessionsRaw > 0
-      ? Math.max(1, Math.min(500, Math.floor(maxSessionsRaw)))
+      ? Math.max(1, Math.min(5000, Math.floor(maxSessionsRaw)))
       : null;
     const offsetRaw = Number(req.query.offset ?? 0);
     const offset = Number.isFinite(offsetRaw) && offsetRaw > 0
@@ -34605,7 +34605,7 @@ app.get("/api/v2/bots/:instanceId/continuity-history", (req, res) => {
     const includeTrace = String(req.query.includeTrace || "0") === "1";
     const maxSessionsRaw = Number(req.query.maxSessions ?? 0);
     const maxSessions = Number.isFinite(maxSessionsRaw) && maxSessionsRaw > 0
-      ? Math.max(1, Math.min(500, Math.floor(maxSessionsRaw)))
+      ? Math.max(1, Math.min(5000, Math.floor(maxSessionsRaw)))
       : null;
     const offsetRaw = Number(req.query.offset ?? 0);
     const offset = Number.isFinite(offsetRaw) && offsetRaw > 0

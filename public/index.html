@@ -4497,7 +4497,7 @@
       }
       .mobileStickySummaryGrid{
         display:grid;
-        grid-template-columns:repeat(4, minmax(0,1fr));
+        grid-template-columns:repeat(5, minmax(0,1fr));
         gap:6px;
       }
       .mobileStickyStat{
@@ -4528,6 +4528,10 @@
       }
       .mobileStickyStat .v.neu{
         color:#eef3f9;
+      }
+      .mobileStickyStat.cpuTint .k,
+      .mobileStickyStat.cpuTint .v{
+        color:var(--cpu-tone, #eef3f9);
       }
       #mobileStickySummaryMaxDd{
         color:#eef3f9 !important;
@@ -5265,6 +5269,10 @@
         <div class="mobileStickyStat">
           <span class="k">Max DD</span>
           <span id="mobileStickySummaryMaxDd" class="v neu">—</span>
+        </div>
+        <div id="mobileStickySummaryCpuStat" class="mobileStickyStat">
+          <span class="k">CPU</span>
+          <span id="mobileStickySummaryCpu" class="v neu">—</span>
         </div>
       </div>
     </div>
@@ -7442,11 +7450,11 @@
     const listRows = await (async () => {
       if (!wantedInstance) return [];
       const params = new URLSearchParams();
-      params.set("includeTrace", "0");
-      params.set("maxSessions", "100");
-      if (forceFresh) params.set("cb", String(Date.now()));
+      if (marketPrefix) params.set("marketPrefix", marketPrefix);
+      params.set("limit", "100");
+      if (forceFresh) params.set("refresh", "1");
       const payload = await mmxFetchMobileOverlayJsonViaWorker(
-        `/api/v2/bots/${encodeURIComponent(wantedInstance)}/continuity-history?${params.toString()}`,
+        `/api/v2/bots/${encodeURIComponent(wantedInstance)}/last-session-history?${params.toString()}`,
         { timeoutMs: forceFresh ? 14000 : 9000 }
       );
       return Array.isArray(payload?.sessions) ? payload.sessions : [];
@@ -7536,11 +7544,11 @@
       return { key: cacheKey, wantedInstance, marketPrefix, heroRow: null, heroSlug: "", heroImageUrl: "", listRows: [] };
     }
     const params = new URLSearchParams();
-    params.set("includeTrace", "0");
-    params.set("maxSessions", "100");
-    if (forceFresh) params.set("cb", String(Date.now()));
+    if (marketPrefix) params.set("marketPrefix", marketPrefix);
+    params.set("limit", "100");
+    if (forceFresh) params.set("refresh", "1");
     const payload = await mmxFetchMobileOverlayJsonViaWorker(
-      `/api/v2/bots/${encodeURIComponent(wantedInstance)}/continuity-history?${params.toString()}`,
+      `/api/v2/bots/${encodeURIComponent(wantedInstance)}/last-session-history?${params.toString()}`,
       { timeoutMs: forceFresh ? 14000 : 9000 }
     );
     const listRows = (Array.isArray(payload?.sessions) ? payload.sessions : [])
@@ -7798,14 +7806,18 @@
     }
     mmxScheduleBootDeferredWork();
   }
-  function mmxStartMobileSecondaryBoot(reason = "deferred"){
+  function mmxMobileDeferredInteractiveReady(){
+    if (!mmxIsMobileViewport()) return true;
+    return MMX_MOBILE_BOOT_STAGES.indexOf(String(mmxMobileBootStage || "").trim().toLowerCase()) >= MMX_MOBILE_BOOT_STAGES.indexOf("overlay");
+  }
+  function mmxStartMobileSecondaryBoot(reason = "deferred", opts = {}){
     if (!mmxIsMobileViewport()) return;
     if (mmxMobileSecondaryBootStarted) return;
     mmxMobileSecondaryBootStarted = true;
     void (async () => {
       try {
         await mmxMaybeAutoLaunchFromQuery();
-        if (!Array.isArray(mmxState?.bots) || !mmxState.bots.length) {
+        if (opts?.skipInitialRefresh !== true) {
           try { await mmxRefreshAll({ includeHeavy: false, forceFreshBots: true, bypassDedup: true }); } catch {}
         }
         const ensureFocusedBotSelected = (botItemsLike) => {
@@ -7829,6 +7841,15 @@
           if (mmxState.focusPinned) {
             try { mmxApplyFocusedMarketToMain(); } catch {}
           }
+          const focusedBot = ((typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null)
+            || botItems.find((row) => String(row?.instanceId || "").trim() === String(mmxState.selectedInstanceId || "").trim())
+            || botItems[0]
+            || null;
+          if (focusedBot) {
+            try { renderTestSummaryPanel(focusedBot); } catch {}
+            try { mmxPrimeMobileStickySummaryFromFocusedBot(focusedBot); } catch {}
+            try { mmxSyncMobileStickyShell(); } catch {}
+          }
           return !!mmxState.focusPinned;
         };
         const existingBots = mmxFilterVisibleBots(Array.isArray(mmxState?.bots) ? mmxState.bots : []);
@@ -7846,9 +7867,7 @@
             ensureFocusedBotSelected(Array.isArray(botsPayload?.items) ? botsPayload.items : []);
           } catch {}
         }
-      } finally {
-        mmxMarkBootMinimalReady();
-      }
+      } finally {}
     })();
   }
   function mmxStartMobileBootSequence(force = false){
@@ -7888,8 +7907,7 @@
     if (MMX_MOBILE_BOOT_STAGES.indexOf(mmxMobileBootStage) < MMX_MOBILE_BOOT_STAGES.indexOf("equity")) return;
     const values = [
       $("mobileStickySessionPnl")?.textContent,
-      $("mobileStickySummaryBalance")?.textContent,
-      $("mobileStickySummaryPhr")?.textContent,
+      ...mmxMobileStickyRequiredSummaryDestIds().map((id) => $(id)?.textContent),
       $("mobileLiveOverlayTrade")?.textContent,
       $("mobileLiveOverlayUp")?.textContent,
       $("mobileLiveOverlayDown")?.textContent,
@@ -7915,6 +7933,10 @@
     })();
     return Math.max(0, safeTop);
   }
+  function mmxMobileStickyEquityGapPx(){
+    // Slight overlap so the shelf top edge shares the sticky summary bottom seam.
+    return -1;
+  }
   function mmxMobileEquityShelfHeightPx(){
     if (!mmxIsMobileViewport() || mmxMobileEquityCollapsed) return 0;
     const shelf = $("mobileEquityShelf");
@@ -7933,17 +7955,18 @@
   }
   function mmxMobileEquityShelfBottomPx(){
     const stickyBottom = mmxStickyTopOffsetPx() + mmxMobileStickyShellHeightPx();
+    const equityTop = stickyBottom + mmxMobileStickyEquityGapPx();
     if (!mmxIsMobileViewport() || mmxMobileEquityCollapsed) return stickyBottom;
     const shelf = $("mobileEquityShelf");
     if (!(shelf instanceof HTMLElement) || shelf.hidden) {
-      return stickyBottom + mmxMobileEquityShelfHeightPx();
+      return equityTop + mmxMobileEquityShelfHeightPx();
     }
     const rect = shelf.getBoundingClientRect?.();
     const rectBottom = Number(rect?.bottom || 0);
-    if (Number.isFinite(rectBottom) && rectBottom > stickyBottom + 8) {
+    if (Number.isFinite(rectBottom) && rectBottom > equityTop + 8) {
       return Math.ceil(rectBottom);
     }
-    return stickyBottom + mmxMobileEquityShelfHeightPx();
+    return equityTop + mmxMobileEquityShelfHeightPx();
   }
   function mmxMobileLiveOverlayChartRect(){
     const host = $("liveChart");
@@ -8086,7 +8109,7 @@
       return;
     }
     const stickyBottom = mmxStickyTopOffsetPx() + mmxMobileStickyShellHeightPx();
-    if (shelf instanceof HTMLElement) shelf.style.top = `${stickyBottom}px`;
+    if (shelf instanceof HTMLElement) shelf.style.top = `${stickyBottom + mmxMobileStickyEquityGapPx()}px`;
     if (revealBtn instanceof HTMLElement) {
       revealBtn.style.top = `${Math.max(mmxStickyTopOffsetPx() + 6, stickyBottom - 1)}px`;
       revealBtn.style.left = "50vw";
@@ -8119,7 +8142,45 @@
   let mmxMobileStickyWorkerSeedDone = false;
   let mmxMobileStickyMirrorRetryScheduled = false;
   let mmxMobileStickySummaryObserver = null;
+  let mmxMobileStickyPostBootRefreshDone = false;
+  let mmxLastMobileStickyMeasuredHeightPx = -1;
   let mmxLatestTestSummarySnapshot = null;
+  const MMX_MOBILE_STICKY_SUMMARY_FIELDS = Object.freeze([
+    {
+      key: "balance",
+      required: true,
+      srcId: "testSummaryBalance",
+      dstId: "mobileStickySummaryBalance",
+      summaryTextKey: "balanceText",
+      summaryToneKey: "balanceTone",
+    },
+    {
+      key: "perHour",
+      required: true,
+      srcId: "testSummaryPhr",
+      dstId: "mobileStickySummaryPhr",
+      summaryTextKey: "perHourText",
+      summaryToneKey: "perHourTone",
+    },
+    {
+      key: "maxDd",
+      required: false,
+      srcId: "testSummaryMaxDd",
+      dstId: "mobileStickySummaryMaxDd",
+      summaryTextKey: "maxDdText",
+      summaryToneKey: "maxDdTone",
+    },
+    {
+      key: "cpu",
+      required: false,
+      observerSrcId: "healthCpu",
+      dstId: "mobileStickySummaryCpu",
+      containerId: "mobileStickySummaryCpuStat",
+      summaryTextKey: "cpuText",
+      summaryToneKey: "cpuTone",
+      summarySeverityKey: "cpuSeverity",
+    },
+  ]);
   function mmxMobileStickyTextIsMissing(textLike){
     const text = String(textLike || "").trim();
     return !text || text === "—" || text === "$—";
@@ -8127,6 +8188,53 @@
   function mmxMobileStickyShouldUseSourceText(textLike){
     const text = String(textLike || "").trim();
     return !!text && text !== "—" && text !== "$—" && text !== "$0.00";
+  }
+  function mmxMobileStickyShouldUsePnlText(textLike){
+    const text = String(textLike || "").trim();
+    return !!text && text !== "—" && text !== "$—";
+  }
+  function mmxMobileStickySummaryFields(){
+    return Array.isArray(MMX_MOBILE_STICKY_SUMMARY_FIELDS) ? MMX_MOBILE_STICKY_SUMMARY_FIELDS : [];
+  }
+  function mmxMobileStickySummaryDestIds(){
+    return mmxMobileStickySummaryFields().map((field) => String(field?.dstId || "").trim()).filter(Boolean);
+  }
+  function mmxMobileStickyRequiredSummaryDestIds(){
+    return mmxMobileStickySummaryFields()
+      .filter((field) => field?.required !== false)
+      .map((field) => String(field?.dstId || "").trim())
+      .filter(Boolean);
+  }
+  function mmxComputeMobileStickySummaryModel(summaryLike = null){
+    const summary = summaryLike && typeof summaryLike === "object" ? summaryLike : {};
+    const cpuPct = Number(lastBackendCpuPct);
+    return {
+      ...summary,
+      cpuText: Number.isFinite(cpuPct) && cpuPct >= 0 ? `${cpuPct.toFixed(1)}%` : "—",
+      cpuTone: "neu",
+      cpuSeverity: mmxCpuSeverityFromPct(cpuPct),
+    };
+  }
+  function mmxPrimeMobileStickySummaryFromFocusedBot(botLike = null){
+    const bot = botLike || ((typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null) || null;
+    if (!bot) return null;
+    const summary = mmxComputeTestSummarySnapshot(bot);
+    if (!summary) return null;
+    return mmxSetLatestTestSummarySnapshot({
+      ...summary,
+      instanceId: String(bot?.instanceId || "").trim(),
+    });
+  }
+  function mmxComputeMobileStickySessionPnlModel(botLike = null){
+    const bot = botLike || ((typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null) || null;
+    if (!bot) return null;
+    const summary = mmxComputeTestSummarySnapshot(bot);
+    const pnlUsd = Number(summary?.totalPnlUsd);
+    if (!Number.isFinite(pnlUsd)) return null;
+    return {
+      text: `${pnlUsd >= 0 ? "+" : "-"}$${Math.abs(pnlUsd).toFixed(2)}`,
+      tone: pnlUsd > 0 ? "pos" : (pnlUsd < 0 ? "neg" : "neu"),
+    };
   }
   function mmxSetLatestTestSummarySnapshot(summaryLike = null){
     const summary = summaryLike && typeof summaryLike === "object" ? summaryLike : null;
@@ -8136,15 +8244,30 @@
     }
     const next = {
       instanceId: String(summary?.instanceId || "").trim(),
-      balanceText: String(summary?.balanceText || "").trim(),
-      perHourText: String(summary?.perHourText || "").trim(),
-      maxDdText: String(summary?.maxDdText || "").trim(),
-      balanceTone: String(summary?.balanceTone || "neu").trim() || "neu",
-      perHourTone: String(summary?.perHourTone || "neu").trim() || "neu",
-      maxDdTone: String(summary?.maxDdTone || "neu").trim() || "neu",
     };
+    for (const field of mmxMobileStickySummaryFields()) {
+      const textKey = String(field?.summaryTextKey || "").trim();
+      const toneKey = String(field?.summaryToneKey || "").trim();
+      if (!textKey || !toneKey) continue;
+      next[textKey] = String(summary?.[textKey] || "").trim();
+      next[toneKey] = String(summary?.[toneKey] || "neu").trim() || "neu";
+    }
     mmxLatestTestSummarySnapshot = next;
     return next;
+  }
+  function mmxApplyMobileStickySummaryField(fieldLike, modelLike, dstLike){
+    const field = fieldLike && typeof fieldLike === "object" ? fieldLike : null;
+    const model = modelLike && typeof modelLike === "object" ? modelLike : {};
+    const dst = dstLike instanceof HTMLElement ? dstLike : null;
+    if (!field || !dst) return;
+    const text = String(model?.[field.summaryTextKey] || "").trim();
+    dst.textContent = text || "—";
+    dst.className = `v ${String(model?.[field.summaryToneKey] || "neu").trim() || "neu"}`;
+    const containerId = String(field?.containerId || "").trim();
+    if (containerId) {
+      const container = $(containerId);
+      mmxSetCpuTone(container, model?.[field.summarySeverityKey]);
+    }
   }
   function mmxResolvedTestSummarySnapshot(botLike = null){
     const bot = botLike || ((typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null) || null;
@@ -8165,41 +8288,46 @@
     return null;
   }
   function mmxSyncMobileStickySummaryAtomic(){
-    const balanceDst = $("mobileStickySummaryBalance");
-    const phrDst = $("mobileStickySummaryPhr");
-    const maxDdDst = $("mobileStickySummaryMaxDd");
-    if (!balanceDst || !phrDst || !maxDdDst) return false;
+    const fields = mmxMobileStickySummaryFields();
+    const destinations = fields.map((field) => {
+      const dst = $(String(field?.dstId || "").trim());
+      return { field, dst };
+    });
+    if (!destinations.length || destinations.some(({ dst }) => !dst)) return false;
     const summary = mmxResolvedTestSummarySnapshot();
+    const model = mmxComputeMobileStickySummaryModel(summary);
     if (
       summary &&
-      mmxMobileStickyShouldUseSourceText(summary.balanceText) &&
-      mmxMobileStickyShouldUseSourceText(summary.perHourText) &&
-      mmxMobileStickyShouldUseSourceText(summary.maxDdText)
+      destinations
+        .filter(({ field }) => field?.required !== false)
+        .every(({ field }) => mmxMobileStickyShouldUseSourceText(model?.[field.summaryTextKey]))
     ) {
-      balanceDst.textContent = summary.balanceText;
-      phrDst.textContent = summary.perHourText;
-      maxDdDst.textContent = summary.maxDdText;
-      balanceDst.className = `v ${summary.balanceTone || "neu"}`;
-      phrDst.className = `v ${summary.perHourTone || "neu"}`;
-      maxDdDst.className = `v ${summary.maxDdTone || "neu"}`;
+      for (const { field, dst } of destinations) {
+        mmxApplyMobileStickySummaryField(field, model, dst);
+      }
       return true;
     }
-    const mappings = [
-      ["testSummaryBalance", balanceDst],
-      ["testSummaryPhr", phrDst],
-      ["testSummaryMaxDd", maxDdDst],
-    ];
     const resolved = [];
-    for (const [srcId, dst] of mappings) {
-      const src = $(srcId);
+    for (const { field, dst } of destinations) {
+      if (field?.required === false) continue;
+      const src = $(String(field?.srcId || "").trim());
       if (!src || !dst) return false;
       const srcText = String(src.textContent || "").trim();
       if (!mmxMobileStickyShouldUseSourceText(srcText)) return false;
-      resolved.push([src, dst, srcText]);
+      resolved.push([field, src, dst, srcText]);
     }
-    for (const [src, dst, srcText] of resolved) {
+    for (const [field, src, dst, srcText] of resolved) {
       dst.textContent = srcText;
       dst.className = String(src.className || "v neu");
+      const containerId = String(field?.containerId || "").trim();
+      if (containerId) {
+        const container = $(containerId);
+        mmxSetCpuTone(container, null);
+      }
+    }
+    for (const { field, dst } of destinations) {
+      if (field?.required !== false) continue;
+      mmxApplyMobileStickySummaryField(field, model, dst);
     }
     return true;
   }
@@ -8217,11 +8345,11 @@
   }
   function mmxEnsureMobileStickySummaryObserver(){
     if (!mmxIsMobileViewport()) return;
+    if (!mmxBootMinimalReady) return;
+    if (!mmxMobileDeferredInteractiveReady()) return;
     if (mmxMobileStickySummaryObserver || typeof MutationObserver !== "function") return;
     const nodes = [
-      $("testSummaryBalance"),
-      $("testSummaryPhr"),
-      $("testSummaryMaxDd"),
+      ...mmxMobileStickySummaryFields().map((field) => $(String(field?.observerSrcId || field?.srcId || "").trim())),
       $("paperSbPnl"),
     ].filter(Boolean);
     if (!nodes.length) return;
@@ -8234,6 +8362,7 @@
       } catch {}
     }
     mmxMobileStickySummaryObserver = observer;
+    try { mmxSyncMobileStickyShell(); } catch {}
   }
   function mmxComputeMobileWorkerMaxDdUsd(rowsLike, startBalanceUsdLike = 100){
     const rows = Array.isArray(rowsLike) ? rowsLike : [];
@@ -8359,6 +8488,7 @@
   }
   function mmxSyncMobileStickyShell(){
     if (!mmxIsMobileViewport()) return;
+    const prevStickyHeightPx = Number(mmxLastMobileStickyMeasuredHeightPx);
     const timerSrc = $("timer");
     const timerDst = $("mobileStickyTimer");
     if (timerSrc && timerDst) timerDst.innerHTML = timerSrc.innerHTML;
@@ -8370,7 +8500,7 @@
     const pnlDst = $("mobileStickySessionPnl");
     if (pnlSrc && pnlDst) {
       const pnlText = String(pnlSrc.textContent || "").trim();
-      if (mmxMobileStickyShouldUseSourceText(pnlText)) {
+      if (mmxMobileStickyShouldUsePnlText(pnlText)) {
         pnlDst.textContent = pnlText;
         mmxApplyStickyValueTone(
           pnlDst,
@@ -8380,13 +8510,22 @@
             : ((pnlSrc.classList.contains("neg") || pnlSrc.classList.contains("loss")) ? "neg" : "neu")
         );
       }
+    } else if (pnlDst) {
+      const pnlModel = mmxComputeMobileStickySessionPnlModel();
+      if (pnlModel && mmxMobileStickyShouldUsePnlText(pnlModel.text)) {
+        pnlDst.textContent = pnlModel.text;
+        mmxApplyStickyValueTone(pnlDst, pnlModel.text, pnlModel.tone);
+      }
+    }
+    if (pnlDst && mmxMobileStickyTextIsMissing(pnlDst.textContent)) {
+      const pnlModel = mmxComputeMobileStickySessionPnlModel();
+      if (pnlModel && mmxMobileStickyShouldUsePnlText(pnlModel.text)) {
+        pnlDst.textContent = pnlModel.text;
+        mmxApplyStickyValueTone(pnlDst, pnlModel.text, pnlModel.tone);
+      }
     }
     const missingSummary =
-      (!syncedSummary && (
-        mmxMobileStickyTextIsMissing($("mobileStickySummaryBalance")?.textContent) ||
-        mmxMobileStickyTextIsMissing($("mobileStickySummaryPhr")?.textContent) ||
-        mmxMobileStickyTextIsMissing($("mobileStickySummaryMaxDd")?.textContent)
-      )) ||
+      (!syncedSummary && mmxMobileStickyRequiredSummaryDestIds().some((id) => mmxMobileStickyTextIsMissing($(id)?.textContent))) ||
       mmxMobileStickyTextIsMissing($("mobileStickySessionPnl")?.textContent);
     const chartBooted =
       !!mmxMobileEquityRenderReleased ||
@@ -8394,6 +8533,12 @@
       (Number(lastFocusedChartTickTsMs || 0) > 0);
     if (missingSummary && !mmxMobileStickyWorkerSeedDone && chartBooted) {
       void mmxSeedMobileStickyShellFromWorker("sync_blank");
+    }
+    const nextStickyHeightPx = Number(mmxMobileStickyShellHeightPx());
+    if (Number.isFinite(nextStickyHeightPx) && nextStickyHeightPx !== prevStickyHeightPx) {
+      mmxLastMobileStickyMeasuredHeightPx = nextStickyHeightPx;
+      try { mmxSyncMobileOverlayLayout(); } catch {}
+      try { mmxUpdateMobileLiveStage(); } catch {}
     }
     mmxMaybeAdvanceMobileBootFromValues();
   }
@@ -8414,6 +8559,31 @@
     try { mmxUpdateMobileLiveStage(); } catch {}
     try { mmxEnsureMobileStickySummaryObserver(); } catch {}
     try { mmxScheduleMobileStickyMirrorRetries(); } catch {}
+  }
+  function mmxRefreshMobileStickyAfterBoot(){
+    if (!mmxIsMobileViewport()) return false;
+    if (!mmxBootMinimalReady) return false;
+    if (!mmxMobileDeferredInteractiveReady()) return false;
+    if (mmxMobileStickyPostBootRefreshDone) return true;
+    const focusedBot = ((typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null) || null;
+    try {
+      if (focusedBot) mmxPrimeMobileStickySummaryFromFocusedBot(focusedBot);
+      const shell = $("mobileStickyShell");
+      if (shell instanceof HTMLElement) {
+        shell.style.top = `${mmxStickyTopOffsetPx()}px`;
+        shell.classList.add("show-stop", "show-summary");
+        shell.setAttribute("aria-hidden", "false");
+      }
+    } catch {}
+    try { mmxSyncMobileStickyShell(); } catch {}
+    try { mmxEnsureMobileStickySummaryObserver(); } catch {}
+    const summaryReady = mmxMobileStickyRequiredSummaryDestIds().every((id) => !mmxMobileStickyTextIsMissing($(id)?.textContent));
+    const pnlReady = !mmxMobileStickyTextIsMissing($("mobileStickySessionPnl")?.textContent);
+    if (summaryReady && pnlReady) {
+      mmxMobileStickyPostBootRefreshDone = true;
+      return true;
+    }
+    return false;
   }
   function mmxUpdateMobileLiveStage(){
     const liveWrap = $(".liveWrap");
@@ -10209,7 +10379,7 @@
   const TRACE_HISTORY_MANUAL_MAX_SESSIONS = 12;
   const AUTO_HISTORY_MAX_SESSIONS = 12;
   const AUTO_RECOVERY_HISTORY_MAX_SESSIONS = 12;
-  const EQUITY_RUN_HISTORY_MAX_SESSIONS = 500;
+  const EQUITY_RUN_HISTORY_MAX_SESSIONS = 5000;
   const AUTO_HISTORY_HYDRATE_MIN_INTERVAL_MS = 15000;
   const FOCUSED_HYDRATE_REQUEST_MIN_INTERVAL_MS = 12000;
   const SESSION_CARDS_MAX = 5;
@@ -11371,9 +11541,7 @@
         let continuityRows = [];
         if (instanceId) {
           try {
-            const continuityMaxSessions = mmxIsMobileViewport()
-              ? Math.min(Number(EQUITY_RUN_HISTORY_MAX_SESSIONS || 500), 180)
-              : Number(EQUITY_RUN_HISTORY_MAX_SESSIONS);
+            const continuityMaxSessions = Number(EQUITY_RUN_HISTORY_MAX_SESSIONS);
             if (mmxIsMobileViewport()) {
               const workerRows = await mmxFetchMobileEquityRowsViaWorker(instanceId, continuityMaxSessions, forceBust);
               continuityRows = normalizeContinuityRows(workerRows);
@@ -17000,7 +17168,11 @@
       const continuityLimit = Math.max(HISTORY_SESSION_SELECTOR_LIMIT + 2, 8);
       const marketPrefix = currentSlugKey ? sessionSlugBase(currentSlugKey) : "";
       const continuityCardsFromRows = async () => {
-        const continuityUrl = `/api/v2/bots/${encodeURIComponent(instanceId)}/continuity-history?includeTrace=0&maxSessions=${encodeURIComponent(String(continuityLimit))}`;
+        const params = new URLSearchParams();
+        if (marketPrefix) params.set("marketPrefix", marketPrefix);
+        params.set("limit", String(continuityLimit));
+        params.set("refresh", "1");
+        const continuityUrl = `/api/v2/bots/${encodeURIComponent(instanceId)}/last-session-history?${params.toString()}`;
         const continuityPayload = await mmxFetchLatestJson(
           `history:continuity_recent:${instanceId}:${marketPrefix || "na"}`,
           mmxApiUrl(continuityUrl, { readOnly: true }),
@@ -20132,6 +20304,8 @@
     const tick = (ts) => {
       mmxMobileLiveWindowRaf = requestAnimationFrame(tick);
       if (!mmxIsMobileViewport()) return;
+      if (!mmxBootMinimalReady) return;
+      if (!mmxMobileDeferredInteractiveReady()) return;
       if (!$(".liveWrap")?.classList?.contains("mobileLiveStageActive")) return;
       const frameMs = Number(ts);
       if (
@@ -24083,7 +24257,7 @@
               if (Number.isFinite(authoritativeBalanceUsd)) {
                 runningBalanceUsd = authoritativeBalanceUsd;
               } else {
-                const pnlUsd = Number(row?.correctedPnlUsd ?? row?.actualPnlUsd);
+                const pnlUsd = Number(row?.correctedPnlUsd ?? row?.actualPnlUsd ?? row?.pnlUsd);
                 if (!row?.excludeFromPnl && Number.isFinite(pnlUsd)) {
                   runningBalanceUsd += pnlUsd;
                 }
@@ -24117,7 +24291,7 @@
             </thead>
             <tbody>
               ${recentCompactRows.map((row, idx) => {
-                const pnlUsd = Number(row?.correctedPnlUsd ?? row?.actualPnlUsd);
+                const pnlUsd = Number(row?.correctedPnlUsd ?? row?.actualPnlUsd ?? row?.pnlUsd);
                 const balance = Number(row?.displayBalanceUsd ?? row?.balanceUsd);
                 const timeLabel = formatCompactRowTime(row);
                 return `
@@ -24471,7 +24645,7 @@
           if (Number.isFinite(authoritativeBalanceUsd)) {
             runningBalanceUsd = authoritativeBalanceUsd;
           } else {
-            const pnlUsd = Number(row?.correctedPnlUsd ?? row?.actualPnlUsd);
+            const pnlUsd = Number(row?.correctedPnlUsd ?? row?.actualPnlUsd ?? row?.pnlUsd);
             if (!row?.excludeFromPnl && Number.isFinite(pnlUsd)) {
               runningBalanceUsd += pnlUsd;
             }
@@ -30259,10 +30433,11 @@
       prices.insertBefore(gaugeCard, slot.nextSibling);
     }
   }
-  function mmxArrangeMobileLiveHero(){
+  function mmxArrangeMobileLiveHero(opts = {}){
     const mount = $("mobileLiveHeroMount");
     const liveWrap = document.querySelector(".liveWrap");
     if (!(mount instanceof HTMLElement) || !(liveWrap instanceof HTMLElement)) return;
+    const lightweight = opts?.lightweight === true;
     if (!mmxDesktopLiveHeroParent) {
       mmxDesktopLiveHeroParent = liveWrap.parentNode;
       mmxDesktopLiveHeroNextSibling = liveWrap.nextSibling;
@@ -30275,6 +30450,7 @@
       mmxArrangeMobileLiveGauge();
       mmxBindMobileLiveOverlayDrag("trade");
       mmxBindMobileLiveOverlayDrag("feed");
+      if (lightweight) return;
       mmxApplyMobileLiveOverlayPositions({ forceDefault: true });
       mmxUpdateMobileStickyShell();
       mmxUpdateMobileLiveStage();
@@ -30321,7 +30497,6 @@
       requestAnimationFrame(() => {
         try { mmxUpdateMobileLiveStage(); } catch {}
       });
-      try { renderEquityCurve(); } catch {}
       return;
     }
     shelf.hidden = true;
@@ -31992,11 +32167,14 @@
     const perHour = Number.isFinite(elapsedHours) ? (pnl / elapsedHours) : NaN;
     const compareMaxDd = Number(bot?.compareMaxDdUsd);
     const curveMaxDd = Number(mmxCurveMaxDdByInstance.get(instanceId));
+    const runtimeMaxDd = Number(mmxMaxDdByInstance.get(instanceId));
     const maxDdUsd = Number.isFinite(Number(maxDdUsdOverride))
       ? Number(maxDdUsdOverride)
       : (Number.isFinite(compareMaxDd)
       ? compareMaxDd
-      : (Number.isFinite(curveMaxDd) ? curveMaxDd : NaN));
+      : (Number.isFinite(curveMaxDd)
+        ? curveMaxDd
+        : (Number.isFinite(runtimeMaxDd) ? runtimeMaxDd : NaN)));
     return {
       balanceUsd: balance,
       perHourUsd: perHour,
@@ -33067,6 +33245,23 @@
     };
     const fetchCurrentSessionPayload = async (currentOrigin, currentInstanceId, currentRunNum, currentLiveSlug) => {
       const tracePointCount = (traceLike) => Array.isArray(traceLike?.xMs) ? traceLike.xMs.length : 0;
+      const buildTraceHistoryUrl = () => {
+        const params = new URLSearchParams();
+        params.set("engine", "paper");
+        params.set("includeTrace", "1");
+        params.set("maxSessions", "3");
+        params.set("instanceId", String(currentInstanceId || ""));
+        if (currentLiveSlug) params.set("marketSlug", String(currentLiveSlug || ""));
+        const runNum = Math.floor(Number(currentRunNum));
+        if (Number.isFinite(runNum) && runNum > 0) {
+          params.set("scope", "run");
+          params.set("runNum", String(runNum));
+        } else {
+          params.set("scope", "runs");
+          params.set("runs", "50");
+        }
+        return `/api/session-history?${params.toString()}`;
+      };
       const mergeSessionRows = (primaryLike, secondaryLike) => {
         const primary = primaryLike && typeof primaryLike === "object" ? primaryLike : null;
         const secondary = secondaryLike && typeof secondaryLike === "object" ? secondaryLike : null;
@@ -33099,7 +33294,7 @@
         };
       };
       const continuityPayload = await mmxJget(
-        `/api/v2/bots/${encodeURIComponent(String(currentInstanceId))}/continuity-history?includeTrace=1&maxSessions=3`,
+        buildTraceHistoryUrl(),
         { origin: currentOrigin, timeoutMs: MMX_COMPARE_FETCH_TIMEOUT_MS }
       );
       const continuityRows = Array.isArray(continuityPayload?.sessions) ? continuityPayload.sessions : [];
@@ -33328,6 +33523,10 @@
     } finally {
       if (timerId != null) clearTimeout(timerId);
     }
+  }
+  function mmxCompareBootBurstSuppressed(){
+    const bootAtMs = Number(mmxBootStartedAtMs || 0);
+    return Number.isFinite(bootAtMs) && bootAtMs > 0 && (Date.now() - bootAtMs) < 15000;
   }
   const mmxCompareHostBackoffUntilByOrigin = new Map();
   const mmxCompareHostLastProbeAtByOrigin = new Map();
@@ -33583,17 +33782,33 @@
       return mmxCompareTrimSessionPayload(bot, payload);
     };
     const entries = await Promise.all(bots.map(async (bot) => {
+      const params = new URLSearchParams();
+      params.set("engine", "paper");
+      params.set("includeTrace", "1");
+      params.set("instanceId", String(bot?.instanceId || ""));
+      params.set(
+        "maxSessions",
+        String(
+          Math.max(
+            MMX_COMPARE_SESSION_FETCH_LIMIT + MMX_COMPARE_SESSION_FETCH_OVERFILL,
+            Math.min(
+              MMX_COMPARE_SESSION_FETCH_LIMIT_MAX + MMX_COMPARE_SESSION_FETCH_OVERFILL,
+              Math.floor(Number(mmxCompareState.historyFetchLimit) || MMX_COMPARE_SESSION_FETCH_LIMIT)
+            )
+          )
+        )
+      );
+      const botRunNum = Math.floor(Number(bot?.runNum));
+      if (Number.isFinite(botRunNum) && botRunNum > 0) {
+        params.set("scope", "run");
+        params.set("runNum", String(botRunNum));
+      } else {
+        params.set("scope", "runs");
+        params.set("runs", "50");
+      }
       const histRes = await Promise.allSettled([
         mmxJget(
-          `/api/v2/bots/${encodeURIComponent(String(bot?.instanceId || ""))}/continuity-history?includeTrace=1&maxSessions=${encodeURIComponent(String(
-            Math.max(
-              MMX_COMPARE_SESSION_FETCH_LIMIT + MMX_COMPARE_SESSION_FETCH_OVERFILL,
-              Math.min(
-                MMX_COMPARE_SESSION_FETCH_LIMIT_MAX + MMX_COMPARE_SESSION_FETCH_OVERFILL,
-                Math.floor(Number(mmxCompareState.historyFetchLimit) || MMX_COMPARE_SESSION_FETCH_LIMIT)
-              )
-            )
-          ))}`,
+          `/api/session-history?${params.toString()}`,
           { origin, timeoutMs: MMX_COMPARE_FETCH_TIMEOUT_MS }
         ),
       ]);
@@ -33746,6 +33961,7 @@
     const now = Date.now();
     if (mmxCompareRecoverInFlight) return false;
     if ((now - Number(mmxCompareLastRecoverMs || 0)) < 12000) return false;
+    if (mmxCompareBootBurstSuppressed()) return false;
     const rowsEl = $("compareRows");
     const statusEl = $("compareStatus");
     if (!(rowsEl instanceof HTMLElement)) return false;
@@ -33753,7 +33969,7 @@
     if (totalRows > 0) return false;
     let bots = Array.isArray(mmxState?.bots) ? mmxState.bots : [];
     if (bots.length < 2) {
-      try { await mmxRefreshAll(); } catch {}
+      try { await mmxRefreshAll({ includeHeavy: false, forceFreshBots: true }); } catch {}
       bots = Array.isArray(mmxState?.bots) ? mmxState.bots : [];
     }
     if (bots.length < 2) return false;
@@ -33779,13 +33995,15 @@
     const minCount = Math.max(1, Math.floor(Number(minCountLike) || 2));
     let seeds = mmxComparePlaceholderCardSeeds();
     if (seeds.length >= minCount) return seeds;
-    try {
-      const forced = await mmxForceLoadCurrentHostCompare();
-      if (Array.isArray(forced?.entries) && forced.entries.length >= minCount) {
-        return mmxComparePlaceholderCardSeeds();
-      }
-    } catch {}
-    try { await mmxRefreshAll(); } catch {}
+    if (!mmxCompareBootBurstSuppressed()) {
+      try {
+        const forced = await mmxForceLoadCurrentHostCompare();
+        if (Array.isArray(forced?.entries) && forced.entries.length >= minCount) {
+          return mmxComparePlaceholderCardSeeds();
+        }
+      } catch {}
+    }
+    try { await mmxRefreshAll({ includeHeavy: false, forceFreshBots: true }); } catch {}
     seeds = mmxComparePlaceholderCardSeeds();
     return seeds;
   }
@@ -35838,7 +36056,9 @@
             try {
               await mmxCompareMountLiveCards(localFallbackEntries);
             } catch {}
-            void mmxCompareRefreshLiveCardsBestEffort(localFallbackEntries, { timeoutMs: 1500 });
+            if (!mmxCompareBootBurstSuppressed()) {
+              void mmxCompareRefreshLiveCardsBestEffort(localFallbackEntries, { timeoutMs: 1500 });
+            }
           }
           return;
         }
@@ -35860,7 +36080,9 @@
           try {
             await mmxCompareMountLiveCards(fallbackEntries);
           } catch {}
-          void mmxCompareRefreshLiveCardsBestEffort(fallbackEntries, { timeoutMs: 1500 });
+          if (!mmxCompareBootBurstSuppressed()) {
+            void mmxCompareRefreshLiveCardsBestEffort(fallbackEntries, { timeoutMs: 1500 });
+          }
           return;
         }
         mmxSyncStandaloneHistoryVisibility(false);
@@ -35904,7 +36126,9 @@
       mmxApplyEmbeddedCompareEntries(seedEntries, failedHosts);
       statusEl.textContent = `Loading live current-session compare for ${seedEntries.length} active run${seedEntries.length === 1 ? "" : "s"}…`;
       await mmxCompareMountLiveCards(seedEntries);
-      void mmxCompareRefreshLiveCardsBestEffort(seedEntries, { timeoutMs: 1500 });
+      if (!mmxCompareBootBurstSuppressed()) {
+        void mmxCompareRefreshLiveCardsBestEffort(seedEntries, { timeoutMs: 1500 });
+      }
       const entries = mmxCompareUpsertPinnedEntry(seedEntries);
       mmxSyncStandaloneHistoryVisibility(entries.length > 0);
       const nextStructureSig = JSON.stringify({
@@ -36203,12 +36427,27 @@ self.onmessage = async (ev) => {
       }
     });
   }
+  function mmxShouldBypassOverlayWorkerForBoot(){
+    if (!mmxIsMobileViewport()) return false;
+    if (!mmxUseMobileAppShell()) return false;
+    if (mmxBootMinimalReady) return false;
+    const bootAtMs = Number(mmxBootStartedAtMs || 0);
+    return !(Number.isFinite(bootAtMs) && bootAtMs > 0 && (Date.now() - bootAtMs) > 20000);
+  }
   async function mmxFetchMobileOverlayJsonViaWorker(pathLike, opts = {}){
     const url = mmxOverlayWorkerApiUrl(pathLike);
     const directUrl = mmxDirectMobileOverlayFallbackUrl(pathLike);
+    const timeoutMs = Math.max(500, Math.floor(Number(opts?.timeoutMs) || 10000));
+    if (mmxShouldBypassOverlayWorkerForBoot() && directUrl) {
+      const directRes = await mmxFetchWithTimeout(directUrl, { cache: "no-store" }, timeoutMs);
+      if (!directRes || !directRes.ok) {
+        throw new Error(`direct_overlay_fetch_http_${Number(directRes?.status || 0)}`);
+      }
+      const directJson = await directRes.json();
+      return directJson && typeof directJson === "object" ? directJson : {};
+    }
     const worker = mmxEnsureReadOnlyJsonWorker();
     const id = ++mmxReadOnlyJsonWorkerReqSeq;
-    const timeoutMs = Math.max(500, Math.floor(Number(opts?.timeoutMs) || 10000));
     try {
       return await new Promise((resolve, reject) => {
         mmxReadOnlyJsonWorkerPending.set(id, { resolve, reject });
@@ -36255,6 +36494,14 @@ self.onmessage = async (ev) => {
     const directUrl = mmxDirectMobileOverlayFallbackUrl(
       `/api/v2/bots/${encodeURIComponent(instanceId)}/continuity-history?includeTrace=0&maxSessions=${encodeURIComponent(String(maxSessions))}${forceBust ? `&cb=${Date.now()}` : ""}`
     );
+    if (mmxShouldBypassOverlayWorkerForBoot() && directUrl) {
+      const directRes = await mmxFetchWithTimeout(directUrl, { cache: "no-store" }, forceBust ? 12000 : 6000);
+      if (!directRes || !directRes.ok) {
+        throw new Error(`direct_mobile_equity_fetch_http_${Number(directRes?.status || 0)}`);
+      }
+      const directJson = await directRes.json();
+      return Array.isArray(directJson?.sessions) ? directJson.sessions : [];
+    }
     const worker = mmxEnsureMobileEquityWorker();
     const id = ++mmxMobileEquityWorkerReqSeq;
     try {
@@ -39112,6 +39359,11 @@ self.onmessage = async (ev) => {
       if (mmxState.focusPinned && mmxState.selectedInstanceId) {
         const focusedNow = mmxState.bots.find((b) => String(b?.instanceId || "") === String(mmxState.selectedInstanceId || "")) || null;
         const focusedSlugNow = String(focusedNow?.runtime?.marketSlug || focusedNow?.marketSlug || focusedMarketSlug || currentSlug || "").trim();
+        if (focusedNow) {
+          try { renderTestSummaryPanel(focusedNow); } catch {}
+          try { mmxPrimeMobileStickySummaryFromFocusedBot(focusedNow); } catch {}
+          try { if (mmxIsMobileViewport()) mmxSyncMobileStickyShell(); } catch {}
+        }
         if (focusedSlugNow) {
           try { mmxMaybeBootstrapFocusedLiveChart(String(mmxState.selectedInstanceId || ""), focusedSlugNow, "refresh_all"); } catch {}
         }
@@ -39937,7 +40189,15 @@ self.onmessage = async (ev) => {
 
   connectWS();
   if (mmxIsMobileViewport()) {
-    try { mmxStartMobileSecondaryBoot("boot_timer"); } catch {}
+    mmxConnectWs();
+    void (async () => {
+      try {
+        await mmxRefreshAll({ includeHeavy: false, forceFreshBots: true, bypassDedup: true });
+        try { mmxStartMobileSecondaryBoot("boot_timer", { skipInitialRefresh: true }); } catch {}
+      } finally {
+        mmxMarkBootMinimalReady();
+      }
+    })();
   } else {
     mmxConnectWs();
     void (async () => {
@@ -39968,7 +40228,35 @@ self.onmessage = async (ev) => {
   // On mobile, let the live chart boot first, then hydrate heavier equity/history work.
   // Desktop can still hydrate immediately.
   mmxScheduleStartupHeavyHydration("boot");
+  let mmxMobileRelayoutTimer = null;
+  function mmxScheduleMobileRelayout(reason = "event", delayMs = 0){
+    if (!mmxIsMobileViewport()) return;
+    if (mmxMobileRelayoutTimer) {
+      clearTimeout(mmxMobileRelayoutTimer);
+      mmxMobileRelayoutTimer = null;
+    }
+    mmxMobileRelayoutTimer = setTimeout(() => {
+      mmxMobileRelayoutTimer = null;
+      mmxArrangeMobileEquityShelf();
+      mmxArrangeMobileLiveHero({ lightweight: true });
+      mmxArrangeMobileHistorySheet();
+      mmxArrangeCompareMobileHero();
+      mmxApplyMobileLiveOverlayPositions();
+      if (mmxMobileDeferredInteractiveReady()) {
+        try { renderEquityCurve(); } catch {}
+        scheduleEquityCurveViewportRefresh(0);
+      }
+      try { mmxUpdateMobileLiveStage(); } catch {}
+      try { mmxInitHistoryViewportObserver(); } catch {}
+      try { setLiveChartSessionWindow(String(currentSlug || focusedMarketSlug || "").trim()); } catch {}
+      try { mmxRefreshMobileStickyAfterBoot(); } catch {}
+    }, Math.max(0, Number(delayMs) || 0));
+  }
   window.addEventListener("resize", () => {
+    if (mmxIsMobileViewport()) {
+      mmxScheduleMobileRelayout("resize", 30);
+      return;
+    }
     mmxRemoveLegacyLiveRuntimeCharts();
     renderEquityCurve();
     resizeAllCharts();
@@ -39989,6 +40277,10 @@ self.onmessage = async (ev) => {
     if (!mmxHistoryViewportPrimed) mmxInitHistoryViewportObserver();
   }, { passive: true });
   window.addEventListener("pageshow", () => {
+    if (mmxIsMobileViewport()) {
+      mmxScheduleMobileRelayout("pageshow", 30);
+      return;
+    }
     scheduleEquityCurveViewportRefresh(0);
     scheduleEquityCurveViewportRefresh(250);
     mmxScheduleRunEquityHydrateRetries("pageshow");
@@ -40001,6 +40293,10 @@ self.onmessage = async (ev) => {
     mmxApplyMobileLiveOverlayPositions();
   });
   window.addEventListener("orientationchange", () => {
+    if (mmxIsMobileViewport()) {
+      mmxScheduleMobileRelayout("orientationchange", 60);
+      return;
+    }
     scheduleEquityCurveViewportRefresh(50);
     scheduleEquityCurveViewportRefresh(300);
     mmxScheduleRunEquityHydrateRetries("orientationchange");
@@ -40023,6 +40319,10 @@ self.onmessage = async (ev) => {
       try { mmxPersistFocusedLiveTraceSnapshot(true); } catch {}
       return;
     }
+    if (mmxIsMobileViewport()) {
+      mmxScheduleMobileRelayout("visibility", 30);
+      return;
+    }
     scheduleEquityCurveViewportRefresh(0);
     scheduleEquityCurveViewportRefresh(250);
     mmxScheduleRunEquityHydrateRetries("visibility");
@@ -40033,6 +40333,9 @@ self.onmessage = async (ev) => {
     try { mmxHandleTabVisible("visibility"); } catch {}
   });
   window.addEventListener("pageshow", () => {
+    if (mmxIsMobileViewport()) {
+      return;
+    }
     mmxArrangeMobileEquityShelf();
     mmxArrangeMobileLiveHero();
     mmxArrangeMobileHistorySheet();
@@ -40040,6 +40343,10 @@ self.onmessage = async (ev) => {
     try { mmxHandleTabVisible("pageshow"); } catch {}
   });
   window.addEventListener("focus", () => {
+    if (mmxIsMobileViewport()) {
+      mmxScheduleMobileRelayout("focus", 30);
+      return;
+    }
     mmxArrangeMobileEquityShelf();
     mmxArrangeMobileLiveHero();
     mmxArrangeMobileHistorySheet();
@@ -40090,9 +40397,13 @@ self.onmessage = async (ev) => {
       }
     } catch {}
   }
-  mmxArrangeMobileEquityShelf();
-  mmxArrangeMobileLiveHero();
-  mmxArrangeMobileHistorySheet();
+  if (mmxIsMobileViewport()) {
+    mmxScheduleMobileRelayout("boot_initial", 0);
+  } else {
+    mmxArrangeMobileEquityShelf();
+    mmxArrangeMobileLiveHero();
+    mmxArrangeMobileHistorySheet();
+  }
 
   // ===== initial chart =====
   initLiveChart(null, "startup:boot");
