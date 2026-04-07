@@ -76,7 +76,6 @@ type CpuWorkBucket =
   | "http_live_markers"
   | "http_session_history"
   | "http_chart_history"
-  | "http_continuity"
   | "http_compare"
   | "http_portfolio"
   | "http_markets"
@@ -96,9 +95,8 @@ const CPU_WORK_BUCKET_META: Array<{ key: CpuWorkBucket; label: string; page: str
   { key: "http_bots", label: "bot api", page: "Market rail + focus" },
   { key: "http_focused_live_session", label: "focused live session", page: "Focused live chart bundle" },
   { key: "http_live_markers", label: "live markers", page: "Live chart markers" },
-  { key: "http_session_history", label: "session cards", page: "History cards" },
+  { key: "http_session_history", label: "history api", page: "History API" },
   { key: "http_chart_history", label: "chart history", page: "History traces" },
-  { key: "http_continuity", label: "continuity", page: "Cross histogram + continuity" },
   { key: "http_compare", label: "compare", page: "Compare + run dash" },
   { key: "http_portfolio", label: "portfolio", page: "Drawer portfolio" },
   { key: "http_markets", label: "markets", page: "Markets + strategies" },
@@ -172,9 +170,10 @@ function cpuWorkBucketForPathname(pathnameLike: any): CpuWorkBucket {
   if (/^\/api\/compare\/run-dashboard\b/i.test(pathname)) return "http_compare";
   if (/^\/api\/chart-history\b/i.test(pathname)) return "http_chart_history";
   if (/^\/api\/session-history\b/i.test(pathname)) return "http_session_history";
+  if (/^\/api\/v2\/bots\/[^/]+\/continuity-history\b/i.test(pathname)) return "http_session_history";
   if (/^\/api\/v2\/bots\/[^/]+\/focused-live-session\b/i.test(pathname)) return "http_focused_live_session";
   if (/^\/api\/v2\/bots\/[^/]+\/live-markers\b/i.test(pathname)) return "http_live_markers";
-  if (/^\/api\/v2\/bots\/[^/]+\/continuity-history\b/i.test(pathname) || /^\/api\/v2\/bots\/[^/]+\/rollover-ready\b/i.test(pathname)) return "http_continuity";
+  if (/^\/api\/v2\/bots\/[^/]+\/rollover-ready\b/i.test(pathname)) return "http_other";
   if (/^\/api\/v2\/bots\b/i.test(pathname)) return "http_bots";
   return "http_other";
 }
@@ -1389,6 +1388,7 @@ function isInflectionPositiveIterationStrategy(strategyIdRaw: any): boolean {
 const INFLECTION_POSITIVE_ITERATION_PARTIAL_QTY_PCT = 0.20;
 const INFLECTION_POSITIVE_ITERATION_PARTIAL_TARGET_PCT = 27;
 const INFLECTION_POSITIVE_ITERATION_RUNNER_TP_PX = 0.98;
+const PAPER_TP_TOUCH_FILL_EPSILON = 0.0005;
 const SINGLE_PARTIAL_EXIT_QTY_PCT = 0.20;
 function resolveRequestedExitShares(
   currentSharesRaw: number,
@@ -1411,6 +1411,13 @@ function resolveRequestedExitShares(
     if (!(requestedShares > 1e-9)) requestedShares = partialCapShares;
   }
   return floorTo6(Math.max(0, Math.min(currentShares, requestedShares)));
+}
+
+function paperLimitTouched(sideBidRaw: any, limitPxRaw: any): boolean {
+  const sideBid = Number(sideBidRaw);
+  const limitPx = Number(limitPxRaw);
+  if (!(Number.isFinite(sideBid) && Number.isFinite(limitPx))) return false;
+  return sideBid + PAPER_TP_TOUCH_FILL_EPSILON >= limitPx;
 }
 function paperSinglePartialCompletedForCurrentPosition(st: TradeState, side?: OutcomeSide | null): boolean {
   return (
@@ -9045,7 +9052,7 @@ function buildContinuitySessionsForInstance(instance: BotInstance, includeTrace:
       const traceRun = includeTrace ? compactSessionTraceForHistory(continuityRunTraceBySlug.get(slug) || null) : null;
       const traceCsv = compactSessionTraceForHistory(readSessionTraceFromCsv(slug));
       const traceCurrent = includeTrace ? compactSessionTraceForHistory(getCurrentSessionTraceForSlug(slug)) : null;
-      const accountingTrace = choosePreferredSessionTrace(traceCurrent, traceRun, traceCsv, traceIndex);
+      const accountingTrace = choosePreferredClosedSessionTrace(slug, closed, traceCurrent, traceRun, traceCsv, traceIndex);
       const trace = includeTrace ? accountingTrace : null;
       const continuityRaw = {
         ...(raw && typeof raw === "object" ? raw : {}),
@@ -9061,6 +9068,7 @@ function buildContinuitySessionsForInstance(instance: BotInstance, includeTrace:
       const corrected = closed
         ? (
             compactCorrected
+            || buildExplicitPendingExitCorrectedAccountingFromCompact(compact, accountingTrace || null)
             || buildCorrectedSessionAccountingFromCompact(normalized, compact, accountingTrace || null)
             || buildCorrectedSessionAccountingFromEvents(rn, slug, accountingTrace || null)
           )
@@ -9217,17 +9225,234 @@ function readSessionAuditCompact(runNum: number, slug: string): any | null {
       const size = Number(st.size || 0);
       const prev = sessionAuditCompactCache.get(key);
       if (prev && Number(prev.mtimeMs) === mtimeMs && Number(prev.size) === size) {
+        try { syncSessionAuditPnlTradeLog(rn, sg, prev.row ?? null); } catch {}
         return prev.row ?? null;
       }
       const row = JSON.parse(fs.readFileSync(p, "utf8"));
       sessionAuditCompactCache.set(key, { mtimeMs, size, row });
       trimSessionAuditCompactCache();
+      try { syncSessionAuditPnlTradeLog(rn, sg, row); } catch {}
       if (row && typeof row === "object") return row;
     }
     return null;
   } catch {
     return null;
   }
+}
+
+const SESSION_AUDIT_PNL_ACTION_PAPER = "SESSION_AUDIT_PNL_PAPER";
+const SESSION_AUDIT_PNL_ACTION_RE = /^SESSION_AUDIT_PNL_(PAPER|LIVE)$/i;
+const sessionAuditTradeLogSigByKey = new Map<string, string>();
+const sessionAuditRunBackfillSigByRun = new Map<number, string>();
+
+function inferSessionEndMsFromSlug(slugLike: any): number | null {
+  const startMs = inferSessionStartMsFromSlug(slugLike);
+  if (!(Number.isFinite(Number(startMs)) && Number(startMs) > 0)) return null;
+  const durationMs = inferSessionDurationMsFromSlug(slugLike);
+  if (!(Number.isFinite(Number(durationMs)) && Number(durationMs) > 0)) return null;
+  return Number(startMs) + Number(durationMs) - 1000;
+}
+
+function latestAuditAccountingFromCompact(compactLike: any): {
+  actualNetPnlUsd: number | null;
+  correctedNetPnlUsd: number | null;
+  correctedGrossPnlUsd: number | null;
+  correctedFeesUsd: number | null;
+  correctedDeltaUsd: number | null;
+  projectedFillNetPnlUsd: number | null;
+  settleNetPnlUsd: number | null;
+  correctedExitStrategy: string | null;
+} | null {
+  const compact = compactLike && typeof compactLike === "object" ? compactLike : null;
+  if (!compact) return null;
+  const corrected =
+    correctedAccountingFromCompactAuditSummary(compact)
+    || buildExplicitPendingExitCorrectedAccountingFromCompact(compact, null);
+  const sessionSummary = compact?.sessionSummary && typeof compact.sessionSummary === "object"
+    ? compact.sessionSummary
+    : {};
+  const actualNetPnlUsd = Number.isFinite(Number(sessionSummary?.pnlUsd))
+    ? Number(sessionSummary.pnlUsd)
+    : (corrected?.actualNetPnlUsd ?? null);
+  const correctedNetPnlUsd = corrected?.correctedNetPnlUsd ?? actualNetPnlUsd;
+  if (!Number.isFinite(Number(correctedNetPnlUsd))) return null;
+  return {
+    actualNetPnlUsd: Number.isFinite(Number(actualNetPnlUsd)) ? Number(actualNetPnlUsd) : null,
+    correctedNetPnlUsd: Number(correctedNetPnlUsd),
+    correctedGrossPnlUsd: Number.isFinite(Number(corrected?.correctedGrossPnlUsd))
+      ? Number(corrected?.correctedGrossPnlUsd)
+      : null,
+    correctedFeesUsd: Number.isFinite(Number(corrected?.correctedFeesUsd))
+      ? Number(corrected?.correctedFeesUsd)
+      : null,
+    correctedDeltaUsd: Number.isFinite(Number(corrected?.correctedDeltaUsd))
+      ? Number(corrected?.correctedDeltaUsd)
+      : null,
+    projectedFillNetPnlUsd: Number.isFinite(Number(corrected?.projectedFillNetPnlUsd))
+      ? Number(corrected?.projectedFillNetPnlUsd)
+      : null,
+    settleNetPnlUsd: Number.isFinite(Number(corrected?.settleNetPnlUsd))
+      ? Number(corrected?.settleNetPnlUsd)
+      : null,
+    correctedExitStrategy: corrected?.correctedExitStrategy != null
+      ? String(corrected.correctedExitStrategy)
+      : null,
+  };
+}
+
+function syncSessionAuditPnlTradeLog(runNum: number, slugLike: any, compactLike: any): any | null {
+  try {
+    const rn = Math.floor(Number(runNum));
+    const slug = String(slugLike || "").trim().toLowerCase();
+    const compact = compactLike && typeof compactLike === "object" ? compactLike : null;
+    if (!(Number.isFinite(rn) && rn > 0 && slug && compact)) return null;
+    const accounting = latestAuditAccountingFromCompact(compact);
+    if (!accounting || !Number.isFinite(Number(accounting.correctedNetPnlUsd))) return null;
+    const generatedAtMsRaw = Date.parse(String(compact?.generatedAtIso || ""));
+    const generatedAtMs = Number.isFinite(generatedAtMsRaw) && generatedAtMsRaw > 0
+      ? Number(generatedAtMsRaw)
+      : nowMs();
+    const signature = JSON.stringify({
+      generatedAtMs,
+      correctedNetPnlUsd: Number(accounting.correctedNetPnlUsd),
+      actualNetPnlUsd: Number.isFinite(Number(accounting.actualNetPnlUsd)) ? Number(accounting.actualNetPnlUsd) : null,
+      correctedDeltaUsd: Number.isFinite(Number(accounting.correctedDeltaUsd)) ? Number(accounting.correctedDeltaUsd) : null,
+      excludeFromPnl: !!compact?.excludeFromPnl,
+      issues: Array.isArray(compact?.issues) ? compact.issues : [],
+    });
+    const sigKey = `${rn}:${slug}`;
+    if (sessionAuditTradeLogSigByKey.get(sigKey) === signature) return null;
+    sessionAuditTradeLogSigByKey.set(sigKey, signature);
+
+    const summary = readBotRunSummary(rn) || null;
+    const sessionSummary = compact?.sessionSummary && typeof compact.sessionSummary === "object"
+      ? compact.sessionSummary
+      : {};
+    const sessionStartMs = Number.isFinite(Number(sessionSummary?.startMs))
+      ? Number(sessionSummary.startMs)
+      : inferSessionStartMsFromSlug(slug);
+    const sessionEndMs = Number.isFinite(Number(sessionSummary?.endMs))
+      ? Number(sessionSummary.endMs)
+      : (
+          Number.isFinite(Number(sessionSummary?.exitTsMs))
+            ? Number(sessionSummary.exitTsMs)
+            : inferSessionEndMsFromSlug(slug)
+        );
+    const payload = {
+      type: "trade",
+      runId: rn,
+      runStartMs: Number.isFinite(Number(summary?.startedAtMs)) ? Number(summary.startedAtMs) : CURRENT_RUN_START_MS,
+      runStartIso: String(summary?.startedAtIso || summary?.startedAt || CURRENT_RUN_START_ISO || ""),
+      t: generatedAtMs,
+      iso: new Date(generatedAtMs).toISOString(),
+      engine: "paper" as Engine,
+      executionMode: "audit",
+      action: SESSION_AUDIT_PNL_ACTION_PAPER,
+      instanceId: String(compact?.instanceId || summary?.instanceId || "").trim() || null,
+      strategyId: String(compact?.strategyId || summary?.strategyId || "").trim() || null,
+      market: {
+        slug,
+        startMs: Number.isFinite(Number(sessionStartMs)) ? Number(sessionStartMs) : null,
+        endMs: Number.isFinite(Number(sessionEndMs)) ? Number(sessionEndMs) : null,
+        volumeUsd: null,
+      },
+      st: {
+        marketSlug: slug,
+        entered: false,
+        exited: true,
+        side: null,
+        entryTsMs: Number.isFinite(Number(sessionStartMs)) ? Number(sessionStartMs) : null,
+        exitTsMs: Number.isFinite(Number(sessionEndMs)) ? Number(sessionEndMs) : null,
+        entryPx: null,
+        exitPx: null,
+        shares: null,
+        notionalUsd: null,
+        grossPnlUsd: Number.isFinite(Number(accounting.correctedGrossPnlUsd)) ? Number(accounting.correctedGrossPnlUsd) : null,
+        entryFeeUsd: null,
+        exitFeeUsd: null,
+        totalFeesUsd: Number.isFinite(Number(accounting.correctedFeesUsd)) ? Number(accounting.correctedFeesUsd) : null,
+        pnlUsd: Number(accounting.correctedNetPnlUsd),
+        roiPct: null,
+        holdSec: null,
+        balanceUsd: null,
+        stopFallbackTriggered: false,
+      },
+      sessionAudit: {
+        source: "compact_audit",
+        generatedAtIso: String(compact?.generatedAtIso || new Date(generatedAtMs).toISOString()),
+        completedAtMs: generatedAtMs,
+        sessionStartMs: Number.isFinite(Number(sessionStartMs)) ? Number(sessionStartMs) : null,
+        sessionEndMs: Number.isFinite(Number(sessionEndMs)) ? Number(sessionEndMs) : null,
+        actualNetPnlUsd: Number.isFinite(Number(accounting.actualNetPnlUsd)) ? Number(accounting.actualNetPnlUsd) : null,
+        correctedNetPnlUsd: Number(accounting.correctedNetPnlUsd),
+        correctedDeltaUsd: Number.isFinite(Number(accounting.correctedDeltaUsd)) ? Number(accounting.correctedDeltaUsd) : null,
+        projectedFillNetPnlUsd: Number.isFinite(Number(accounting.projectedFillNetPnlUsd)) ? Number(accounting.projectedFillNetPnlUsd) : null,
+        settleNetPnlUsd: Number.isFinite(Number(accounting.settleNetPnlUsd)) ? Number(accounting.settleNetPnlUsd) : null,
+        correctedExitStrategy: accounting.correctedExitStrategy,
+        excludeFromPnl: !!compact?.excludeFromPnl,
+        issues: Array.isArray(compact?.issues) ? compact.issues.slice() : [],
+      },
+    };
+    appendTradeLog(payload);
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function syncSessionAuditPnlTradeLogsForRun(runNum: number): void {
+  try {
+    const rn = Math.floor(Number(runNum));
+    if (!(Number.isFinite(rn) && rn > 0)) return;
+    const auditDir = path.join(botRunDir(rn), "session_audits");
+    if (!fs.existsSync(auditDir)) return;
+    const files = fs.readdirSync(auditDir)
+      .filter((name) => /\.compact\.json$/i.test(String(name || "")))
+      .map((name) => path.join(auditDir, name))
+      .filter((p) => fs.existsSync(p))
+      .sort();
+    let newestMtimeMs = 0;
+    for (const filePath of files) {
+      try {
+        newestMtimeMs = Math.max(newestMtimeMs, Number(fs.statSync(filePath).mtimeMs || 0));
+      } catch {}
+    }
+    const signature = `${files.length}:${newestMtimeMs}`;
+    if (sessionAuditRunBackfillSigByRun.get(rn) === signature) return;
+    sessionAuditRunBackfillSigByRun.set(rn, signature);
+    for (const filePath of files) {
+      try {
+        const compact = JSON.parse(fs.readFileSync(filePath, "utf8"));
+        const slug = String(path.basename(filePath).replace(/\.compact\.json$/i, "") || "").trim().toLowerCase();
+        if (!slug) continue;
+        syncSessionAuditPnlTradeLog(rn, slug, compact);
+      } catch {}
+    }
+  } catch {}
+}
+
+function compactAuditHasExplicitPendingExitOrders(compactLike: any): boolean {
+  try {
+    const compact = compactLike && typeof compactLike === "object" ? compactLike : null;
+    const sideAudit = compact?.sideAudit && typeof compact.sideAudit === "object" ? compact.sideAudit : {};
+    for (const side of ["UP", "DOWN"]) {
+      const audit = sideAudit?.[side];
+      if (!audit || typeof audit !== "object") continue;
+      const timeline = Array.isArray(audit?.timeline) ? audit.timeline : [];
+      for (const row of timeline) {
+        const ev = String(row?.event || "").trim().toLowerCase();
+        if (ev !== "exit_order") continue;
+        const px =
+          Number(row?.intendedPx ?? row?.px ?? row?.signalPx ?? row?.exitPx ?? row?.actualFillPx);
+        const shares =
+          Number(row?.sharesActual ?? row?.sharesRequested ?? row?.sharesClosed ?? row?.soldShares ?? row?.shares);
+        if (Number.isFinite(px) && px >= 0 && px <= 1.1 && Number.isFinite(shares) && shares > 1e-6) {
+          return true;
+        }
+      }
+    }
+  } catch {}
+  return false;
 }
 
 function correctedAccountingFromCompactAuditSummary(compactLike: any): {
@@ -9247,6 +9472,13 @@ function correctedAccountingFromCompactAuditSummary(compactLike: any): {
     ? compact.correctedSummary
     : null;
   if (!summary) return null;
+  const correctedExitStrategy = String(summary.correctedExitStrategy || "actual_fills_only");
+  if (
+    /settle_remaining/i.test(correctedExitStrategy)
+    && compactAuditHasExplicitPendingExitOrders(compact)
+  ) {
+    return null;
+  }
   const correctedNetPnlUsd = Number(summary.correctedNetPnlUsd);
   if (!Number.isFinite(correctedNetPnlUsd)) return null;
   return {
@@ -9259,8 +9491,128 @@ function correctedAccountingFromCompactAuditSummary(compactLike: any): {
     correctedDeltaUsd: Number.isFinite(Number(summary.correctedDeltaUsd)) ? Number(summary.correctedDeltaUsd) : null,
     projectedFillNetPnlUsd: Number.isFinite(Number(summary.projectedFillNetPnlUsd)) ? Number(summary.projectedFillNetPnlUsd) : 0,
     settleNetPnlUsd: Number.isFinite(Number(summary.settleNetPnlUsd)) ? Number(summary.settleNetPnlUsd) : 0,
-    correctedExitStrategy: String(summary.correctedExitStrategy || "actual_fills_only"),
+    correctedExitStrategy,
   };
+}
+
+function buildExplicitPendingExitCorrectedAccountingFromCompact(compactLike: any, traceLike: any): any | null {
+  try {
+    const compact = compactLike && typeof compactLike === "object" ? compactLike : null;
+    if (!compact || !compactAuditHasExplicitPendingExitOrders(compact)) return null;
+    const toFinite = (v: any): number | null => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    const isSyntheticSettle = (rowLike: any): boolean => {
+      const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+      if (!row) return false;
+      const exitType = String(row?.exitType || "").trim().toLowerCase();
+      const fillSource = String(row?.fillSource || "").trim().toLowerCase();
+      return row?.synthetic === true || exitType === "settle" || /synthesized_settle/.test(fillSource);
+    };
+    const sideAudit = compact?.sideAudit && typeof compact.sideAudit === "object" ? compact.sideAudit : {};
+    const sessionSummary = compact?.sessionSummary && typeof compact.sessionSummary === "object" ? compact.sessionSummary : {};
+    const actualNetPnlUsd = Number.isFinite(Number(sessionSummary?.pnlUsd)) ? Number(sessionSummary.pnlUsd) : 0;
+    const actualFeesUsd = Number.isFinite(Number(sessionSummary?.feesUsd)) ? Number(sessionSummary.feesUsd) : 0;
+    const actualGrossPnlUsd = Number.isFinite(Number(sessionSummary?.grossPnlUsd))
+      ? Number(sessionSummary.grossPnlUsd)
+      : Number(actualNetPnlUsd) + Number(actualFeesUsd);
+    let correctedNetPnlUsd = Number(actualNetPnlUsd) || 0;
+    let correctedGrossPnlUsd = Number(actualGrossPnlUsd) || 0;
+    let projectedFillNetPnlUsd = 0;
+    let settleNetPnlUsd = 0;
+    const correctedBits = new Set<string>();
+
+    for (const side of ["UP", "DOWN"] as OutcomeSide[]) {
+      const audit = sideAudit?.[side] && typeof sideAudit[side] === "object" ? sideAudit[side] : {};
+      const fills = audit?.fills && typeof audit.fills === "object" ? audit.fills : {};
+      const timeline = Array.isArray(audit?.timeline) ? audit.timeline : [];
+      const entryFill =
+        (fills?.entry && typeof fills.entry === "object" ? fills.entry : null)
+        || timeline.find((row: any) => String(row?.event || "").trim().toLowerCase() === "enter")
+        || null;
+      const entryPx =
+        toFinite(entryFill?.entryPx)
+        ?? toFinite(entryFill?.actualFillPx)
+        ?? toFinite(entryFill?.fillPx)
+        ?? toFinite(entryFill?.signalPx)
+        ?? null;
+      const entryShares =
+        toFinite(entryFill?.shares)
+        ?? toFinite(entryFill?.sharesRequested)
+        ?? null;
+      if (!(Number.isFinite(Number(entryPx)) && Number(entryPx) > 0 && Number.isFinite(Number(entryShares)) && Number(entryShares) > 1e-6)) {
+        continue;
+      }
+      let remainingShares = Number(entryShares);
+      const actualExitFills = [
+        fills?.derisk && typeof fills.derisk === "object" ? fills.derisk : null,
+        fills?.exit && typeof fills.exit === "object" ? fills.exit : null,
+      ].filter((row: any) => row && !isSyntheticSettle(row));
+      for (const fill of actualExitFills) {
+        const sharesClosed = Math.max(0, Number(toFinite(fill?.sharesClosed) ?? toFinite(fill?.soldShares) ?? toFinite(fill?.shares) ?? 0));
+        if (sharesClosed > 1e-6) remainingShares = Math.max(0, remainingShares - sharesClosed);
+      }
+      const exitOrders = timeline
+        .filter((row: any) => String(row?.event || "").trim().toLowerCase() === "exit_order")
+        .sort((a: any, b: any) => Number(a?.tsMs || 0) - Number(b?.tsMs || 0));
+      for (const row of exitOrders) {
+        if (!(remainingShares > 1e-6)) break;
+        const px =
+          toFinite(row?.exitPx)
+          ?? toFinite(row?.intendedPx)
+          ?? toFinite(row?.actualFillPx)
+          ?? toFinite(row?.fillPx)
+          ?? null;
+        const requestedShares =
+          toFinite(row?.sharesRequested)
+          ?? toFinite(row?.sharesActual)
+          ?? toFinite(row?.sharesClosed)
+          ?? toFinite(row?.shares)
+          ?? null;
+        if (!(Number.isFinite(Number(px)) && Number(px) >= 0 && Number(px) <= 1.1)) continue;
+        const sharesClosed = Math.max(
+          0,
+          Math.min(
+            remainingShares,
+            Number.isFinite(Number(requestedShares)) && Number(requestedShares) > 0 ? Number(requestedShares) : remainingShares
+          )
+        );
+        if (!(sharesClosed > 1e-6)) continue;
+        const gross = (Number(px) - Number(entryPx)) * sharesClosed;
+        projectedFillNetPnlUsd += gross;
+        correctedGrossPnlUsd += gross;
+        correctedNetPnlUsd += gross;
+        remainingShares = Math.max(0, remainingShares - sharesClosed);
+        correctedBits.add("projected_exit_fill");
+      }
+      if (remainingShares > 1e-6) {
+        const settlePx = correctedSettlePxForOutcomeTrace(traceLike, side);
+        if (Number.isFinite(Number(settlePx))) {
+          const settleGross = (Number(settlePx) - Number(entryPx)) * remainingShares;
+          settleNetPnlUsd += settleGross;
+          correctedGrossPnlUsd += settleGross;
+          correctedNetPnlUsd += settleGross;
+          correctedBits.add("settle_remaining");
+        }
+      }
+    }
+
+    return {
+      actualNetPnlUsd: Number(Number(actualNetPnlUsd || 0).toFixed(10)),
+      actualGrossPnlUsd: Number(Number(actualGrossPnlUsd || 0).toFixed(10)),
+      actualFeesUsd: Number(Number(actualFeesUsd || 0).toFixed(4)),
+      correctedNetPnlUsd: Number(Number(correctedNetPnlUsd || 0).toFixed(10)),
+      correctedGrossPnlUsd: Number(Number(correctedGrossPnlUsd || 0).toFixed(10)),
+      correctedFeesUsd: Number(Number(actualFeesUsd || 0).toFixed(4)),
+      correctedDeltaUsd: Number(Number((correctedNetPnlUsd || 0) - (actualNetPnlUsd || 0)).toFixed(10)),
+      projectedFillNetPnlUsd: Number(Number(projectedFillNetPnlUsd || 0).toFixed(10)),
+      settleNetPnlUsd: Number(Number(settleNetPnlUsd || 0).toFixed(10)),
+      correctedExitStrategy: correctedBits.size ? Array.from(correctedBits.values()).join(" + ") : "actual_fills_only",
+    };
+  } catch {
+    return null;
+  }
 }
 
 function humanizeNoTradeReason(rawLike: any): string | null {
@@ -11532,6 +11884,52 @@ function reconcileBotStrategySnapshotForRuntime(
   };
 }
 
+function refreshBotStrategySnapshotForApi(
+  instance: BotInstance,
+  rt: BotRuntime | null | undefined,
+  srt: BotStrategyRuntime | null | undefined
+): { snapshot: any | null; decisionSnapshot: any | null } {
+  const runtime = rt || null;
+  const strategyRt = srt || null;
+  let snapshot = strategyRt?.lastSnapshot ?? null;
+  if (!snapshot && strategyRt?.strategy && typeof strategyRt.strategy.snapshot === "function") {
+    try {
+      snapshot = strategyRt.strategy.snapshot();
+      strategyRt.lastSnapshot = snapshot;
+      strategyRt.lastSnapshotAtMs = nowMs();
+    } catch {}
+  }
+  if (runtime && snapshot) {
+    snapshot = reconcileBotStrategySnapshotForRuntime(instance, runtime, snapshot);
+    if (strategyRt) strategyRt.lastSnapshot = snapshot;
+  }
+  let decisionSnapshot = cloneJsonLike((runtime as any)?.__latestDecisionSnapshot || null, null);
+  if (!decisionSnapshot && runtime && snapshot) {
+    try {
+      const elapsedSec = Number.isFinite(Number(runtime?.entryTsMs)) && Number.isFinite(Number((runtime as any)?.marketStartMs))
+        ? Math.max(0, (nowMs() - Number((runtime as any).marketStartMs)) / 1000)
+        : 0;
+      decisionSnapshot = buildStrategyDecisionSnapshot(
+        snapshot,
+        {
+          upBid: Number(runtime?.upBid),
+          downBid: Number(runtime?.downBid),
+          elapsedSec,
+          marketSlug: String(runtime?.marketSlug || instance.marketSlug || ""),
+          quoteMeta: cloneJsonLike((runtime as any)?.__lastQuoteMeta || null, null),
+        },
+        null
+      );
+      (runtime as any).__latestDecisionSnapshot = decisionSnapshot;
+      (runtime as any).__latestDecisionSnapshotAtMs = nowMs();
+    } catch {}
+  }
+  return {
+    snapshot: snapshot ?? null,
+    decisionSnapshot: decisionSnapshot ?? null,
+  };
+}
+
 function hydrateBotRuntimeOpenPositionFromEvents(instance: BotInstance, rt: BotRuntime): boolean {
   if (!instance || !rt) return false;
   const inferred = inferOpenBotPositionFromEvents(
@@ -12618,6 +13016,10 @@ function scheduleSessionAuditRefresh(instance: BotInstance, slugRaw: any): void 
         SESSION_AUDIT_REFRESH_INFLIGHT.delete(key);
       });
       child.on("exit", () => {
+        try {
+          const compact = readSessionAuditCompact(runNum, slug);
+          if (compact) syncSessionAuditPnlTradeLog(runNum, slug, compact);
+        } catch {}
         SESSION_AUDIT_REFRESH_INFLIGHT.delete(key);
       });
       child.unref();
@@ -14138,6 +14540,18 @@ function clearBotRuntimeRunnerTpArtifacts(rt: BotRuntime): void {
   rtAny.__runnerTpAccountedFilledShares = 0;
 }
 
+function botRuntimeInflectionPositiveIterationPaperTpOrdersArmed(rt: BotRuntime): boolean {
+  const rtAny = rt as any;
+  return (
+    !!(rtAny.__pendingExitLimit && typeof rtAny.__pendingExitLimit === "object") ||
+    !!(rtAny.__runnerPendingExitLimit && typeof rtAny.__runnerPendingExitLimit === "object") ||
+    !!String(rtAny.tpOrderId || "").trim() ||
+    !!String(rtAny.runnerTpOrderId || "").trim() ||
+    (Number.isFinite(Number(rtAny.pendingTpLimitPx)) && Number(rtAny.pendingTpLimitPx) > 0) ||
+    (Number.isFinite(Number(rtAny.runnerPendingTpLimitPx)) && Number(rtAny.runnerPendingTpLimitPx) > 0)
+  );
+}
+
 function armBotRuntimeInflectionPositiveIterationPaperTpOrders(
   instance: BotInstance,
   rt: BotRuntime,
@@ -14155,6 +14569,10 @@ function armBotRuntimeInflectionPositiveIterationPaperTpOrders(
   const entryPx = Number(meta.entryPx);
   const shares = Number(meta.shares);
   if (!side || !(Number.isFinite(entryPx) && entryPx > 0) || !(Number.isFinite(shares) && shares > 1e-9)) return;
+  const alreadyArmed =
+    botRuntimeInflectionPositiveIterationPaperTpOrdersArmed(rt) ||
+    botRuntimeSinglePartialCompletedForCurrentPosition(rt);
+  if (alreadyArmed) return;
   const rtAny = rt as any;
   const partialShares = Math.max(0, Math.min(shares, shares * INFLECTION_POSITIVE_ITERATION_PARTIAL_QTY_PCT));
   const runnerShares = Math.max(0, shares - partialShares);
@@ -15407,6 +15825,22 @@ async function tickBotRuntime(instance: BotInstance, triggerCtx?: QuoteTickTrigg
     const quoteSeq = Number.isFinite(Number(triggerCtx?.pairSeq))
       ? Number(triggerCtx?.pairSeq)
       : (Number.isFinite(Number(pair?.seq)) ? Number(pair?.seq) : null);
+    if (
+      String(current?.slug || "").trim() === String(rt.marketSlug || instance.marketSlug || "").trim() &&
+      Number.isFinite(Number(rt.upBid)) &&
+      Number.isFinite(Number(rt.downBid))
+    ) {
+      // Record raw algo-input fidelity on the live decision tick cadence rather
+      // than the upstream quote timestamp. Reused quote timestamps can be older
+      // than the bot's accepted decision heartbeat and would otherwise collapse
+      // many live ticks into a single raw point.
+      recordAlgoInputTracePoint(
+        String(rt.marketSlug || instance.marketSlug || "").trim(),
+        tickTsMs,
+        Number(rt.upBid),
+        Number(rt.downBid)
+      );
+    }
     rtAny.__lastQuoteMeta = {
       source: quoteSource,
       pure: quotePure,
@@ -17884,8 +18318,7 @@ async function tickBotRuntime(instance: BotInstance, triggerCtx?: QuoteTickTrigg
             const curShares = Number(rt.shares);
             const canFill =
               Number.isFinite(pendingPx) &&
-              Number.isFinite(sideBid) &&
-              sideBid >= pendingPx &&
+              paperLimitTouched(sideBid, pendingPx) &&
               Number.isFinite(curShares) &&
               curShares > 0;
             const isExpired =
@@ -18057,8 +18490,7 @@ async function tickBotRuntime(instance: BotInstance, triggerCtx?: QuoteTickTrigg
             const curShares = Number(rt.shares);
             const canFill =
               Number.isFinite(pendingPx) &&
-              Number.isFinite(sideBid) &&
-              sideBid >= pendingPx &&
+              paperLimitTouched(sideBid, pendingPx) &&
               Number.isFinite(curShares) &&
               curShares > 0;
             const isExpired =
@@ -18762,6 +19194,17 @@ async function tickBotRuntime(instance: BotInstance, triggerCtx?: QuoteTickTrigg
               strategyExitRequested = false;
             }
             if (strategyExitRequested) {
+              const suppressExtraInflectionPaperLimit =
+                !shouldUseRealLiveExecutionForBot(instance) &&
+                isInflectionPositiveIterationStrategy(instance.strategyId) &&
+                botRuntimeInflectionPositiveIterationPaperTpOrdersArmed(rt);
+              if (suppressExtraInflectionPaperLimit) {
+                // This paper strategy manages exactly one partial TP and one runner TP.
+                // Do not let later generic strategy limit requests overwrite those resting exits.
+                strategyExitRequested = false;
+              }
+            }
+            if (strategyExitRequested) {
               if (
                 isDeriskRuntime &&
                 String(strategyExitType || "").toLowerCase() === "derisk"
@@ -18782,11 +19225,12 @@ async function tickBotRuntime(instance: BotInstance, triggerCtx?: QuoteTickTrigg
               const existingSide = String(existingLimit?.side || "").toUpperCase();
               const existingType = String(existingLimit?.exitType || "exit").toLowerCase();
               const existingShares = Number(existingLimit?.shares);
+              const desiredExitType = String(strategyExitType || "exit").toLowerCase();
               const desiredShares = Math.max(0, Math.min(Number(rt.shares), Number(strategyExitShares)));
               const samePendingLimit =
                 !!existingLimit &&
                 existingSide === String(rt.side || "").toUpperCase() &&
-                existingType === (strategyExitType || "exit") &&
+                existingType === desiredExitType &&
                 Number.isFinite(existingPx) &&
                 Math.abs(existingPx - Number(strategyExitPx)) <= 1e-9 &&
                 Number.isFinite(existingShares) &&
@@ -19922,9 +20366,21 @@ function getCurrentSessionTraceForSlug(
   const activeEndMs = Number((current as any)?.endMs);
   const activeOpen = !!activeSlug && Number.isFinite(activeEndMs) && Date.now() < activeEndMs;
   if (!slug || !activeOpen || slug !== activeSlug) return null;
-  // For the active session, stay memory-only. Prefer the exact algorithm-input
-  // trace if it exists; otherwise fall back to the sampled session trace.
-  const mem = sessionAlgoInputTraceMem.get(slug) || sessionTraceMem.get(slug);
+  // For the active session, prefer a merged view of persisted run trace plus
+  // in-memory trace. Watchdog heals can restart the child mid-session and wipe
+  // some in-memory points, so using the persisted run trace here preserves raw
+  // fidelity across those recoveries.
+  const traceSinceMs = Number.isFinite(activeStartMs)
+    ? Math.max(0, Number(activeStartMs) - 60_000)
+    : Math.max(0, Date.now() - 15 * 60_000);
+  const persisted =
+    readSessionTracesBySlug(traceSinceMs, SERVER_RUN_ID).get(slug)
+    || null;
+  const mem = choosePreferredSessionTrace(
+    persisted,
+    sessionAlgoInputTraceMem.get(slug) || null,
+    sessionTraceMem.get(slug) || null
+  );
   if (!mem) return null;
   const xMs: number[] = [];
   const up: number[] = [];
@@ -20004,8 +20460,28 @@ function getCurrentSessionDisplayTraceForSlug(
   const slug = String(slugRaw || "").trim();
   const activeSlug = String((current as any)?.slug || "").trim();
   const activeEndMs = Number((current as any)?.endMs);
+  const activeStartMs = Number((current as any)?.startMs);
   const activeOpen = !!activeSlug && Number.isFinite(activeEndMs) && Date.now() < activeEndMs;
   if (!slug || !activeOpen || slug !== activeSlug) return null;
+  const traceSinceMs = Number.isFinite(activeStartMs)
+    ? Math.max(0, Number(activeStartMs) - 60_000)
+    : Math.max(0, Date.now() - 15 * 60_000);
+  const persisted =
+    readSessionTracesBySlug(traceSinceMs, SERVER_RUN_ID).get(slug)
+    || null;
+  const algoMem = choosePreferredSessionTrace(
+    persisted,
+    sessionAlgoInputTraceMem.get(slug) || null
+  );
+  if (algoMem && Array.isArray(algoMem.xMs) && algoMem.xMs.length >= 2) {
+    const built = buildDisplayContinuousTrace({
+      xMs: algoMem.xMs,
+      up: algoMem.up,
+      down: algoMem.down,
+      source: String((algoMem as any)?.sourceFile || "algo_input_feed"),
+    });
+    if (built) return { slug, ...built };
+  }
   const mem = sessionTraceMem.get(slug) || null;
   if (!mem) return null;
   const xMs: number[] = [];
@@ -20090,6 +20566,17 @@ function buildDisplayContinuousTrace(traceLike: any): { xMs: number[]; up: numbe
   };
 }
 
+function compactFocusedDisplayTrace(traceRaw: any, maxPoints = 600): { xMs: number[]; up: number[]; down: number[]; source: string } | null {
+  const compact = compactSessionTraceForHistory(traceRaw, maxPoints);
+  if (!compact) return null;
+  return {
+    xMs: Array.isArray(compact?.xMs) ? compact.xMs : [],
+    up: Array.isArray(compact?.up) ? compact.up : [],
+    down: Array.isArray(compact?.down) ? compact.down : [],
+    source: String(compact?.source || traceRaw?.source || "focused_live_session:compact"),
+  };
+}
+
 function focusedLiveRuntimeLagMsNow(): number | null {
   const botTick = botTickGapStatsNow();
   return Number.isFinite(Number(botTick?.activeMaxRuntimeAgeMs))
@@ -20131,6 +20618,29 @@ function buildFocusedLiveSessionInvariants(bot: any, runtime: any, rawTrace: any
   const entered = !!runtime?.entered;
   const side = String(runtime?.side || "").trim().toUpperCase();
   const hasEntryMarker = markerTypes.has("entry_filled");
+  const quoteMeta = runtime && typeof runtime === "object" ? (runtime as any).__lastQuoteMeta || null : null;
+  const quoteFeed = runtime?.quoteFeed && typeof runtime.quoteFeed === "object" ? runtime.quoteFeed : null;
+  const pairSource = String(quoteFeed?.pairSource || "").trim() || null;
+  const streamEnabled = quoteFeed?.streamEnabled === true ? true : QUOTE_STREAM_ENABLED;
+  const streamConnected = quoteFeed?.streamConnected === true ? true : quoteStreamConnected;
+  const pairLagMs = Number.isFinite(Number(quoteFeed?.pairLagMs))
+    ? Number(quoteFeed?.pairLagMs)
+    : (Number.isFinite(Number(quoteMeta?.pairAgeMs)) ? Number(quoteMeta?.pairAgeMs) : NaN);
+  const pairObservedAgeMs = Number.isFinite(Number(quoteFeed?.pairObservedAgeMs))
+    ? Number(quoteFeed?.pairObservedAgeMs)
+    : NaN;
+  const streamLastMsgAgeMs = Number.isFinite(Number(quoteFeed?.streamLastMsgAgeMs))
+    ? Number(quoteFeed?.streamLastMsgAgeMs)
+    : (Number.isFinite(Number(quoteStreamLastMsgMs)) ? Math.max(0, Date.now() - Number(quoteStreamLastMsgMs)) : NaN);
+  const streamLastPriceMsgAgeMs = Number.isFinite(Number(quoteFeed?.streamLastPriceMsgAgeMs))
+    ? Number(quoteFeed?.streamLastPriceMsgAgeMs)
+    : (Number.isFinite(Number(quoteStreamLastPriceMsgMs)) ? Math.max(0, Date.now() - Number(quoteStreamLastPriceMsgMs)) : NaN);
+  const websocketHealthy =
+    streamEnabled &&
+    streamConnected &&
+    pairSource === "ws_direct" &&
+    (!Number.isFinite(pairLagMs) || pairLagMs <= 100) &&
+    (!Number.isFinite(streamLastPriceMsgAgeMs) || streamLastPriceMsgAgeMs <= 100);
   const staleMs =
     Number.isFinite(runtimeTickMs) && Number.isFinite(rawLastMs)
       ? Math.max(0, Number(runtimeTickMs) - Number(rawLastMs))
@@ -20157,6 +20667,23 @@ function buildFocusedLiveSessionInvariants(bot: any, runtime: any, rawTrace: any
       displayXs.length >= rawXs.length &&
       (!Number.isFinite(staleMs) || Number(staleMs) <= 2500) &&
       (!entered || hasEntryMarker),
+    quoteFeedHealthy: websocketHealthy,
+    quoteFeed: {
+      pairSource: pairSource || (String(quoteMeta?.source || "").trim() || null),
+      streamEnabled,
+      streamConnected,
+      pairLagMs: Number.isFinite(pairLagMs) ? Number(pairLagMs) : null,
+      pairObservedAgeMs: Number.isFinite(pairObservedAgeMs) ? Number(pairObservedAgeMs) : null,
+      streamLastMsgAgeMs: Number.isFinite(streamLastMsgAgeMs) ? Number(streamLastMsgAgeMs) : null,
+      streamLastPriceMsgAgeMs: Number.isFinite(streamLastPriceMsgAgeMs) ? Number(streamLastPriceMsgAgeMs) : null,
+      degradedReason:
+        !streamEnabled ? "stream_disabled"
+        : !streamConnected ? "stream_disconnected"
+        : pairSource !== "ws_direct" ? "non_websocket_source"
+        : (Number.isFinite(pairLagMs) && pairLagMs > 100) ? "pair_lag_too_high"
+        : (Number.isFinite(streamLastPriceMsgAgeMs) && streamLastPriceMsgAgeMs > 100) ? "stream_price_age_too_high"
+        : null,
+    },
     sources: {
       rawTrace: String(rawTrace?.source || "") || null,
       displayTrace: String(displayTrace?.source || "") || null,
@@ -20434,6 +20961,7 @@ function choosePreferredSessionTrace(...candidates: any[]): any | null {
   if (!valid.length) return null;
   const sourceScore = (srcRaw: any) => {
     const src = String(srcRaw || "").toLowerCase();
+    if (/canonical_session|session_audit_trace_replacement|canonical_session_high_fidelity|canonical_session_low_fidelity/.test(src)) return 5;
     if (/algo_input_feed/.test(src)) return 4;
     if (/btc_5m_data/.test(src) || /bitcoin up or down/.test(src) || /\.csv$/.test(src)) return 3;
     if (/session_trace_runlog/.test(src)) return 2;
@@ -20448,6 +20976,14 @@ function choosePreferredSessionTrace(...candidates: any[]): any | null {
     return (Array.isArray((b as any)?.xMs) ? (b as any).xMs.length : 0) - (Array.isArray((a as any)?.xMs) ? (a as any).xMs.length : 0);
   });
   return valid[0] || null;
+}
+
+function choosePreferredClosedSessionTrace(slugLike: any, closedLike: any, ...candidates: any[]): any | null {
+  const slug = String(slugLike || "").trim();
+  const closed = closedLike === true;
+  if (!closed || !slug) return choosePreferredSessionTrace(...candidates);
+  const canonical = chooseCanonicalRunAuditTrace(slug);
+  return choosePreferredSessionTrace(canonical?.trace || null, ...candidates);
 }
 
 function sessionTracePointCount(traceLike: any): number {
@@ -20875,6 +21411,30 @@ function resolveRunScope(req: any, scopeRaw: string, sinceMsRaw: number, runsRaw
   };
 }
 
+function inferScopedInstanceIdForRun(engineLike: any, runNumLike: any): string {
+  const engine = String(engineLike || "paper").trim().toLowerCase();
+  const targetRunNum = Math.floor(Number(runNumLike));
+  if (!(Number.isFinite(targetRunNum) && targetRunNum > 0)) return "";
+  const candidates = Array.from(botInstances.values())
+    .map((inst: any) => ({
+      instanceId: String(inst?.instanceId || "").trim(),
+      mode: String(inst?.mode || "").trim().toLowerCase(),
+      status: String(inst?.status || "").trim().toLowerCase(),
+      runNum: Number(inst?.runNum || 0),
+      launchedAtMs: Number(inst?.launchedAtMs || 0),
+    }))
+    .filter((inst) => !!inst.instanceId)
+    .filter((inst) => inst.mode === engine)
+    .filter((inst) => Math.floor(Number(inst.runNum || 0)) === targetRunNum)
+    .sort((a, b) => {
+      const aRunning = a.status === "running" ? 1 : 0;
+      const bRunning = b.status === "running" ? 1 : 0;
+      if (aRunning !== bRunning) return bRunning - aRunning;
+      return Number(b.launchedAtMs || 0) - Number(a.launchedAtMs || 0);
+    });
+  return candidates[0]?.instanceId || "";
+}
+
 function filterTradeRowsByScope(
   rows: any[],
   engine: Engine,
@@ -20894,6 +21454,95 @@ function filterTradeRowsByScope(
     }
     return true;
   });
+}
+
+function tradeRowSessionSlug(row: any): string {
+  return String(row?.st?.marketSlug || row?.market?.slug || "").trim().toLowerCase();
+}
+
+function tradeRowSessionKey(row: any): string {
+  const slug = tradeRowSessionSlug(row);
+  const runId = Number.isFinite(Number(row?.runId)) ? Math.floor(Number(row.runId)) : "na";
+  const instanceId = String(row?.instanceId || "").trim() || "na";
+  return slug ? `${runId}:${instanceId}:${slug}` : "";
+}
+
+function tradeRowSessionTerminalMs(row: any): number | null {
+  const slug = tradeRowSessionSlug(row);
+  const candidates = [
+    row?.sessionAudit?.sessionEndMs,
+    row?.market?.endMs,
+    row?.st?.exitTsMs,
+    inferSessionEndMsFromSlug(slug),
+    row?.t,
+  ];
+  for (const raw of candidates) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+function collectPaperSessionPnlEvents(tradeRowsLike: any[]): Array<{
+  key: string;
+  slug: string;
+  instanceId: string | null;
+  runId: number | null;
+  t: number;
+  pnlUsd: number;
+  excludeFromPnl: boolean;
+  audit: boolean;
+}> {
+  const rows = Array.isArray(tradeRowsLike) ? tradeRowsLike.slice() : [];
+  const exitRe = /^(EXIT|STOP)_(UP|DOWN)_(PAPER|LIVE)$/;
+  const auditBySession = new Map<string, any>();
+  const fallbackBySession = new Map<string, any>();
+  for (const row of rows.sort((a, b) => Number(a?.t || 0) - Number(b?.t || 0))) {
+    const key = tradeRowSessionKey(row);
+    const slug = tradeRowSessionSlug(row);
+    if (!key || !slug) continue;
+    const terminalMs = tradeRowSessionTerminalMs(row);
+    const rowRunId = Number.isFinite(Number(row?.runId)) ? Math.floor(Number(row.runId)) : null;
+    const rowInstanceId = String(row?.instanceId || "").trim() || null;
+    const action = String(row?.action || "");
+    if (SESSION_AUDIT_PNL_ACTION_RE.test(action)) {
+      const pnlUsd = Number(row?.sessionAudit?.correctedNetPnlUsd ?? row?.st?.pnlUsd);
+      if (!Number.isFinite(pnlUsd) || !Number.isFinite(Number(terminalMs))) continue;
+      auditBySession.set(key, {
+        key,
+        slug,
+        instanceId: rowInstanceId,
+        runId: rowRunId,
+        t: Number(terminalMs),
+        pnlUsd: Number(pnlUsd),
+        excludeFromPnl: !!row?.sessionAudit?.excludeFromPnl,
+        audit: true,
+      });
+      continue;
+    }
+    if (!exitRe.test(action)) continue;
+    const pnlUsd = Number(row?.st?.pnlUsd);
+    if (!Number.isFinite(pnlUsd) || !Number.isFinite(Number(terminalMs))) continue;
+    const prev = fallbackBySession.get(key) || {
+      key,
+      slug,
+      instanceId: rowInstanceId,
+      runId: rowRunId,
+      t: Number(terminalMs),
+      pnlUsd: 0,
+      excludeFromPnl: false,
+      audit: false,
+    };
+    prev.t = Math.max(Number(prev.t || 0), Number(terminalMs));
+    prev.pnlUsd = Number(prev.pnlUsd || 0) + Number(pnlUsd);
+    fallbackBySession.set(key, prev);
+  }
+  const out = Array.from(auditBySession.values());
+  for (const [key, row] of fallbackBySession.entries()) {
+    if (auditBySession.has(key)) continue;
+    out.push(row);
+  }
+  return out.sort((a, b) => Number(a.t) - Number(b.t));
 }
 
 function percentileFromSorted(nums: number[], p: number): number | null {
@@ -24141,6 +24790,65 @@ app.use((req, res, next) => {
 });
 app.use(express.json({ limit: "2mb" }));
 
+app.get(/^\/api\/worker-overlay(?:\/.*)?$/, (req, res) => {
+  const selectedReadOnlyOrigin = String(READ_ONLY_ORIGIN || "").trim();
+  if (!selectedReadOnlyOrigin) {
+    res.status(503).json({
+      ok: false,
+      error: "worker_overlay_unavailable",
+      detail: "readonly worker origin is not configured",
+    });
+    return;
+  }
+  try {
+    const rawUrl = String(req.originalUrl || req.url || "");
+    const suffix = rawUrl.replace(/^\/api\/worker-overlay\b/, "") || "/";
+    const proxyUrl = new URL(
+      suffix.startsWith("/") || suffix.startsWith("?") ? suffix : `/${suffix}`,
+      selectedReadOnlyOrigin.endsWith("/") ? selectedReadOnlyOrigin : `${selectedReadOnlyOrigin}/`
+    );
+    const client = proxyUrl.protocol === "https:" ? https : http;
+    const proxyReq = client.request(proxyUrl, {
+      method: "GET",
+      headers: {
+        accept: String(req.get("accept") || "*/*"),
+        [READ_ONLY_WORKER_HEADER]: "1",
+      },
+    }, (proxyRes) => {
+      res.status(proxyRes.statusCode || 502);
+      const contentType = String(proxyRes.headers["content-type"] || "").trim();
+      if (contentType) res.setHeader("Content-Type", contentType);
+      res.setHeader("Cache-Control", "no-store, max-age=0");
+      res.setHeader("X-MMX-Read-Path", "proxy_readonly");
+      res.setHeader("X-MMX-Read-Only-Origin", selectedReadOnlyOrigin);
+      proxyRes.pipe(res);
+    });
+    proxyReq.setTimeout(15_000, () => {
+      proxyReq.destroy(new Error("worker overlay proxy timeout"));
+    });
+    proxyReq.on("error", (err: any) => {
+      if (!res.headersSent) {
+        res.status(502).json({
+          ok: false,
+          error: "worker_overlay_proxy_failed",
+          detail: String(err?.message ?? err),
+          readOnlyOrigin: selectedReadOnlyOrigin,
+        });
+      } else {
+        try { res.end(); } catch {}
+      }
+    });
+    proxyReq.end();
+  } catch (err: any) {
+    res.status(502).json({
+      ok: false,
+      error: "worker_overlay_proxy_invalid",
+      detail: String(err?.message ?? err),
+      readOnlyOrigin: selectedReadOnlyOrigin,
+    });
+  }
+});
+
 function rejectHeavyReadOnHotHost(req: express.Request, res: express.Response, endpointName: string): boolean {
   if (!HOT_SERVICE_MODE) return false;
   const selectedReadOnlyOrigin =
@@ -24161,16 +24869,7 @@ function rejectHeavyReadOnHotHost(req: express.Request, res: express.Response, e
     !truthy(query.includeTrace) &&
     !truthy(query.includeRecentTrades);
   const focusedLiveSessionRead = endpointName === "focused-live-session";
-  const compactSessionHistoryRead =
-    endpointName === "session-history" &&
-    String(query.engine || "paper").trim().toLowerCase() === "paper" &&
-    !truthy(query.includeTrace) &&
-    !!String(query.instanceId || "").trim() &&
-    (
-      !Number.isFinite(Number(query.maxSessions)) ||
-      Number(query.maxSessions) <= 200
-    );
-  if (lightweightBotListRead || lightweightBotDetailRead || focusedLiveSessionRead || compactSessionHistoryRead) {
+  if (lightweightBotListRead || lightweightBotDetailRead || focusedLiveSessionRead) {
     return false;
   }
   const allowHot = String(req.query?.allowHot || "").trim() === "1";
@@ -24181,7 +24880,6 @@ function rejectHeavyReadOnHotHost(req: express.Request, res: express.Response, e
     endpointName === "focused-live-session" ||
     endpointName === "latest-session-card" ||
     endpointName === "rollover-ready" ||
-    endpointName === "continuity-history" ||
     // This endpoint reads the canonical run-summary artifact and is used by the
     // Last 100 Sessions panel as the lightweight fallback when worker-heavy
     // history routes are unavailable.
@@ -24215,6 +24913,7 @@ function rejectHeavyReadOnHotHost(req: express.Request, res: express.Response, e
         method: "GET",
         headers: {
           accept: String(req.get("accept") || "*/*"),
+          [READ_ONLY_WORKER_HEADER]: "1",
         },
       }, (proxyRes) => {
         res.status(proxyRes.statusCode || 502);
@@ -24268,8 +24967,18 @@ const PUBLIC_DIR_CANDIDATES = [
   path.resolve(__dirname, "../public"),
 ];
 const PUBLIC_DIR = PUBLIC_DIR_CANDIDATES.find((p) => fs.existsSync(path.join(p, "index.html"))) || PUBLIC_DIR_CANDIDATES[0];
-app.use(express.static(PUBLIC_DIR));
+app.use(express.static(PUBLIC_DIR, {
+  index: false,
+  setHeaders: (res, filePath) => {
+    try {
+      if (String(filePath || "").toLowerCase().endsWith(".html")) {
+        res.setHeader("Cache-Control", "no-store, max-age=0");
+      }
+    } catch {}
+  },
+}));
 app.get("/", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store, max-age=0");
   res.sendFile(path.join(PUBLIC_DIR, "index.html"));
 });
 
@@ -25101,7 +25810,11 @@ app.get("/api/chart-history", (req, res) => {
     const engine: Engine = engineRaw === "live" ? "live" : "paper";
     const marketSlugFilter = String(req.query.marketSlug ?? req.query.slug ?? "").trim().toLowerCase();
     const marketPrefixFilter = String(req.query.marketPrefix ?? req.query.prefix ?? "").trim().toLowerCase();
-    let instanceIdFilter = String(req.query.instanceId ?? "").trim();
+    const forceGlobalScope = String(req.query.global ?? "0").trim() === "1";
+    const explicitInstanceIdFilter = String(req.query.instanceId ?? "").trim();
+    let instanceIdFilter = explicitInstanceIdFilter;
+    const requestedRunNumRaw = Number(req.query.runNum ?? 0);
+    const requestedRunNum = Number.isFinite(requestedRunNumRaw) && requestedRunNumRaw > 0 ? Math.floor(requestedRunNumRaw) : 0;
     const sinceMsRaw = Number(req.query.sinceMs ?? 0);
     const maxSessionsRaw = Number(req.query.maxSessions ?? 50);
     const maxSessions = Number.isFinite(maxSessionsRaw) && maxSessionsRaw > 0
@@ -25115,6 +25828,9 @@ app.get("/api/chart-history", (req, res) => {
     const runScopeId = scopeInfo.runId;
     const runStartMs = scopeInfo.runStartMs;
     const runStartIso = scopeInfo.runStartIso;
+    if (!instanceIdFilter && scope === "run" && requestedRunNum > 0) {
+      instanceIdFilter = inferScopedInstanceIdForRun(engine, requestedRunNum);
+    }
 
     if (instanceIdFilter) {
       const liveInst = botInstances.get(instanceIdFilter) || null;
@@ -25150,6 +25866,42 @@ app.get("/api/chart-history", (req, res) => {
       );
       const startMsInst = Number.isFinite(startMsInstRaw) && startMsInstRaw > 0 ? startMsInstRaw : Date.now();
       const sinceStart = sinceMsInst > 0 ? Math.max(sinceMsInst, startMsInst) : startMsInst;
+      const tradeRowsForInstance = filterTradeRowsByScope(readJsonlFiles(listTradeLogFiles()), engine, scope, sinceMs, runScopeId)
+        .filter((r) => String((r as any)?.instanceId || "").trim() === instanceIdFilter)
+        .filter((r) => {
+          const slug = tradeRowSessionSlug(r);
+          if (!slug) return false;
+          if (marketSlugFilter) return slug === marketSlugFilter;
+          if (marketPrefixFilter) return slug.startsWith(marketPrefixFilter);
+          return true;
+        });
+      if (engine === "paper") {
+        const sessionEvents = collectPaperSessionPnlEvents(tradeRowsForInstance)
+          .filter((row) => Number.isFinite(Number(row?.t)) && Number(row.t) >= sinceStart);
+        if (sessionEvents.length) {
+          const startBalRaw = Number(summary?.startBalanceUsd ?? indexedSummary?.startBalanceUsd ?? inst?.startBalanceUsd ?? 100);
+          let running = Number.isFinite(startBalRaw) ? Number(startBalRaw) : 100;
+          const points: Array<{ t: number; v: number }> = [{ t: sinceStart, v: running }];
+          for (const ev of sessionEvents) {
+            if (!ev.excludeFromPnl) running += Number(ev.pnlUsd) || 0;
+            points.push({ t: Number(ev.t), v: Number(running.toFixed(10)) });
+          }
+          finishEndpointPerf();
+          return res.json({
+            ok: true,
+            engine,
+            runId: runNum,
+            runStartMs: startMsInst,
+            runStartIso: new Date(startMsInst).toISOString(),
+            runStartsMs: [startMsInst],
+            points,
+            count: points.length,
+            sinceMs: sinceStart,
+            source: "trade_logs_session_audit",
+            instanceId: instanceIdFilter,
+          });
+        }
+      }
       const derived = inst ? buildContinuitySessionsForInstance(inst, false, null) : { sessions: [] as any[] };
       const completedSessionsAsc = (Array.isArray(derived?.sessions) ? derived.sessions : [])
         .filter((sess: any) => Number(sess?.runNum) === runNum)
@@ -25248,6 +26000,14 @@ app.get("/api/chart-history", (req, res) => {
       });
     }
 
+    if (engine === "paper") {
+      const runNums = new Set<number>();
+      for (const inst of Array.from(botInstances.values())) {
+        const rn = Math.floor(Number((inst as any)?.runNum || 0));
+        if (rn > 0 && String((inst as any)?.mode || "").trim().toLowerCase() === "paper") runNums.add(rn);
+      }
+      for (const rn of runNums) syncSessionAuditPnlTradeLogsForRun(rn);
+    }
     const tradeRows = filterTradeRowsByScope(readJsonlFiles(listTradeLogFiles()), engine, scope, sinceMs, runScopeId)
       .filter((r) => {
         if (!marketSlugFilter && !marketPrefixFilter) return true;
@@ -25259,22 +26019,16 @@ app.get("/api/chart-history", (req, res) => {
     let points: Array<{ t: number; v: number }> = [];
 
     if (engine === "paper") {
-      // Source of truth for paper equity: cumulative realized P/L from closed exits.
-      const exitRe = /^(EXIT|STOP)_(UP|DOWN)_(PAPER|LIVE)$/;
-      const exits = tradeRows
-        .filter((r) => exitRe.test(String(r?.action || "")))
-        .map((r) => ({
-          t: Number(r?.t),
-          pnl: toFiniteOrNull(r?.st?.pnlUsd),
-        }))
-        .filter((x) => Number.isFinite(x.t) && Number.isFinite(x.pnl))
-        .sort((a, b) => a.t - b.t);
-
-      let bal = 100;
+      const startBalRaw =
+        scope === "run" && Number.isFinite(Number(runScopeId)) && Number(runScopeId) > 0
+          ? Number(readBotRunSummary(Number(runScopeId))?.startBalanceUsd ?? 100)
+          : 100;
+      let bal = Number.isFinite(startBalRaw) ? Number(startBalRaw) : 100;
       points.push({ t: sinceMs > 0 ? sinceMs : Date.now(), v: bal });
-      for (const ex of exits) {
-        bal += ex.pnl;
-        points.push({ t: ex.t, v: bal });
+      const sessionEvents = collectPaperSessionPnlEvents(tradeRows);
+      for (const ev of sessionEvents) {
+        if (!ev.excludeFromPnl) bal += Number(ev.pnlUsd) || 0;
+        points.push({ t: Number(ev.t), v: Number(bal.toFixed(10)) });
       }
     } else {
       points = tradeRows
@@ -25332,7 +26086,9 @@ app.get("/api/stats/summary", (req, res) => {
     const engine: Engine = engineRaw === "live" ? "live" : "paper";
     const marketSlugFilter = String(req.query.marketSlug ?? req.query.slug ?? "").trim().toLowerCase();
     const marketPrefixFilter = String(req.query.marketPrefix ?? req.query.prefix ?? "").trim().toLowerCase();
-    let instanceIdFilter = String(req.query.instanceId ?? "").trim();
+    const forceGlobalScope = String(req.query.global ?? "0").trim() === "1";
+    const explicitInstanceIdFilter = String(req.query.instanceId ?? "").trim();
+    let instanceIdFilter = explicitInstanceIdFilter;
     const sinceMsRaw = Number(req.query.sinceMs ?? 0);
     const maxSessionsRaw = Number(req.query.maxSessions ?? 0);
     const maxSessions = Number.isFinite(maxSessionsRaw) && maxSessionsRaw > 0
@@ -25655,7 +26411,9 @@ app.get("/api/session-history", (req, res) => {
     let engine: Engine = engineQueryRaw === "live" ? "live" : "paper";
     const marketSlugFilter = String(req.query.marketSlug ?? req.query.slug ?? "").trim().toLowerCase();
     const marketPrefixFilter = String(req.query.marketPrefix ?? req.query.prefix ?? "").trim().toLowerCase();
-    let instanceIdFilter = String(req.query.instanceId ?? "").trim();
+    const forceGlobalScope = String(req.query.global ?? "0").trim() === "1";
+    const explicitInstanceIdFilter = String(req.query.instanceId ?? "").trim();
+    let instanceIdFilter = explicitInstanceIdFilter;
     const sinceMsRaw = Number(req.query.sinceMs ?? 0);
     const maxSessionsRaw = Number(req.query.maxSessions ?? 0);
     const maxSessions = Number.isFinite(maxSessionsRaw) && maxSessionsRaw > 0
@@ -25680,19 +26438,23 @@ app.get("/api/session-history", (req, res) => {
     const requestedRunNum = Number.isFinite(requestedRunNumRaw) && requestedRunNumRaw > 0 ? Math.floor(requestedRunNumRaw) : 0;
     const inferredRunNum = requestedRunNum || (Number.isFinite(Number(runScopeId)) ? Math.floor(Number(runScopeId)) : 0);
     const inferredSummary = inferredRunNum > 0 ? (readBotRunSummary(inferredRunNum) || null) : null;
+    if (!instanceIdFilter && scope === "run" && inferredRunNum > 0) {
+      const inferredInstanceId = inferScopedInstanceIdForRun(engine, inferredRunNum);
+      if (inferredInstanceId) instanceIdFilter = inferredInstanceId;
+    }
     if (!engineQueryRaw) {
       const instMode = String(botInstances.get(instanceIdFilter)?.mode || "").trim().toLowerCase();
       const runSummaryMode = String(inferredSummary?.mode || "").trim().toLowerCase();
       if (instMode === "live" || runSummaryMode === "live") engine = "live";
     }
     const inferredSummaryInstanceId = String(inferredSummary?.instanceId || "").trim();
-    if (!instanceIdFilter && inferredSummaryInstanceId) {
+    if (!forceGlobalScope && !instanceIdFilter && inferredSummaryInstanceId) {
       const runSummaryMode = String(inferredSummary?.mode || "").trim().toLowerCase();
       if (!runSummaryMode || runSummaryMode === engine) {
         instanceIdFilter = inferredSummaryInstanceId;
       }
     }
-    if (!instanceIdFilter && scope === "run") {
+    if (!forceGlobalScope && !instanceIdFilter && scope === "run") {
       const scopedCandidates = Array.from(botInstances.values())
         .map((inst: any) => ({
           instanceId: String(inst?.instanceId || "").trim(),
@@ -25722,7 +26484,7 @@ app.get("/api/session-history", (req, res) => {
         instanceIdFilter = fallbackScoped[0].instanceId;
       }
     }
-    if (!instanceIdFilter && engine === "live") {
+    if (!forceGlobalScope && !instanceIdFilter && engine === "live") {
       const summaryInstanceId = String(inferredSummary?.instanceId || "").trim();
       if (summaryInstanceId) instanceIdFilter = summaryInstanceId;
     }
@@ -25830,23 +26592,6 @@ app.get("/api/session-history", (req, res) => {
         String(offset),
       ].join("|");
       if (engine === "paper" && inst) {
-        const compactIndexedPayload = buildCompactSessionHistoryResponseFromRunIndex(inst, {
-          engine,
-          runNum,
-          sinceStart,
-          includeTrace: allowTraceHydration,
-          marketSlugFilter,
-          marketPrefixFilter,
-          maxSessions,
-          offset,
-        });
-        if (compactIndexedPayload && Number(compactIndexedPayload?.count || 0) > 0) {
-          setCachedResponse(cacheKey, cacheSig, compactIndexedPayload);
-          finishEndpointPerf({ cacheMiss: true });
-          return res.json(compactIndexedPayload);
-        }
-      }
-      if (engine === "paper" && inst) {
         const continuityDerived = buildContinuitySessionsForInstance(inst, allowTraceHydration, null);
         const continuitySessionsAll = (Array.isArray(continuityDerived.sessions) ? continuityDerived.sessions : [])
           .filter((row: any) => {
@@ -25883,6 +26628,23 @@ app.get("/api/session-history", (req, res) => {
           setCachedResponse(cacheKey, continuityDerived.sig || cacheSig, continuityPayload);
           finishEndpointPerf({ cacheMiss: true });
           return res.json(continuityPayload);
+        }
+      }
+      if (engine === "paper" && inst) {
+        const compactIndexedPayload = buildCompactSessionHistoryResponseFromRunIndex(inst, {
+          engine,
+          runNum,
+          sinceStart,
+          includeTrace: allowTraceHydration,
+          marketSlugFilter,
+          marketPrefixFilter,
+          maxSessions,
+          offset,
+        });
+        if (compactIndexedPayload && Number(compactIndexedPayload?.count || 0) > 0) {
+          setCachedResponse(cacheKey, cacheSig, compactIndexedPayload);
+          finishEndpointPerf({ cacheMiss: true });
+          return res.json(compactIndexedPayload);
         }
       }
       const cachedPayload = getCachedResponse(cacheKey, cacheSig);
@@ -27944,6 +28706,15 @@ app.get("/api/session-history", (req, res) => {
       finishEndpointPerf({ cacheHit: true });
       return res.json(cachedPayload);
     }
+    if (engine === "paper") {
+      const runNums = new Set<number>();
+      if (requestedRunNum > 0) runNums.add(requestedRunNum);
+      for (const inst of Array.from(botInstances.values())) {
+        const rn = Math.floor(Number((inst as any)?.runNum || 0));
+        if (rn > 0 && String((inst as any)?.mode || "").trim().toLowerCase() === "paper") runNums.add(rn);
+      }
+      for (const rn of runNums) syncSessionAuditPnlTradeLogsForRun(rn);
+    }
     const rows = filterTradeRowsByScope(readJsonlFiles(listTradeLogFiles()), engine, scope, sinceMs, runScopeId)
       .sort((a, b) => Number(a?.t || 0) - Number(b?.t || 0));
 
@@ -28233,6 +29004,34 @@ app.get("/api/session-history", (req, res) => {
       if (Number.isFinite(Number(marketEndMs))) sess.endMs = Number(marketEndMs);
       else if (!Number.isFinite(Number(sess.endMs)) && Number.isFinite(Number(inferredEndMs))) sess.endMs = Number(inferredEndMs);
       const lane = getLane(sess, laneKey);
+
+      if (SESSION_AUDIT_PNL_ACTION_RE.test(action)) {
+        const correctedPnlUsd = toFiniteOrNull(r?.sessionAudit?.correctedNetPnlUsd ?? r?.st?.pnlUsd);
+        const actualPnlUsd = toFiniteOrNull(r?.sessionAudit?.actualNetPnlUsd);
+        const correctedDeltaUsd = toFiniteOrNull(r?.sessionAudit?.correctedDeltaUsd);
+        const auditExitTsMs = toFiniteOrNull(r?.sessionAudit?.sessionEndMs ?? r?.market?.endMs ?? r?.st?.exitTsMs ?? t);
+        const auditStartTsMs = toFiniteOrNull(r?.sessionAudit?.sessionStartMs ?? inferSessionStartMsFromSlug(slug));
+        if (Number.isFinite(Number(auditStartTsMs)) && !Number.isFinite(Number(sess.entryTsMs))) {
+          sess.entryTsMs = Number(auditStartTsMs);
+        }
+        if (Number.isFinite(Number(auditExitTsMs))) {
+          sess.exitTsMs = Number(auditExitTsMs);
+          sess.endMs = Number(auditExitTsMs);
+        }
+        if (Number.isFinite(Number(correctedPnlUsd))) sess.pnlUsd = Number(correctedPnlUsd);
+        if (Number.isFinite(Number(actualPnlUsd))) (sess as any).actualPnlUsd = Number(actualPnlUsd);
+        if (Number.isFinite(Number(correctedDeltaUsd))) (sess as any).correctedDeltaUsd = Number(correctedDeltaUsd);
+        if (Number.isFinite(Number(correctedPnlUsd))) (sess as any).correctedPnlUsd = Number(correctedPnlUsd);
+        sess.closed = true;
+        sess.via = "session_audit";
+        sess.reason = String(r?.sessionAudit?.excludeFromPnl) === "true" || r?.sessionAudit?.excludeFromPnl === true
+          ? "session_audit_excluded"
+          : "session_audit";
+        sess.exitType = "SESSION_AUDIT";
+        if (r?.sessionAudit?.excludeFromPnl === true) (sess as any).excludeFromPnl = true;
+        bySession.set(sessionKey, sess);
+        continue;
+      }
 
       if (action === "enter_signal") {
         const signalTsMs = Number.isFinite(t) ? t : null;
@@ -29336,19 +30135,7 @@ app.get("/api/session-tuner", (req, res) => {
 app.get("/api/session-audits/review", (req, res) => {
   try {
     const auditFocusQuestionsFromRequest = (reqLike: any): string[] => {
-      const raw = reqLike?.query?.focus;
-      const values = Array.isArray(raw) ? raw : (raw == null ? [] : [raw]);
-      const map: Record<string, string> = {
-        historical_card_single_latest: "Is the homepage rendering only the single most recent verified Historical Session Card?",
-        historical_card_session_audit_only: "Is the Historical Session Card using the Session Audit trace path directly, with no JPEG or raw/SVG fallback path?",
-        historical_card_session_audit_trace_source: "Is the Historical Session Card trace based on the same trace basis used by Session Audit?",
-        historical_card_error_instead_of_plot: "If the Session Audit trace is unavailable, does the UI show an explicit error instead of any plotted chart?",
-      };
-      return values
-        .map((value) => String(value || "").trim().toLowerCase())
-        .filter(Boolean)
-        .map((key) => map[key] || "")
-        .filter(Boolean);
+      return [];
     };
     const injectAuditFocusQuestions = (html: string, questions: string[]): string => {
       if (!html || !questions.length) return html;
@@ -29471,6 +30258,10 @@ app.get("/api/session-audits/review", (req, res) => {
               timeout: 20_000,
             }
           );
+          try {
+            const compact = readSessionAuditCompact(rn, slug);
+            if (compact) syncSessionAuditPnlTradeLog(rn, slug, compact);
+          } catch {}
         } catch (e: any) {
           console.warn(`[SESSION AUDIT] generate failed run=${rn} slug=${slug} err=${String(e?.message || e)}`);
         }
@@ -29960,8 +30751,9 @@ function buildClosedSessionMaterializationPayload(
     session,
     Number.isFinite(Number(instance?.runId)) ? Number(instance.runId) : null
   );
-  const chosenTrace = exactTrace || eventFallbackTrace;
-  const healthTrace = rawRecordedTrace || eventFallbackTrace;
+  const canonicalTrace = chooseCanonicalRunAuditTrace(slug)?.trace || null;
+  const chosenTrace = choosePreferredSessionTrace(canonicalTrace, exactTrace, eventFallbackTrace);
+  const healthTrace = rawRecordedTrace || canonicalTrace || eventFallbackTrace;
   if (chosenTrace) {
     session.trace = chosenTrace;
     session.traceSource = String((chosenTrace as any)?.source || "session_trace_runlog");
@@ -30096,7 +30888,11 @@ function latestClosedSessionInfoForParity(instance: BotInstance, sessionsLike: a
   try {
     const candidates = [
       latestClosedSessionInfoFromSessions(sessionsLike),
-      latestClosedSessionInfoFromSessions(buildContinuitySessionsForInstance(instance, false, 12).sessions || []),
+      ...(
+        HOT_SERVICE_MODE
+          ? []
+          : [latestClosedSessionInfoFromSessions(buildContinuitySessionsForInstance(instance, false, 12).sessions || [])]
+      ),
     ].filter((row) => row.slug && Number.isFinite(row.tsMs));
     candidates.sort((a, b) => b.tsMs - a.tsMs);
     return candidates[0] || { slug: "", tsMs: 0 };
@@ -31296,7 +32092,7 @@ app.get("/api/v2/bots", (req, res) => {
   const items = Array.from(botInstances.values()).map((b) => {
     const latest = snap ? latestSnapshotForBot(snap, b) : null;
     const rt = botRuntimes.get(b.instanceId);
-    const srt = botStrategyRuntimes.get(b.instanceId) || null;
+    const srt = ensureBotStrategyRuntime(b);
     const identity = rt ? recoverBotOpenEntryIdentity(b, rt, srt?.lastSnapshot ?? null) : null;
     const strategyIntegrity = getBotStrategyIntegrity(b, srt);
     const truth = includeTruth ? computeBotRunTruthFromEvents(b) : { realizedPnlUsd: null, balanceUsd: null, fills: null };
@@ -31308,6 +32104,9 @@ app.get("/api/v2/bots", (req, res) => {
       : null;
     const recentTradeEvents = includeRecentTrades ? getRecentTradeEventsForInstance(b.instanceId) : [];
     const markerVersion = String(getLiveTradeMarkerSeqForInstance(b.instanceId) || "");
+    const strategyApiSnapshot = includeStrategySnapshot && rt && srt
+      ? refreshBotStrategySnapshotForApi(b, rt, srt)
+      : { snapshot: srt?.lastSnapshot ?? null, decisionSnapshot: (rt as any)?.__latestDecisionSnapshot ?? null };
     return {
       ...b,
       internalRunId,
@@ -31329,7 +32128,7 @@ app.get("/api/v2/bots", (req, res) => {
             strategyPath: srt.strategyPath,
             strategyHash: srt.strategyHash,
             executionModel: srt.executionModel,
-            latestSnapshot: includeStrategySnapshot ? cloneJsonLike(srt.lastSnapshot ?? null, null) : null,
+            latestSnapshot: includeStrategySnapshot ? cloneJsonLike(strategyApiSnapshot.snapshot ?? null, null) : null,
           }
         : null,
       runtime: rt
@@ -31367,7 +32166,7 @@ app.get("/api/v2/bots", (req, res) => {
               : null,
           }
         : null,
-      latestDecisionSnapshot: cloneJsonLike((rt as any)?.__latestDecisionSnapshot || null, null),
+      latestDecisionSnapshot: cloneJsonLike(strategyApiSnapshot.decisionSnapshot ?? null, null),
       displaySessionTrace,
       currentSessionTrace,
       markerVersion,
@@ -31470,7 +32269,7 @@ app.get("/api/v2/bots/:instanceId", (req, res) => {
   const snap = computeLatestPnlSnapshot();
   const latest = latestSnapshotForBot(snap, b);
   const rt = botRuntimes.get(instanceId) || null;
-  const srt = botStrategyRuntimes.get(instanceId) || null;
+  const srt = ensureBotStrategyRuntime(b);
   const identity = rt ? recoverBotOpenEntryIdentity(b, rt, srt?.lastSnapshot ?? null) : null;
   const strategyIntegrity = getBotStrategyIntegrity(b, srt);
   const truth = computeBotRunTruthFromEvents(b);
@@ -31484,6 +32283,10 @@ app.get("/api/v2/bots/:instanceId", (req, res) => {
     : null;
   const recentTradeEvents = includeRecentTrades ? getRecentTradeEventsForInstance(instanceId) : [];
   const markerVersion = getRecentTradeMarkerVersionForInstance(instanceId);
+  const includeStrategySnapshot = ["1", "true", "yes", "on"].includes(String(req.query?.includeStrategySnapshot ?? "0").trim().toLowerCase());
+  const strategyApiSnapshot = includeStrategySnapshot && rt && srt
+    ? refreshBotStrategySnapshotForApi(b, rt, srt)
+    : { snapshot: srt?.lastSnapshot ?? null, decisionSnapshot: (rt as any)?.__latestDecisionSnapshot ?? null };
   return res.json({
     ok: true,
     ...b,
@@ -31505,6 +32308,7 @@ app.get("/api/v2/bots/:instanceId", (req, res) => {
           strategyPath: srt.strategyPath,
           strategyHash: srt.strategyHash,
           executionModel: srt.executionModel,
+          latestSnapshot: includeStrategySnapshot ? cloneJsonLike(strategyApiSnapshot.snapshot ?? null, null) : null,
         }
       : null,
     runtime: rt
@@ -31521,6 +32325,7 @@ app.get("/api/v2/bots/:instanceId", (req, res) => {
     currentSessionTrace,
     markerVersion,
     recentTradeEvents,
+    latestDecisionSnapshot: cloneJsonLike(strategyApiSnapshot.decisionSnapshot ?? null, null),
   });
 });
 
@@ -31580,6 +32385,8 @@ app.get("/api/v2/bots/:instanceId/focused-live-session", (req, res) => {
         },
       });
     }
+    const focusedLiveLite =
+      ["1", "true", "yes", "on"].includes(String(req.query.lite ?? "").trim().toLowerCase());
     const trace = getCurrentSessionTraceForSlug(slug, instanceId);
     const sampledDisplayTrace = getCurrentSessionDisplayTraceForSlug(slug);
     const markers = ensureRuntimeEntryLiveMarker(
@@ -31591,9 +32398,12 @@ app.get("/api/v2/bots/:instanceId/focused-live-session", (req, res) => {
         : getLiveTradeMarkersForInstance(instanceId, slug, 0)
     );
     const traceWithMarkers = trace ? { ...trace, markers } : trace;
-    const displayTrace =
+    const fullDisplayTrace =
       sampledDisplayTrace
       || buildDisplayContinuousTrace(traceWithMarkers || trace);
+    const displayTrace = focusedLiveLite
+      ? compactFocusedDisplayTrace(fullDisplayTrace || traceWithMarkers || trace, 600)
+      : fullDisplayTrace;
     const invariants = buildFocusedLiveSessionInvariants(b, rt, traceWithMarkers || trace, displayTrace, markers);
     return res.json({
       ok: true,
@@ -31602,7 +32412,7 @@ app.get("/api/v2/bots/:instanceId/focused-live-session", (req, res) => {
       strategyId: String(b.strategyId || "") || null,
       slug,
       markerVersion,
-      trace: traceWithMarkers || trace,
+      trace: focusedLiveLite ? null : (traceWithMarkers || trace),
       displayTrace,
       markers,
       invariants,
@@ -31622,17 +32432,46 @@ app.get("/api/v2/bots/:instanceId/focused-live-session", (req, res) => {
             lastAction: String(rt.lastAction || "") || null,
             lastExitType: String(rt.lastExitType || "") || null,
             runtimeLagMs: focusedLiveRuntimeLagMsNow(),
+            quotePairTsMs:
+              Number.isFinite(Number((rt as any)?.__lastQuoteMeta?.pairTsMs))
+                ? Number((rt as any).__lastQuoteMeta.pairTsMs)
+                : (Number.isFinite(Number(quotePairCache?.tsMs)) ? Number(quotePairCache.tsMs) : null),
+            quotePairAgeMs:
+              Number.isFinite(Number((rt as any)?.__lastQuoteMeta?.pairAgeMs))
+                ? Number((rt as any).__lastQuoteMeta.pairAgeMs)
+                : (Number.isFinite(Number(pairLagMs)) ? Number(pairLagMs) : null),
             quoteFeed: {
-              pairSource: String(quotePairCache?.source || "") || null,
-              pairPure: !!quotePairCache?.pure,
-              pairSynthetic: !!quotePairCache?.synthetic,
-              pairSeq: Number.isFinite(Number(quotePairCache?.seq)) ? Number(quotePairCache.seq) : null,
+              pairSource:
+                String((rt as any)?.__lastQuoteMeta?.source || "").trim()
+                || String(quotePairCache?.source || "").trim()
+                || null,
+              pairPure:
+                (rt as any)?.__lastQuoteMeta?.pure === true
+                ? true
+                : !!quotePairCache?.pure,
+              pairSynthetic:
+                (rt as any)?.__lastQuoteMeta?.synthetic === true
+                ? true
+                : !!quotePairCache?.synthetic,
+              pairSeq: Number.isFinite(Number((rt as any)?.__lastQuoteMeta?.quoteSeq))
+                ? Number((rt as any).__lastQuoteMeta.quoteSeq)
+                : (Number.isFinite(Number(quotePairCache?.seq)) ? Number(quotePairCache.seq) : null),
               pairObservedAgeMs: Number.isFinite(Number(pairObservedAgeMs)) ? Number(pairObservedAgeMs) : null,
               pairLagMs: Number.isFinite(Number(pairLagMs)) ? Number(pairLagMs) : null,
               streamEnabled: QUOTE_STREAM_ENABLED,
               streamConnected: quoteStreamConnected,
               streamLastMsgAgeMs: Number.isFinite(Number(streamLastMsgAgeMs)) ? Number(streamLastMsgAgeMs) : null,
               streamLastPriceMsgAgeMs: Number.isFinite(Number(streamLastPriceMsgAgeMs)) ? Number(streamLastPriceMsgAgeMs) : null,
+              degradedReason:
+                !QUOTE_STREAM_ENABLED ? "stream_disabled"
+                : !quoteStreamConnected ? "stream_disconnected"
+                : (
+                    String((rt as any)?.__lastQuoteMeta?.source || "").trim()
+                    || String(quotePairCache?.source || "").trim()
+                  ) !== "ws_direct" ? "non_websocket_source"
+                : (Number.isFinite(Number(pairLagMs)) && Number(pairLagMs) > 100) ? "pair_lag_too_high"
+                : (Number.isFinite(Number(streamLastPriceMsgAgeMs)) && Number(streamLastPriceMsgAgeMs) > 100) ? "stream_price_age_too_high"
+                : null,
             },
           }
         : null,
@@ -31885,7 +32724,13 @@ app.get("/api/compare/host-continuity", (req, res) => {
         const traceIndex = includeTrace ? compactSessionTraceForHistory(traceRaw) : null;
         const traceCsv = includeTrace ? compactSessionTraceForHistory(readSessionTraceFromCsv(slug)) : null;
         const traceCurrent = includeTrace ? compactSessionTraceForHistory(getCurrentSessionTraceForSlug(slug)) : null;
-        const trace = choosePreferredSessionTrace(traceCurrent, traceCsv, traceIndex);
+        const trace = choosePreferredClosedSessionTrace(
+          slug,
+          raw?.closed === true || Number.isFinite(Number(raw?.exitTsMs)) || (Number.isFinite(Number(endMs)) && Number(endMs) <= Date.now()),
+          traceCurrent,
+          traceCsv,
+          traceIndex
+        );
         bySlug.set(slug, {
           ...sanitized,
           runNum: rn,
@@ -32416,6 +33261,13 @@ function buildCorrectedSessionAccountingFromCompact(sessionLike: any, compact: a
       const s = String(v || "").trim().toUpperCase();
       return s === "UP" || s === "DOWN" ? (s as OutcomeSide) : null;
     };
+    const isSyntheticSettleFill = (fillLike: any): boolean => {
+      const fill = fillLike && typeof fillLike === "object" ? fillLike : null;
+      if (!fill) return false;
+      const exitType = String(fill?.exitType || "").trim().toLowerCase();
+      const fillSource = String(fill?.fillSource || "").trim().toLowerCase();
+      return fill?.synthetic === true || exitType === "settle" || /synthesized_settle/.test(fillSource);
+    };
     const sessionSummary = compact?.sessionSummary && typeof compact.sessionSummary === "object"
       ? compact.sessionSummary
       : (sessionLike && typeof sessionLike === "object" ? sessionLike : {});
@@ -32453,6 +33305,7 @@ function buildCorrectedSessionAccountingFromCompact(sessionLike: any, compact: a
       for (const key of ["derisk", "exit"] as const) {
         const fill = fills?.[key] && typeof fills[key] === "object" ? fills[key] : null;
         if (!fill) continue;
+        if (isSyntheticSettleFill(fill)) continue;
         actualClosedShares += Math.max(0, Number(toFinite(fill?.sharesClosed) ?? toFinite(fill?.soldShares) ?? toFinite(fill?.shares) ?? 0));
       }
       let remainingShares = Math.max(0, Number(entryShares) - actualClosedShares);
@@ -32540,6 +33393,13 @@ function buildCorrectedSessionAccountingFromEvents(
       const n = Number(v);
       return Number.isFinite(n) ? n : null;
     };
+    const isSyntheticSettleEvent = (rowLike: any): boolean => {
+      const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+      if (!row) return false;
+      const exitType = String(row?.exitType || "").trim().toLowerCase();
+      const fillSource = String(row?.fillSource || "").trim().toLowerCase();
+      return row?.synthetic === true || exitType === "settle" || /synthesized_settle/.test(fillSource);
+    };
     const sides: Record<OutcomeSide, {
       entryShares: number;
       remainingShares: number;
@@ -32577,6 +33437,7 @@ function buildCorrectedSessionAccountingFromEvents(
         continue;
       }
       if (ev === "exit" || ev === "exit_partial") {
+        if (isSyntheticSettleEvent(row)) continue;
         const net = toFinite(row?.pnlUsd);
         const gross = toFinite(row?.grossPnlUsd);
         if (net != null) actualNetPnlUsd += Number(net);
@@ -33138,6 +33999,53 @@ function buildCompactSessionHistoryResponseFromRunIndex(
   const payload = readRunIndexPayloadCached(idxPath) || null;
   if (!payload || typeof payload !== "object") return null;
   const runIndexSig = fileCacheSignature(idxPath);
+  if (!opts.includeTrace && !HOT_SERVICE_MODE) {
+    try {
+      const continuityBundle = buildBotContinuitySessionsForInstance(instance, false);
+      const continuityAll = Array.isArray(continuityBundle?.sessionsAll) ? continuityBundle.sessionsAll.slice() : [];
+      const continuityFiltered = continuityAll
+        .filter((sess: any) => {
+          const slug = String(sess?.slug || "").trim().toLowerCase();
+          if (!slug) return false;
+          if (opts.marketSlugFilter) return slug === opts.marketSlugFilter;
+          if (opts.marketPrefixFilter) return slug.startsWith(opts.marketPrefixFilter);
+          const sortTs = Number(sess?.exitTsMs || sess?.entryTsMs || sess?.endMs || sess?.startMs || 0);
+          return !Number.isFinite(Number(opts.sinceStart)) || sortTs >= Number(opts.sinceStart);
+        })
+        .sort((a: any, b: any) => {
+          const ta = Number(a?.exitTsMs || a?.entryTsMs || a?.endMs || a?.startMs || 0);
+          const tb = Number(b?.exitTsMs || b?.entryTsMs || b?.endMs || b?.startMs || 0);
+          return tb - ta;
+        });
+      if (continuityFiltered.length) {
+        const totalCount = continuityFiltered.length;
+        const sessionsWindow = opts.offset > 0 ? continuityFiltered.slice(opts.offset) : continuityFiltered;
+        const sessions = opts.maxSessions != null && sessionsWindow.length > opts.maxSessions
+          ? sessionsWindow.slice(0, opts.maxSessions)
+          : sessionsWindow;
+        attachRestartMarkersToSessions(sessions);
+        return {
+          ok: true,
+          engine: opts.engine,
+          runId: runNum,
+          runStartMs: Number.isFinite(Number(payload?.summary?.startedAtMs ?? instance?.launchedAtMs))
+            ? Number(payload?.summary?.startedAtMs ?? instance?.launchedAtMs)
+            : null,
+          runStartIso: Number.isFinite(Number(payload?.summary?.startedAtMs ?? instance?.launchedAtMs))
+            ? new Date(Number(payload?.summary?.startedAtMs ?? instance?.launchedAtMs)).toISOString()
+            : null,
+          sessions,
+          count: sessions.length,
+          totalCount,
+          offset: opts.offset,
+          truncated: sessions.length < totalCount,
+          sinceMs: opts.sinceStart,
+          source: "continuity_history_compact",
+          instanceId: String(instance?.instanceId || ""),
+        };
+      }
+    } catch {}
+  }
   const artifactOnlyRead = opts.includeTrace && !opts.marketSlugFilter && !opts.marketPrefixFilter;
   if (opts.marketSlugFilter && !opts.marketPrefixFilter) {
     const artifactSession = readPreferredClosedSessionCardArtifact(runNum, opts.marketSlugFilter, opts.includeTrace, runIndexSig);
@@ -33308,7 +34216,9 @@ function buildCompactSessionHistoryResponseFromRunIndex(
             }
           )
         : null;
-      const accountingTrace = choosePreferredSessionTrace(
+      const accountingTrace = choosePreferredClosedSessionTrace(
+        slug,
+        closed,
         traceCurrent,
         exactTraceFallback,
         artifactSession?.trace || null,
@@ -33326,65 +34236,18 @@ function buildCompactSessionHistoryResponseFromRunIndex(
         points: buildSessionHistoryPointsFromLane(ln),
       })) : []);
       const trace = opts.includeTrace ? (accountingTrace || null) : null;
-      const compactCorrected = correctedAccountingFromCompactAuditSummary(compact);
-      const corrected = (
-        artifactSession && typeof artifactSession === "object" && Number.isFinite(Number(artifactSession?.correctedPnlUsd))
-          ? {
-              actualNetPnlUsd: Number.isFinite(Number(artifactSession?.actualPnlUsd)) ? Number(artifactSession.actualPnlUsd) : null,
-              actualGrossPnlUsd: Number.isFinite(Number(artifactSession?.actualGrossPnlUsd)) ? Number(artifactSession.actualGrossPnlUsd) : null,
-              actualFeesUsd: Number.isFinite(Number(artifactSession?.actualFeesUsd)) ? Number(artifactSession.actualFeesUsd) : null,
-              correctedNetPnlUsd: Number(artifactSession.correctedPnlUsd),
-              correctedGrossPnlUsd: Number.isFinite(Number(artifactSession?.correctedGrossPnlUsd)) ? Number(artifactSession.correctedGrossPnlUsd) : null,
-              correctedFeesUsd: Number.isFinite(Number(artifactSession?.correctedFeesUsd)) ? Number(artifactSession.correctedFeesUsd) : null,
-              correctedDeltaUsd: Number.isFinite(Number(artifactSession?.correctedDeltaUsd)) ? Number(artifactSession.correctedDeltaUsd) : null,
-              projectedFillNetPnlUsd: Number.isFinite(Number(artifactSession?.projectedFillNetPnlUsd)) ? Number(artifactSession.projectedFillNetPnlUsd) : 0,
-              settleNetPnlUsd: Number.isFinite(Number(artifactSession?.settleNetPnlUsd)) ? Number(artifactSession.settleNetPnlUsd) : 0,
-              correctedExitStrategy: String(artifactSession?.correctedExitStrategy || "actual_fills_only"),
-            }
-          : (
-              compactCorrected
-              || buildCorrectedSessionAccountingFromCompact(sess, compact, accountingTrace || null)
-              || (
-                  sess?.noTrade === true || Number(sess?.laneCount || 0) <= 0
-                    ? null
-                    : buildCorrectedSessionAccountingFromEvents(runNum, slug, accountingTrace || null)
-                )
-            )
-      );
       const sidePaths = opts.includeTrace ? [] : buildSessionHistorySidePathsFromLanes(lanes);
       const uniqueSides = opts.includeTrace ? [] : Array.from(new Set(lanes.map((ln: any) => String(ln?.side || "").trim().toUpperCase()).filter((s: string) => s === "UP" || s === "DOWN")));
       const firstLane = opts.includeTrace ? null : (lanes[0] || null);
       const lastLane = opts.includeTrace ? null : (lanes[lanes.length - 1] || null);
-      const displayPnlUsd =
-        corrected?.correctedNetPnlUsd
-        ?? corrected?.actualNetPnlUsd
-        ?? indexedPnlUsd
-        ?? sess?.pnlUsd
-        ?? null;
-      const displayGrossPnlUsd =
-        corrected?.correctedGrossPnlUsd
-        ?? corrected?.actualGrossPnlUsd
-        ?? indexedGrossPnlUsd
-        ?? sess?.grossPnlUsd
-        ?? null;
-      const displayFeesUsd =
-        corrected?.correctedFeesUsd
-        ?? corrected?.actualFeesUsd
-        ?? indexedFeesUsd
-        ?? sess?.feesUsd
-        ?? null;
+      const displayPnlUsd = indexedPnlUsd ?? sess?.pnlUsd ?? null;
+      const displayGrossPnlUsd = indexedGrossPnlUsd ?? sess?.grossPnlUsd ?? null;
+      const displayFeesUsd = indexedFeesUsd ?? sess?.feesUsd ?? null;
       return {
         ...sess,
-        actualPnlUsd: corrected?.actualNetPnlUsd ?? indexedPnlUsd ?? sess?.pnlUsd ?? null,
-        actualGrossPnlUsd: corrected?.actualGrossPnlUsd ?? indexedGrossPnlUsd ?? sess?.grossPnlUsd ?? null,
-        actualFeesUsd: corrected?.actualFeesUsd ?? indexedFeesUsd ?? sess?.feesUsd ?? null,
-        correctedPnlUsd: corrected?.correctedNetPnlUsd ?? null,
-        correctedGrossPnlUsd: corrected?.correctedGrossPnlUsd ?? null,
-        correctedFeesUsd: corrected?.correctedFeesUsd ?? null,
-        correctedDeltaUsd: corrected?.correctedDeltaUsd ?? null,
-        projectedFillNetPnlUsd: corrected?.projectedFillNetPnlUsd ?? 0,
-        settleNetPnlUsd: corrected?.settleNetPnlUsd ?? 0,
-        correctedExitStrategy: corrected?.correctedExitStrategy ?? null,
+        actualPnlUsd: indexedPnlUsd ?? sess?.pnlUsd ?? null,
+        actualGrossPnlUsd: indexedGrossPnlUsd ?? sess?.grossPnlUsd ?? null,
+        actualFeesUsd: indexedFeesUsd ?? sess?.feesUsd ?? null,
         pnlUsd: displayPnlUsd,
         grossPnlUsd: displayGrossPnlUsd,
         feesUsd: displayFeesUsd,
@@ -33465,7 +34328,7 @@ function buildCompactSessionHistoryResponseFromRunIndex(
       if (!Number.isFinite(Number(sess?.balanceUsd))) sess.balanceUsd = sess.continuityBalanceUsd;
       continue;
     }
-    if (!sess?.excludeFromPnl) continuityRunningBalanceUsd += Number(sess?.correctedPnlUsd ?? sess?.actualPnlUsd ?? sess?.pnlUsd) || 0;
+    if (!sess?.excludeFromPnl) continuityRunningBalanceUsd += Number(sess?.actualPnlUsd ?? sess?.pnlUsd) || 0;
     sess.continuityBalanceUsd = Number(Number(continuityRunningBalanceUsd).toFixed(4));
     if (!Number.isFinite(Number(sess?.balanceUsd))) sess.balanceUsd = sess.continuityBalanceUsd;
   }
@@ -33496,6 +34359,11 @@ app.get("/api/compare/run-artifact", (req, res) => {
     const hostPort = String(req.query.hostPort || "").trim();
     const runNum = Math.floor(Number(req.query.runNum || 0));
     const kind = String(req.query.kind || "index").trim().toLowerCase();
+    const requestedRunId = String(req.query.runId || "").trim();
+    const requestedStartedAtMsRaw = Number(req.query.startedAtMs || 0);
+    const requestedStartedAtMs = Number.isFinite(requestedStartedAtMsRaw) && requestedStartedAtMsRaw > 0
+      ? Math.floor(requestedStartedAtMsRaw)
+      : 0;
     if (!/^\d{2,5}$/.test(hostPort)) return res.status(400).json({ ok: false, error: "invalid hostPort" });
     if (!(runNum > 0)) return res.status(400).json({ ok: false, error: "invalid runNum" });
     const hostDir = path.join(TRADE_LOG_ROOT, "hosts", `host_${hostPort}`);
@@ -33503,8 +34371,48 @@ app.get("/api/compare/run-artifact", (req, res) => {
     const summaryPath = path.join(runDir, "summary.json");
     if (!fs.existsSync(summaryPath)) return res.status(404).json({ ok: false, error: "summary not found" });
     const summary = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
+    if (requestedRunId && String(summary?.runId || "").trim() && String(summary?.runId || "").trim() !== requestedRunId) {
+      return res.status(409).json({
+        ok: false,
+        error: "requested runId does not match run artifact",
+        requestedRunId,
+        actualRunId: String(summary?.runId || ""),
+      });
+    }
+    const summaryStartedAtMs = Math.floor(Number(summary?.startedAtMs || summary?.launchedAtMs || 0));
+    if (
+      requestedStartedAtMs > 0
+      && Number.isFinite(summaryStartedAtMs)
+      && summaryStartedAtMs > 0
+      && requestedStartedAtMs !== summaryStartedAtMs
+    ) {
+      return res.status(409).json({
+        ok: false,
+        error: "requested startedAtMs does not match run artifact",
+        requestedStartedAtMs,
+        actualStartedAtMs: summaryStartedAtMs,
+      });
+    }
     if (kind === "summary") {
       return res.json({ ok: true, hostPort, runNum, path: summaryPath, ...summary });
+    }
+    if (kind === "events") {
+      const eventsPath = path.join(runDir, "events.jsonl");
+      if (!fs.existsSync(eventsPath)) return res.status(404).json({ ok: false, error: "events not found", path: eventsPath });
+      res.type("text/plain; charset=utf-8");
+      return res.send(fs.readFileSync(eventsPath, "utf8"));
+    }
+    if (kind === "telemetry") {
+      const telemetryPath = path.join(runDir, "telemetry.jsonl");
+      if (!fs.existsSync(telemetryPath)) return res.status(404).json({ ok: false, error: "telemetry not found", path: telemetryPath });
+      res.type("text/plain; charset=utf-8");
+      return res.send(fs.readFileSync(telemetryPath, "utf8"));
+    }
+    if (kind === "session-trace-log") {
+      const tracePath = path.join(hostDir, "05_session_trace_run_1.jsonl");
+      if (!fs.existsSync(tracePath)) return res.status(404).json({ ok: false, error: "session trace log not found", path: tracePath });
+      res.type("text/plain; charset=utf-8");
+      return res.send(fs.readFileSync(tracePath, "utf8"));
     }
     if (kind === "strategy") {
       const strategyPath = canonicalStrategyPathForDisplay(
@@ -33789,7 +34697,7 @@ app.get("/api/v2/bots/:instanceId/continuity-history", (req, res) => {
         const traceRun = includeTrace ? compactSessionTraceForHistory(continuityRunTraceBySlug.get(slug) || null) : null;
         const traceCsv = compactSessionTraceForHistory(readSessionTraceFromCsv(slug));
         const traceCurrent = includeTrace ? compactSessionTraceForHistory(getCurrentSessionTraceForSlug(slug)) : null;
-        const accountingTrace = choosePreferredSessionTrace(traceCurrent, traceRun, traceCsv, traceIndex);
+        const accountingTrace = choosePreferredClosedSessionTrace(slug, closed, traceCurrent, traceRun, traceCsv, traceIndex);
         const trace = includeTrace ? accountingTrace : null;
         const continuityRaw = {
           ...(raw && typeof raw === "object" ? raw : {}),
@@ -33805,6 +34713,7 @@ app.get("/api/v2/bots/:instanceId/continuity-history", (req, res) => {
         const corrected = closed
           ? (
               compactCorrected
+              || buildExplicitPendingExitCorrectedAccountingFromCompact(compact, accountingTrace || null)
               || buildCorrectedSessionAccountingFromCompact(normalized, compact, accountingTrace || null)
               || buildCorrectedSessionAccountingFromEvents(rn, slug, accountingTrace || null)
             )
@@ -34002,7 +34911,7 @@ function buildBotContinuitySessionsForInstance(
       const traceRun = includeTrace ? compactSessionTraceForHistory(continuityRunTraceBySlug.get(slug) || null) : null;
       const traceCsv = compactSessionTraceForHistory(readSessionTraceFromCsv(slug));
       const traceCurrent = includeTrace ? compactSessionTraceForHistory(getCurrentSessionTraceForSlug(slug)) : null;
-      const accountingTrace = choosePreferredSessionTrace(traceCurrent, traceRun, traceCsv, traceIndex);
+      const accountingTrace = choosePreferredClosedSessionTrace(slug, closed, traceCurrent, traceRun, traceCsv, traceIndex);
       const trace = includeTrace ? accountingTrace : null;
       const continuityRaw = {
         ...(raw && typeof raw === "object" ? raw : {}),
@@ -34018,6 +34927,7 @@ function buildBotContinuitySessionsForInstance(
       const corrected = closed
         ? (
             compactCorrected
+            || buildExplicitPendingExitCorrectedAccountingFromCompact(compact, accountingTrace || null)
             || buildCorrectedSessionAccountingFromCompact(normalized, compact, accountingTrace || null)
             || buildCorrectedSessionAccountingFromEvents(rn, slug, accountingTrace || null)
           )
@@ -34210,27 +35120,45 @@ app.get("/api/v2/bots/:instanceId/latest-session-card", (req, res) => {
         ensureCanonicalSessionArtifactForInstance(inst, selectedSlug, includeTrace)
         || readCanonicalSessionArtifact(selectedSlug, includeTrace);
     let selectedSource = "session_artifact";
-    try {
-      const continuityBundle = buildBotContinuitySessionsForInstance(inst, false);
-      const continuitySelected = continuityBundle.sessionsAll.find((sess: any) => String(sess?.slug || "").trim() === selectedSlug) || null;
-      if (continuitySelected) {
-        const artifactTrace = selectedSession && typeof selectedSession === "object" ? (selectedSession as any).trace : null;
-        const continuityTrace = continuitySelected && typeof continuitySelected === "object" ? (continuitySelected as any).trace : null;
-        const mergedTrace = includeTrace
-          ? (choosePreferredSessionTrace(continuityTrace, artifactTrace) || continuityTrace || artifactTrace || null)
-          : null;
-        selectedSession = {
-          ...(selectedSession && typeof selectedSession === "object" ? selectedSession : {}),
-          ...continuitySelected,
-          trace: includeTrace ? mergedTrace : null,
-          traceSource: includeTrace
-            ? String((mergedTrace as any)?.source || (continuitySelected as any)?.traceSource || (selectedSession as any)?.traceSource || "continuity_history")
-            : null,
-        };
-        selectedSource = "continuity_history";
-      }
-    } catch {}
+    if (!HOT_SERVICE_MODE) {
+      try {
+        const continuityBundle = buildBotContinuitySessionsForInstance(inst, false);
+        const continuitySelected = continuityBundle.sessionsAll.find((sess: any) => String(sess?.slug || "").trim() === selectedSlug) || null;
+        if (continuitySelected) {
+          const artifactTrace = selectedSession && typeof selectedSession === "object" ? (selectedSession as any).trace : null;
+          const continuityTrace = continuitySelected && typeof continuitySelected === "object" ? (continuitySelected as any).trace : null;
+          const mergedTrace = includeTrace
+            ? (choosePreferredSessionTrace(continuityTrace, artifactTrace) || continuityTrace || artifactTrace || null)
+            : null;
+          selectedSession = {
+            ...(selectedSession && typeof selectedSession === "object" ? selectedSession : {}),
+            ...continuitySelected,
+            trace: includeTrace ? mergedTrace : null,
+            traceSource: includeTrace
+              ? String((mergedTrace as any)?.source || (continuitySelected as any)?.traceSource || (selectedSession as any)?.traceSource || "continuity_history")
+              : null,
+          };
+          selectedSource = "continuity_history";
+        }
+      } catch {}
+    }
     if (selectedSession && includeTrace) {
+      const canonical = chooseCanonicalRunAuditTrace(selectedSlug);
+      const canonicalTrace = canonical?.trace || null;
+      if (canonicalTrace) {
+        const preferredTrace = choosePreferredSessionTrace(canonicalTrace, (selectedSession as any)?.trace || null);
+        selectedSession = {
+          ...selectedSession,
+          trace: preferredTrace,
+          traceSource: String((preferredTrace as any)?.source || canonical?.traceSource || (selectedSession as any)?.traceSource || "canonical_session_high_fidelity"),
+        };
+        if ((selectedSession as any)?.streamSampleWindow == null && canonical?.streamSampleWindow != null) {
+          (selectedSession as any).streamSampleWindow = canonical.streamSampleWindow;
+        }
+        if ((selectedSession as any)?.streamEndSnapshot == null && canonical?.streamEndSnapshot != null) {
+          (selectedSession as any).streamEndSnapshot = canonical.streamEndSnapshot;
+        }
+      }
       const traceAudit = canonicalSessionTraceAudit(selectedSession);
       if (!traceAudit?.hasVisibleTrace) {
         const traceRunFull = buildFullRecordedSessionTraceForHistory(
@@ -34378,7 +35306,9 @@ app.get("/api/v2/bots/:instanceId/session-artifacts-summary", (req, res) => {
       const slug = String(row?.slug || "").trim();
       if (!slug) return null;
       return (
-        noTradeReasonBySlug.get(slug)
+        String(row?.noTradeReason || "").trim()
+        || String(row?.reason || "").trim()
+        || noTradeReasonBySlug.get(slug)
         || summarizeNoTradeReasonFromCompactAudit(readSessionAuditCompact(runNum, slug))
         || "No trade"
       );
@@ -34426,7 +35356,41 @@ app.get("/api/v2/bots/:instanceId/session-artifacts-summary", (req, res) => {
         sessionAuditPath: buildSessionAuditPath(row?.slug),
         source: "run_index_display",
       }));
-    const preferredRows = indexedRows.length ? indexedRows : summaryRows;
+    const continuityRows = HOT_SERVICE_MODE ? [] : (() => {
+      try {
+        const bundle = buildBotContinuitySessionsForInstance(inst, false);
+        const rows = Array.isArray(bundle?.sessionsAll) ? bundle.sessionsAll : [];
+        return rows
+          .filter((row: any) => {
+            const slug = String(row?.slug || "").trim().toLowerCase();
+            if (!slug) return false;
+            return !marketPrefix || slug.startsWith(`${marketPrefix}-`);
+          })
+          .map((row: any) => ({
+            slug: String(row?.slug || "").trim() || null,
+            humanLabel: String(row?.humanLabel || "").trim() || null,
+            pnlUsd: Number.isFinite(Number(row?.correctedPnlUsd ?? row?.actualPnlUsd ?? row?.pnlUsd))
+              ? Number(row?.correctedPnlUsd ?? row?.actualPnlUsd ?? row?.pnlUsd)
+              : null,
+            continuityBalanceUsd: Number.isFinite(Number(row?.continuityBalanceUsd))
+              ? Number(row.continuityBalanceUsd)
+              : (Number.isFinite(Number(row?.balanceUsd)) ? Number(row.balanceUsd) : null),
+            latestBalanceUsd: Number.isFinite(Number(row?.balanceUsd))
+              ? Number(row.balanceUsd)
+              : (Number.isFinite(Number(row?.continuityBalanceUsd)) ? Number(row.continuityBalanceUsd) : null),
+            noTrade: row?.noTrade === true,
+            noTradeReason: deriveNoTradeReason(row),
+            closed: row?.closed === true,
+            startMs: Number.isFinite(Number(row?.startMs)) ? Number(row.startMs) : null,
+            endMs: Number.isFinite(Number(row?.endMs)) ? Number(row.endMs) : null,
+            sessionAuditPath: buildSessionAuditPath(row?.slug),
+            source: "continuity_history",
+          }));
+      } catch {
+        return [];
+      }
+    })();
+    const preferredRows = continuityRows.length ? continuityRows : (indexedRows.length ? indexedRows : summaryRows);
     const sessions = preferredRows
       .sort((a: any, b: any) => Number(b?.startMs || 0) - Number(a?.startMs || 0))
       .slice(0, limit);
@@ -34438,7 +35402,7 @@ app.get("/api/v2/bots/:instanceId/session-artifacts-summary", (req, res) => {
       marketPrefix: marketPrefix || null,
       count: sessions.length,
       sessions,
-      source: indexedRows.length ? "run_index_display" : "run_summary_artifact",
+      source: continuityRows.length ? "continuity_history" : (indexedRows.length ? "run_index_display" : "run_summary_artifact"),
     });
   } catch (e: any) {
     return res.status(500).json({ ok: false, error: String(e?.message ?? e) });
@@ -34683,6 +35647,94 @@ async function gammaEventBySlug(slug: string): Promise<any | null> {
   return null;
 }
 
+type SessionMarketResolution = {
+  slug: string;
+  startMs: number;
+  endMs: number;
+  upToken: string;
+  downToken: string;
+  volumeUsd: number | null;
+  resolvedAtMs: number;
+};
+
+const SESSION_MARKET_CACHE_TTL_MS = Math.max(15_000, Number(process.env.SESSION_MARKET_CACHE_TTL_MS || 10 * 60_000));
+const sessionMarketCache = new Map<string, SessionMarketResolution>();
+
+function buildSessionMarketResolutionFromEvent(
+  slugLike: any,
+  evt: any,
+  startMsHint?: number | null
+): SessionMarketResolution | null {
+  const slug = String(slugLike || evt?.slug || evt?.marketSlug || "").trim();
+  if (!slug || !evt || typeof evt !== "object") return null;
+  const markets = Array.isArray(evt?.markets) ? evt.markets : [];
+  const mkt = markets.length ? markets[0] : evt;
+  const { up, down } = extractUpDownTokensFromMarket(mkt);
+  if (!up || !down) return null;
+  const endMs =
+    parseEpochMsLike(mkt?.endDate) ??
+    parseEpochMsLike(mkt?.end_time) ??
+    parseEpochMsLike(mkt?.endTime) ??
+    parseEpochMsLike(mkt?.endTimestamp) ??
+    parseEpochMsLike(mkt?.endTs) ??
+    parseEpochMsLike(evt?.endDate) ??
+    parseEpochMsLike(evt?.end_time) ??
+    parseEpochMsLike(evt?.endTime) ??
+    parseEpochMsLike(evt?.endTimestamp) ??
+    parseEpochMsLike(evt?.endTs);
+  if (!(Number.isFinite(Number(endMs)) && Number(endMs) > 0)) return null;
+  const startMs =
+    parseEpochMsLike(mkt?.startDate) ??
+    parseEpochMsLike(mkt?.start_time) ??
+    parseEpochMsLike(mkt?.startTime) ??
+    parseEpochMsLike(mkt?.startTimestamp) ??
+    parseEpochMsLike(mkt?.startTs) ??
+    parseEpochMsLike(evt?.startDate) ??
+    parseEpochMsLike(evt?.start_time) ??
+    parseEpochMsLike(evt?.startTime) ??
+    parseEpochMsLike(evt?.startTimestamp) ??
+    parseEpochMsLike(evt?.startTs) ??
+    (Number.isFinite(Number(startMsHint)) ? Number(startMsHint) : null);
+  if (!(Number.isFinite(Number(startMs)) && Number(startMs) >= 0 && Number(endMs) > Number(startMs))) return null;
+  return {
+    slug,
+    startMs: Number(startMs),
+    endMs: Number(endMs),
+    upToken: String(up),
+    downToken: String(down),
+    volumeUsd: parseMarketVolumeUsd(mkt),
+    resolvedAtMs: nowMs(),
+  };
+}
+
+function rememberSessionMarketResolution(resolution: SessionMarketResolution | null | undefined): void {
+  if (!resolution) return;
+  const slug = String(resolution.slug || "").trim();
+  if (!slug) return;
+  sessionMarketCache.set(slug, resolution);
+  const now = nowMs();
+  for (const [key, value] of sessionMarketCache.entries()) {
+    if (!value || (now - Number(value.resolvedAtMs || 0)) > SESSION_MARKET_CACHE_TTL_MS) {
+      sessionMarketCache.delete(key);
+    }
+  }
+}
+
+function getCachedSessionMarketResolution(slugLike: any, startMsHint?: number | null, endMsHint?: number | null): SessionMarketResolution | null {
+  const slug = String(slugLike || "").trim();
+  if (!slug) return null;
+  const hit = sessionMarketCache.get(slug);
+  if (!hit) return null;
+  const now = nowMs();
+  if ((now - Number(hit.resolvedAtMs || 0)) > SESSION_MARKET_CACHE_TTL_MS) {
+    sessionMarketCache.delete(slug);
+    return null;
+  }
+  if (Number.isFinite(Number(startMsHint)) && Math.abs(Number(hit.startMs) - Number(startMsHint)) > 1000) return null;
+  if (Number.isFinite(Number(endMsHint)) && Math.abs(Number(hit.endMs) - Number(endMsHint)) > 1000) return null;
+  return hit;
+}
+
 async function gammaEventBySlugQuick(slug: string, timeoutMs = 900): Promise<any | null> {
   try {
     const ctl = new AbortController();
@@ -34693,10 +35745,21 @@ async function gammaEventBySlugQuick(slug: string, timeoutMs = 900): Promise<any
     clearTimeout(to);
     if (!r.ok) return null;
     const data = await r.json().catch(() => null);
-    if (Array.isArray(data)) return data[0] ?? null;
+    if (Array.isArray(data)) {
+      const evt = data[0] ?? null;
+      rememberSessionMarketResolution(buildSessionMarketResolutionFromEvent(slug, evt));
+      return evt;
+    }
     if (data && typeof data === "object") {
-      if (Array.isArray((data as any).data)) return (data as any).data[0] ?? null;
-      if ((data as any).slug === slug) return data;
+      if (Array.isArray((data as any).data)) {
+        const evt = (data as any).data[0] ?? null;
+        rememberSessionMarketResolution(buildSessionMarketResolutionFromEvent(slug, evt));
+        return evt;
+      }
+      if ((data as any).slug === slug) {
+        rememberSessionMarketResolution(buildSessionMarketResolutionFromEvent(slug, data));
+        return data;
+      }
     }
     return null;
   } catch {
@@ -34836,8 +35899,17 @@ async function fetchGammaMarkets(limit: number): Promise<any[]> {
       const r = await fetch(url, { method: "GET" });
       if (!r.ok) continue;
       const data = await r.json();
-      if (Array.isArray(data)) return data;
-      if (Array.isArray((data as any)?.data)) return (data as any).data;
+      const rows = Array.isArray(data)
+        ? data
+        : (Array.isArray((data as any)?.data) ? (data as any).data : null);
+      if (Array.isArray(rows)) {
+        for (const row of rows) {
+          const slug = String(row?.slug || row?.marketSlug || "").trim();
+          if (!slug) continue;
+          rememberSessionMarketResolution(buildSessionMarketResolutionFromEvent(slug, row));
+        }
+        return rows;
+      }
     } catch {}
   }
   return [];
@@ -35352,6 +36424,17 @@ function maybeStartCurrent5mMarketResolve(reason: string): void {
       current5mMarketResolveTargetSlug = "";
     }
   })();
+}
+
+function maybePrefetch5mSessionWindow(tsMsRaw: number, reason: string): void {
+  const inferred = inferCurrent5mSessionWindow(tsMsRaw);
+  if (!inferred.slug) return;
+  if (getCachedSessionMarketResolution(inferred.slug, inferred.startMs, inferred.endMs)) return;
+  void gammaEventBySlugQuick(inferred.slug, 250)
+    .then((evt) => {
+      rememberSessionMarketResolution(buildSessionMarketResolutionFromEvent(inferred.slug, evt, inferred.startMs));
+    })
+    .catch(() => {});
 }
 
 let lastMarketMetricsRefreshMs = 0;
@@ -43414,6 +44497,12 @@ async function mainLoop() {
       const now = Date.now();
       updateMainLoopHeartbeat(now);
       void maybeWarmUserStream();
+      if (current.slug && Number.isFinite(Number(current.endMs)) && Number(current.endMs) > now) {
+        const msToRollover = Number(current.endMs) - now;
+        if (msToRollover <= 15_000) {
+          maybePrefetch5mSessionWindow(Number(current.endMs) + 1000, "pre_rollover");
+        }
+      }
 
       if (!current.slug || now >= current.endMs) {
         const prevSlug = String(current.slug || "");
@@ -43421,13 +44510,14 @@ async function mainLoop() {
         const prevUpToken = String(current.upToken || "");
         const prevDownToken = String(current.downToken || "");
         const next = inferCurrent5mSessionWindow(now);
+        const cachedNext = getCachedSessionMarketResolution(next.slug, next.startMs, next.endMs);
         current = {
           slug: next.slug,
           startMs: next.startMs,
           endMs: next.endMs,
-          upToken: "",
-          downToken: "",
-          volumeUsd: null,
+          upToken: String(cachedNext?.upToken || ""),
+          downToken: String(cachedNext?.downToken || ""),
+          volumeUsd: Number.isFinite(Number(cachedNext?.volumeUsd)) ? Number(cachedNext?.volumeUsd) : null,
         };
         const nextUpToken = String(current.upToken || "");
         const nextDownToken = String(current.downToken || "");
@@ -43459,6 +44549,11 @@ async function mainLoop() {
         const rolloverLagMs = Number.isFinite(prevEndMs) && prevEndMs > 0 ? Math.max(0, Date.now() - prevEndMs) : 0;
         console.log(`[${isoNow()}] NEW SESSION ${current.slug} up=${current.upToken} down=${current.downToken}`);
         console.log(`[ROLLOVER] prev=${prevSlug || "none"} next=${current.slug} lagMs=${rolloverLagMs}`);
+        if (cachedNext) {
+          console.log(
+            `[ROLLOVER TOKENS PREFILLED] slug=${current.slug} up=${current.upToken} down=${current.downToken} cacheAgeMs=${Math.max(0, nowMs() - Number(cachedNext.resolvedAtMs || 0))}`
+          );
+        }
         if (sessionTokensChanged) {
           console.log(`[ROLLOVER QUOTE RESET] prevTokens(${prevUpToken},${prevDownToken}) -> nextTokens(${nextUpToken},${nextDownToken})`);
         }
