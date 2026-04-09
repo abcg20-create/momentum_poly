@@ -72,6 +72,24 @@
     ]),
   });
 
+  const GOLD_BETS_V2_WINDOWS = Object.freeze({
+    1: Object.freeze([
+      Object.freeze({ startSec: 90, endSec: 120, betUsd: 100 }),
+      Object.freeze({ startSec: 120, endSec: 150, betUsd: 100 }),
+      Object.freeze({ startSec: 150, endSec: 180, betUsd: 100 }),
+    ]),
+    2: Object.freeze([
+      Object.freeze({ startSec: 210, endSec: 240, betUsd: 100 }),
+      Object.freeze({ startSec: 240, endSec: 270, betUsd: 100 }),
+      Object.freeze({ startSec: 270, endSec: 297, betUsd: 100 }),
+    ]),
+    3: Object.freeze([
+      Object.freeze({ startSec: 210, endSec: 240, betUsd: 100 }),
+      Object.freeze({ startSec: 240, endSec: 270, betUsd: 100 }),
+      Object.freeze({ startSec: 270, endSec: 297, betUsd: 100 }),
+    ]),
+  });
+
   function toNum(v, d) {
     const n = Number(v);
     return Number.isFinite(n) ? n : d;
@@ -460,8 +478,13 @@
     function betUsdForTradeNum(_tradeNum) {
       const tradeNum = Math.max(1, Math.floor(Number(_tradeNum) || 1));
       const profile = String(cfg.sizingProfile || '').trim().toLowerCase();
+      let windows = null;
       if (profile === 'gold_bets_v1' || profile === 'gold bets v1') {
-        const windows = GOLD_BETS_V1_WINDOWS[tradeNum] || [];
+        windows = GOLD_BETS_V1_WINDOWS[tradeNum] || [];
+      } else if (profile === 'gold_bets_v2' || profile === 'gold bets v2') {
+        windows = GOLD_BETS_V2_WINDOWS[tradeNum] || [];
+      }
+      if (Array.isArray(windows) && windows.length) {
         for (let i = 0; i < windows.length; i += 1) {
           const w = windows[i];
           if (lastElapsedSec >= Number(w.startSec) && lastElapsedSec < Number(w.endSec)) {

@@ -704,7 +704,7 @@ function shouldSkipHeavyLiveEntryPrecheckForStrategy(strategyIdRaw: any): boolea
   );
 }
 function strategyAllowsRepeatedLiveSameSideEntries(strategyIdRaw: any): boolean {
-  return false;
+  return isInflectionPositiveIterationStrategy(strategyIdRaw);
 }
 function isProbeFlattenExit(exitTypeRaw: any, exitReasonRaw?: any): boolean {
   const exitType = String(exitTypeRaw || "").trim().toLowerCase();
@@ -5144,9 +5144,17 @@ function cloneLiveTradeMarker(markerLike: any) {
     shares: Number.isFinite(Number(marker.shares)) ? Number(marker.shares) : null,
     pnlUsd: Number.isFinite(Number(marker.pnlUsd)) ? Number(marker.pnlUsd) : null,
     usdValue: Number.isFinite(Number(marker.usdValue)) ? Number(marker.usdValue) : null,
+    betUsd: Number.isFinite(Number(marker.betUsd)) ? Number(marker.betUsd) : null,
+    sizingProfile: String(marker.sizingProfile ?? "").trim().toLowerCase() || null,
     seq: Number.isFinite(Number(marker.seq)) ? Number(marker.seq) : null,
     exitType: marker.exitType ?? null,
     event: marker.event ?? null,
+    orderId: marker.orderId ?? null,
+    parentOrderId: marker.parentOrderId ?? null,
+    signalTsMs: Number.isFinite(Number(marker.signalTsMs)) ? Number(marker.signalTsMs) : null,
+    orderPlacedAtMs: Number.isFinite(Number(marker.orderPlacedAtMs)) ? Number(marker.orderPlacedAtMs) : null,
+    eventTsMs: Number.isFinite(Number(marker.eventTsMs)) ? Number(marker.eventTsMs) : null,
+    actualFillTsMs: Number.isFinite(Number(marker.actualFillTsMs)) ? Number(marker.actualFillTsMs) : null,
     key: marker.key ?? null,
     label: marker.label ?? null,
     source,
@@ -8728,9 +8736,15 @@ function readBotRunEventsCached(runNum: number): any[] {
   }
 }
 
-function classifyLiveMarkerType(row: any): "entry_filled" | "partial_exit" | "tp" | "stop_loss" | "final_exit" | null {
+function classifyLiveMarkerType(row: any): "entry_placed" | "entry_filled" | "partial_exit" | "tp" | "stop_loss" | "final_exit" | null {
   const ev = String(row?.event || row?.action || "").trim().toLowerCase();
   const exitType = String(row?.exitType || "").trim().toLowerCase();
+  if (
+    ev === "enter_order" ||
+    ev === "enter_submit_start" ||
+    ev === "enter_submit_accepted" ||
+    ev === "enter_submit_return"
+  ) return "entry_placed";
   if (
     ev === "enter" ||
     ev === "entry_fill" ||
@@ -8772,8 +8786,12 @@ function resolveLiveMarkerPrice(row: any): number | null {
     row?.entryPx,
     row?.exitPx,
     row?.price,
+    row?.intendedPx,
+    row?.signalPx,
     row?.st?.entryPx,
     row?.st?.exitPx,
+    row?.execution?.intendedPx,
+    row?.execution?.signalPx,
     row?.execution?.fillPx,
     row?.execution?.actualFillPx,
     row?.execution?.entryPx,
@@ -8819,12 +8837,25 @@ function recordBotRunRowAsLiveTradeArtifacts(instanceIdLike: any, rowLike: any):
   const row = rowLike && typeof rowLike === "object" ? rowLike : null;
   if (!instanceId || !row) return;
   recordRecentTradeEvent(instanceId, row);
-  const markerType = classifyLiveMarkerType(row);
-  const tsMs = resolveLiveMarkerTsMs(row);
-  const price = resolveLiveMarkerPrice(row);
+  const derived = deriveLiveTradeMarkerRow(row);
+  const markerType = String(derived?.markerType || "").trim().toLowerCase() || classifyLiveMarkerType(row);
+  const tsMs = Number(derived?.tsMs);
+  const price = Number(derived?.price);
   if (!markerType || !Number.isFinite(Number(tsMs)) || !Number.isFinite(Number(price))) return;
   const slug = String(row?.marketSlug || row?.market?.slug || "").trim();
   if (!slug) return;
+  const instance = botInstances.get(instanceId);
+  const sizingProfile =
+    String(
+      row?.sizingProfile ||
+      row?.strategySnapshot?.cfg?.sizingProfile ||
+      instance?.sizingProfile ||
+      ""
+    ).trim().toLowerCase() || null;
+  const betUsd =
+    Number.isFinite(Number(row?.betUsd))
+      ? Number(row.betUsd)
+      : (Number.isFinite(Number(row?.notionalUsd)) ? Number(row.notionalUsd) : null);
   const side = String(row?.side || row?.runtime?.side || "").trim().toUpperCase();
   const marker = {
     instanceId,
@@ -8833,7 +8864,9 @@ function recordBotRunRowAsLiveTradeArtifacts(instanceIdLike: any, rowLike: any):
     tsMs: Number(tsMs),
     side: side === "UP" || side === "DOWN" ? side : null,
     type:
-      markerType === "entry_filled"
+      markerType === "entry_placed"
+        ? "entry_placed"
+        : markerType === "entry_filled"
         ? "entry_filled"
         : markerType === "partial_exit"
         ? "partial_filled"
@@ -8853,9 +8886,19 @@ function recordBotRunRowAsLiveTradeArtifacts(instanceIdLike: any, rowLike: any):
     usdValue: Number.isFinite(Number(row?.sharesClosed ?? row?.shares ?? row?.runtime?.shares))
       ? Number(row?.sharesClosed ?? row?.shares ?? row?.runtime?.shares) * Number(price)
       : null,
+    betUsd,
+    sizingProfile,
     exitType: String(row?.exitType || "").trim().toLowerCase() || null,
     event: String(row?.event || markerType).trim().toLowerCase() || markerType,
-    key: `${instanceId}:${slug}:${markerType}:${Math.floor(Number(tsMs))}:${String(row?.event || "")}`,
+    orderId: String(row?.orderId || row?.tpOrderId || "").trim() || null,
+    parentOrderId: String(row?.parentOrderId || "").trim() || null,
+    signalTsMs: Number.isFinite(Number(row?.signalTsMs)) ? Number(row.signalTsMs) : null,
+    orderPlacedAtMs: Number.isFinite(Number(row?.orderPlacedAtMs ?? row?.localSubmitAtMs))
+      ? Number(row?.orderPlacedAtMs ?? row?.localSubmitAtMs)
+      : null,
+    eventTsMs: Number.isFinite(Number(row?.eventTsMs)) ? Number(row.eventTsMs) : null,
+    actualFillTsMs: Number.isFinite(Number(row?.actualFillTsMs)) ? Number(row.actualFillTsMs) : null,
+    key: `${instanceId}:${slug}:${markerType}:${Math.floor(Number(tsMs))}:${String(row?.orderId || row?.tpOrderId || row?.event || "")}`,
     source: "trade_event",
   };
   const recordedMarker = recordLiveTradeMarker(instanceId, marker);
@@ -8893,11 +8936,13 @@ function deriveLiveTradeMarkerRow(payloadLike: any): any | null {
   if (
     phase === "entry_order" ||
     phase === "enter_submit_start" ||
+    phase === "enter_submit_accepted" ||
     phase === "enter_submit_return" ||
     /^ENTER_SUBMIT_(START|ACCEPTED|RETURN)_/.test(actionUpper) ||
     /^ENTER_ORDER$/.test(eventUpper)
   ) {
     type = "entry_placed";
+    markerType = "entry_placed";
   } else if (
     phase === "enter_fill_confirmed" ||
     phase === "entry_fill" ||
@@ -8965,8 +9010,25 @@ function deriveLiveTradeMarkerRow(payloadLike: any): any | null {
       Number.isFinite(shares) && Number.isFinite(Number(price))
         ? (Number(shares) * Number(price))
         : null,
+    betUsd:
+      Number.isFinite(Number(payload?.betUsd))
+        ? Number(payload.betUsd)
+        : (Number.isFinite(Number(payload?.notionalUsd)) ? Number(payload.notionalUsd) : null),
+    sizingProfile: String(
+      payload?.sizingProfile ||
+      payload?.strategySnapshot?.cfg?.sizingProfile ||
+      ""
+    ).trim().toLowerCase() || null,
     exitType: exitTypeRaw || null,
     event: String(action || eventName || type).trim().toLowerCase() || type,
+    orderId: String(payload?.orderId || payload?.tpOrderId || "").trim() || null,
+    parentOrderId: String(payload?.parentOrderId || "").trim() || null,
+    signalTsMs: Number.isFinite(Number(payload?.signalTsMs)) ? Number(payload.signalTsMs) : null,
+    orderPlacedAtMs: Number.isFinite(Number(payload?.orderPlacedAtMs ?? payload?.localSubmitAtMs))
+      ? Number(payload?.orderPlacedAtMs ?? payload?.localSubmitAtMs)
+      : null,
+    eventTsMs: Number.isFinite(Number(payload?.eventTsMs)) ? Number(payload.eventTsMs) : null,
+    actualFillTsMs: Number.isFinite(Number(payload?.actualFillTsMs)) ? Number(payload.actualFillTsMs) : null,
     source: "trade_event",
   };
 }
@@ -8987,14 +9049,24 @@ function buildLiveMarkersForInstanceSession(instance: BotInstance, slugLike: any
     .filter((row) => String(row?.instanceId || "").trim() === String(instance.instanceId || "").trim())
     .filter((row) => String(row?.marketSlug || row?.market?.slug || "").trim() === slug)
     .map((row, idx) => {
-      const markerType = classifyLiveMarkerType(row);
-      const tsMs = resolveLiveMarkerTsMs(row);
-      const price = resolveLiveMarkerPrice(row);
+      const derived = deriveLiveTradeMarkerRow({
+        ...row,
+        sizingProfile:
+          row?.sizingProfile ??
+          row?.strategySnapshot?.cfg?.sizingProfile ??
+          instance?.sizingProfile ??
+          null,
+      });
+      const markerType = String(derived?.markerType || "").trim().toLowerCase() || classifyLiveMarkerType(row);
+      const tsMs = Number(derived?.tsMs);
+      const price = Number(derived?.price);
       if (!markerType || !Number.isFinite(Number(tsMs)) || !Number.isFinite(Number(price))) return null;
       const shares = Number(row?.sharesClosed ?? row?.shares ?? NaN);
       const usdValue = Number.isFinite(shares) ? (shares * Number(price)) : null;
       return {
-        key: `${String(instance.instanceId || "")}:${slug}:${markerType}:${Math.floor(Number(tsMs))}:${idx}`,
+        key:
+          String(derived?.key || "").trim() ||
+          `${String(instance.instanceId || "")}:${slug}:${markerType}:${Math.floor(Number(tsMs))}:${String(row?.orderId || row?.tpOrderId || idx)}`,
         markerType,
         slug,
         sessionSlug: slug,
@@ -9004,7 +9076,26 @@ function buildLiveMarkersForInstanceSession(instance: BotInstance, slugLike: any
         exitType: String(row?.exitType || "").trim().toLowerCase() || null,
         pnlUsd: Number.isFinite(Number(row?.pnlUsd)) ? Number(row.pnlUsd) : null,
         usdValue: Number.isFinite(Number(usdValue)) ? Number(usdValue) : null,
+        betUsd:
+          Number.isFinite(Number(row?.betUsd))
+            ? Number(row.betUsd)
+            : (Number.isFinite(Number(row?.notionalUsd)) ? Number(row.notionalUsd) : null),
+        sizingProfile:
+          String(
+            row?.sizingProfile ||
+            row?.strategySnapshot?.cfg?.sizingProfile ||
+            instance?.sizingProfile ||
+            ""
+          ).trim().toLowerCase() || null,
         event: String(row?.event || "").trim().toLowerCase() || null,
+        orderId: String(row?.orderId || row?.tpOrderId || "").trim() || null,
+        parentOrderId: String(row?.parentOrderId || "").trim() || null,
+        signalTsMs: Number.isFinite(Number(row?.signalTsMs)) ? Number(row.signalTsMs) : null,
+        orderPlacedAtMs: Number.isFinite(Number(row?.orderPlacedAtMs ?? row?.localSubmitAtMs))
+          ? Number(row?.orderPlacedAtMs ?? row?.localSubmitAtMs)
+          : null,
+        eventTsMs: Number.isFinite(Number(row?.eventTsMs)) ? Number(row.eventTsMs) : null,
+        actualFillTsMs: Number.isFinite(Number(row?.actualFillTsMs)) ? Number(row.actualFillTsMs) : null,
         source: "trade_event",
       };
     })
@@ -9016,6 +9107,20 @@ function buildLiveMarkersForInstanceSession(instance: BotInstance, slugLike: any
   return Array.from(markerMap.values()).sort((a, b) => Number(a.tsMs || 0) - Number(b.tsMs || 0));
 }
 
+function shouldIncludePreviousRunForInstanceContinuity(instance: BotInstance, prevRunNum: number): boolean {
+  const runNum = Math.floor(Number(prevRunNum));
+  if (!(runNum > 0)) return false;
+  const strategyId = String(instance?.strategyId || "").trim();
+  const currentMode = String(instance?.mode || "").trim().toLowerCase();
+  if (!strategyId) return false;
+  const prevIdxPath = botRunIndexPath(strategyId, runNum);
+  if (!fs.existsSync(prevIdxPath)) return false;
+  const prevSummary = readRunIndexPayloadCached(prevIdxPath)?.summary || readBotRunSummaryCached(runNum) || null;
+  const prevMode = String(prevSummary?.mode || "").trim().toLowerCase();
+  if (prevMode && currentMode && prevMode !== currentMode) return false;
+  return true;
+}
+
 function buildContinuitySessionsForInstance(instance: BotInstance, includeTrace: boolean, maxSessions: number | null = null): { strategyId: string; runNum: number; continuityRuns: any[]; sessions: any[]; sig: string } {
   const instanceId = String(instance.instanceId || "").trim();
   const strategyId = String(instance.strategyId || "").trim();
@@ -9025,7 +9130,7 @@ function buildContinuitySessionsForInstance(instance: BotInstance, includeTrace:
   if (Number.isFinite(currentRunNum) && currentRunNum > 0) {
     const prevRunNum = currentRunNum - 1;
     const prevIdxPath = botRunIndexPath(strategyId, prevRunNum);
-    if (prevRunNum > 0 && fs.existsSync(prevIdxPath)) {
+    if (shouldIncludePreviousRunForInstanceContinuity(instance, prevRunNum)) {
       runNums.push(prevRunNum);
       sigParts.push(fileCacheSignature(prevIdxPath));
     }
@@ -9327,6 +9432,43 @@ function latestAuditAccountingFromCompact(compactLike: any): {
     correctedExitStrategy: corrected?.correctedExitStrategy != null
       ? String(corrected.correctedExitStrategy)
       : null,
+  };
+}
+
+function actualAccountingFromCompactAuditSummary(compactLike: any): {
+  actualNetPnlUsd: number | null;
+  actualGrossPnlUsd: number | null;
+  actualFeesUsd: number | null;
+} | null {
+  const compact = compactLike && typeof compactLike === "object" ? compactLike : null;
+  if (!compact) return null;
+  const financials = compact?.financials && typeof compact.financials === "object"
+    ? compact.financials
+    : null;
+  const sessionSummary = compact?.sessionSummary && typeof compact.sessionSummary === "object"
+    ? compact.sessionSummary
+    : null;
+  const source = financials || sessionSummary;
+  if (!source) return null;
+  const actualNetPnlUsd = Number(source?.actualNetPnlUsd ?? source?.netPnlUsd ?? source?.pnlUsd);
+  const actualFeesUsd = Number(source?.actualFeesUsd ?? source?.feesUsd);
+  const actualGrossPnlUsdRaw = Number(source?.actualGrossPnlUsd ?? source?.grossPnlUsd);
+  const actualGrossPnlUsd = Number.isFinite(actualGrossPnlUsdRaw)
+    ? actualGrossPnlUsdRaw
+    : (
+        Number.isFinite(actualNetPnlUsd) && Number.isFinite(actualFeesUsd)
+          ? Number((actualNetPnlUsd + actualFeesUsd).toFixed(10))
+          : NaN
+      );
+  if (
+    !Number.isFinite(actualNetPnlUsd) &&
+    !Number.isFinite(actualGrossPnlUsd) &&
+    !Number.isFinite(actualFeesUsd)
+  ) return null;
+  return {
+    actualNetPnlUsd: Number.isFinite(actualNetPnlUsd) ? actualNetPnlUsd : null,
+    actualGrossPnlUsd: Number.isFinite(actualGrossPnlUsd) ? actualGrossPnlUsd : null,
+    actualFeesUsd: Number.isFinite(actualFeesUsd) ? actualFeesUsd : null,
   };
 }
 
@@ -14700,12 +14842,19 @@ async function armInflectionPositiveIterationEntryTpOrders(
   if (!side || !(Number.isFinite(entryPx) && entryPx > 0) || !(Number.isFinite(shares) && shares > 1e-9)) return;
   const rtAny = rt as any;
   if (rtAny.__liveExitInProgress || rtAny.__suppressTpRearmUntilFlat) return;
-  if (String(rtAny.tpOrderId || "").trim() || String(rtAny.runnerTpOrderId || "").trim()) return;
   const tokenId = runtimeTokenIdForSide(rt, side);
   if (!tokenId) return;
   const botUi = buildUiConfigForBotInstance(instance);
-  const partialShares = Math.max(0, Math.min(shares, shares * INFLECTION_POSITIVE_ITERATION_PARTIAL_QTY_PCT));
-  const runnerShares = Math.max(0, shares - partialShares);
+  const totalShares = floorTo6(Math.max(0, shares));
+  if (!(totalShares > 1e-9)) return;
+  const existingPrimaryShares = floorTo6(Math.max(0, Number(rtAny.pendingTpShares || 0)));
+  const existingRunnerShares = floorTo6(Math.max(0, Number(rtAny.runnerPendingTpShares || 0)));
+  if (
+    String(rtAny.tpOrderId || "").trim() &&
+    String(rtAny.runnerTpOrderId || "").trim() &&
+    (existingPrimaryShares + existingRunnerShares) >= (totalShares - 1e-6)
+  ) return;
+  const partialShares = floorTo6(Math.max(0, Math.min(totalShares, totalShares * INFLECTION_POSITIVE_ITERATION_PARTIAL_QTY_PCT)));
   const partialPx = clamp01(entryPx * (1 + INFLECTION_POSITIVE_ITERATION_PARTIAL_TARGET_PCT / 100));
   const runnerPx = clamp01(INFLECTION_POSITIVE_ITERATION_RUNNER_TP_PX);
   const fillAtMs =
@@ -14716,72 +14865,113 @@ async function armInflectionPositiveIterationEntryTpOrders(
             ? Number(meta.acceptedAtMs)
             : nowMs()
         );
-  if (!(partialShares > 1e-9) || !(runnerShares > 1e-9) || !(partialPx > 0) || !(runnerPx > 0)) return;
+  if (!(partialShares > 1e-9) || !(partialPx > 0) || !(runnerPx > 0)) return;
   const source = String(meta.source || "entry_fill_confirmed");
   rtAny.tpOrderInFlight = true;
   try {
-    const partialTp = await placeImmediateTpSellAfterBuy(side, partialShares, botUi, tokenId, {
-      source,
-      entryFillPx: entryPx,
-      buyFilledAtMs: fillAtMs,
-      strategyId: instance.strategyId,
-      limitPxOverride: partialPx,
-      exitType: "PARTIAL_TP_27",
-    });
-    rtAny.pendingTpLimitPx = partialPx;
-    rtAny.pendingTpPlacedAtMs = nowMs();
-    rtAny.pendingTpShares = Number(partialTp.placedShares);
-    rtAny.pendingTpExitType = "PARTIAL_TP_27";
-    rtAny.pendingExitType = "PARTIAL_TP_27";
-    rtAny.tpOrderId = partialTp.orderId;
-    rtAny.__tpAccountedFilledShares = 0;
-    appendBotRunEvent(instance, rt, {
-      event: "exit_order",
-      side,
-      exitType: "PARTIAL_TP_27",
-      exitReasonRaw: "PARTIAL_TP_27_PLACED_AFTER_ENTRY_FILL",
-      exitPx: partialPx,
-      sharesRequested: Number(partialTp.placedShares),
-      ttlMs: null,
-      mode: meta.mode || null,
-      hcSubtype: meta.hcSubtype || null,
-      executionMode: "real",
-      fillSource: String(meta.fillSource || "live_exchange"),
-      orderId: partialTp.orderId,
-      parentOrderId: String(meta.orderId || "").trim() || null,
-      eventTsMs: Number(meta.eventTsMs ?? fillAtMs),
-    });
+    let placedPrimaryShares =
+      String(rtAny.tpOrderId || "").trim() && existingPrimaryShares > 1e-9
+        ? existingPrimaryShares
+        : 0;
+    const shouldArmPrimary = !String(rtAny.tpOrderId || "").trim() && partialShares > 1e-9;
+    if (shouldArmPrimary) {
+      try {
+        const partialTp = await placeImmediateTpSellAfterBuy(side, partialShares, botUi, tokenId, {
+          source,
+          entryFillPx: entryPx,
+          buyFilledAtMs: fillAtMs,
+          strategyId: instance.strategyId,
+          limitPxOverride: partialPx,
+          exitType: "PARTIAL_TP_27",
+        });
+        const partialPlacedAtMs = nowMs();
+        placedPrimaryShares = floorTo6(Math.max(0, Number(partialTp.placedShares)));
+        rtAny.pendingTpLimitPx = partialPx;
+        rtAny.pendingTpPlacedAtMs = partialPlacedAtMs;
+        rtAny.pendingTpShares = Number(partialTp.placedShares);
+        rtAny.pendingTpExitType = "PARTIAL_TP_27";
+        rtAny.pendingExitType = "PARTIAL_TP_27";
+        rtAny.tpOrderId = partialTp.orderId;
+        rtAny.__tpAccountedFilledShares = 0;
+        appendBotRunEvent(instance, rt, {
+          event: "exit_order",
+          side,
+          exitType: "PARTIAL_TP_27",
+          exitReasonRaw: "PARTIAL_TP_27_PLACED_AFTER_ENTRY_FILL",
+          exitPx: partialPx,
+          sharesRequested: Number(partialTp.placedShares),
+          ttlMs: null,
+          mode: meta.mode || null,
+          hcSubtype: meta.hcSubtype || null,
+          executionMode: "real",
+          fillSource: String(meta.fillSource || "live_exchange"),
+          orderId: partialTp.orderId,
+          parentOrderId: String(meta.orderId || "").trim() || null,
+          orderPlacedAtMs: partialPlacedAtMs,
+          eventTsMs: partialPlacedAtMs,
+        });
+      } catch (partialErr: any) {
+        const partialMsg = String(partialErr?.message ?? partialErr);
+        if (isLiveTpMinimumSizeError(partialMsg)) {
+          appendBotRunEvent(instance, rt, {
+            event: "tp_arm_failed",
+            side,
+            exitType: "PARTIAL_TP_27",
+            exitPx: partialPx,
+            sharesRequested: partialShares,
+            executionMode: "real",
+            fillSource: String(meta.fillSource || "live_exchange"),
+            reason: "TP_MIN_SIZE_REJECTED",
+            error: partialMsg,
+            eventTsMs: nowMs(),
+          });
+        } else {
+          throw partialErr;
+        }
+      }
+    }
 
-    const runnerTp = await placeImmediateTpSellAfterBuy(side, runnerShares, botUi, tokenId, {
-      source,
-      entryFillPx: entryPx,
-      buyFilledAtMs: fillAtMs,
-      strategyId: instance.strategyId,
-      limitPxOverride: runnerPx,
-      exitType: "RUNNER_TP_098",
-    });
-    rtAny.runnerPendingTpLimitPx = runnerPx;
-    rtAny.runnerPendingTpPlacedAtMs = nowMs();
-    rtAny.runnerPendingTpShares = Number(runnerTp.placedShares);
-    rtAny.runnerPendingTpExitType = "RUNNER_TP_098";
-    rtAny.runnerTpOrderId = runnerTp.orderId;
-    rtAny.__runnerTpAccountedFilledShares = 0;
-    appendBotRunEvent(instance, rt, {
-      event: "exit_order",
-      side,
-      exitType: "RUNNER_TP_098",
-      exitReasonRaw: "RUNNER_TP_098_PLACED_AFTER_ENTRY_FILL",
-      exitPx: runnerPx,
-      sharesRequested: Number(runnerTp.placedShares),
-      ttlMs: null,
-      mode: meta.mode || null,
-      hcSubtype: meta.hcSubtype || null,
-      executionMode: "real",
-      fillSource: String(meta.fillSource || "live_exchange"),
-      orderId: runnerTp.orderId,
-      parentOrderId: String(meta.orderId || "").trim() || null,
-      eventTsMs: Number(meta.eventTsMs ?? fillAtMs),
-    });
+    const remainingRunnerShares = floorTo6(Math.max(
+      0,
+      totalShares - Math.max(placedPrimaryShares, existingPrimaryShares)
+    ));
+    const shouldArmRunner =
+      !String(rtAny.runnerTpOrderId || "").trim() &&
+      remainingRunnerShares > 1e-9;
+    if (shouldArmRunner) {
+      const runnerTp = await placeImmediateTpSellAfterBuy(side, remainingRunnerShares, botUi, tokenId, {
+        source,
+        entryFillPx: entryPx,
+        buyFilledAtMs: fillAtMs,
+        strategyId: instance.strategyId,
+        limitPxOverride: runnerPx,
+        exitType: "RUNNER_TP_098",
+      });
+      const runnerPlacedAtMs = nowMs();
+      rtAny.runnerPendingTpLimitPx = runnerPx;
+      rtAny.runnerPendingTpPlacedAtMs = runnerPlacedAtMs;
+      rtAny.runnerPendingTpShares = Number(runnerTp.placedShares);
+      rtAny.runnerPendingTpExitType = "RUNNER_TP_098";
+      rtAny.runnerTpOrderId = runnerTp.orderId;
+      rtAny.__runnerTpAccountedFilledShares = 0;
+      appendBotRunEvent(instance, rt, {
+        event: "exit_order",
+        side,
+        exitType: "RUNNER_TP_098",
+        exitReasonRaw: "RUNNER_TP_098_PLACED_AFTER_ENTRY_FILL",
+        exitPx: runnerPx,
+        sharesRequested: Number(runnerTp.placedShares),
+        ttlMs: null,
+        mode: meta.mode || null,
+        hcSubtype: meta.hcSubtype || null,
+        executionMode: "real",
+        fillSource: String(meta.fillSource || "live_exchange"),
+        orderId: runnerTp.orderId,
+        parentOrderId: String(meta.orderId || "").trim() || null,
+        orderPlacedAtMs: runnerPlacedAtMs,
+        eventTsMs: runnerPlacedAtMs,
+      });
+    }
     rt.lastError = null;
     rt.lastAction = "dual_tp_orders_placed_after_entry_fill";
   } finally {
@@ -16864,8 +17054,10 @@ async function tickBotRuntime(instance: BotInstance, triggerCtx?: QuoteTickTrigg
         appendBotRunEvent(instance, rt, {
           event: "enter_signal",
           eventTsMs: now,
+          signalTsMs: now,
           side,
           entryPx: signalPx,
+          signalPx,
           mode: modeLike || (isDeriskRuntime ? "SINGLE_INSTANCE_DERISK" : "UNKNOWN"),
           decisionSnapshot: cloneJsonLike(rtAny.__latestDecisionSnapshot || null, null),
           ...(extra && typeof extra === "object" ? extra : {}),
@@ -17112,6 +17304,10 @@ async function tickBotRuntime(instance: BotInstance, triggerCtx?: QuoteTickTrigg
           meta?: { intendedPx?: number | null; entryStyle?: string | null }
         ): Promise<boolean> => {
           if (!useRealLiveMmHc3) return false;
+          if (rtAny.enterInFlight) {
+            rt.lastAction = "entry_live_blocked_inflight";
+            return false;
+          }
           const allowRepeatedSameSideEntries = strategyAllowsRepeatedLiveSameSideEntries(instance.strategyId);
           const sideAlreadyAttemptedThisSession =
             !allowRepeatedSameSideEntries && (
@@ -17208,6 +17404,9 @@ async function tickBotRuntime(instance: BotInstance, triggerCtx?: QuoteTickTrigg
           appendBotRunEvent(instance, rt, {
             event: "enter_order",
             eventTsMs: now,
+            orderPlacedAtMs: now,
+            localSubmitAtMs: now,
+            signalTsMs: now,
             side,
             entryPx: null,
             signalPx: Number.isFinite(Number(signalPx)) ? Number(signalPx) : null,
@@ -17225,6 +17424,7 @@ async function tickBotRuntime(instance: BotInstance, triggerCtx?: QuoteTickTrigg
             fillSource: "live_exchange",
           });
           let filled = false;
+          rtAny.enterInFlight = true;
           try {
             const estimatedBuyPx =
               Number.isFinite(Number(meta?.intendedPx)) && Number(meta?.intendedPx) > 0
@@ -17309,6 +17509,9 @@ async function tickBotRuntime(instance: BotInstance, triggerCtx?: QuoteTickTrigg
                   executionMode: "real",
                   fillSource: "live_exchange",
                   orderId: orderId ?? null,
+                  signalTsMs: now,
+                  orderPlacedAtMs: acceptedAtMs,
+                  localAcceptedAtMs: acceptedAtMs,
                   eventTsMs: acceptedAtMs,
                 });
                 const earlyTpEntryPx =
@@ -17346,6 +17549,7 @@ async function tickBotRuntime(instance: BotInstance, triggerCtx?: QuoteTickTrigg
                   executionMode: "real",
                   fillSource: "live_exchange",
                   orderId: orderId ?? null,
+                  signalTsMs: now,
                   eventTsMs: postReturnedAtMs,
                 });
               },
@@ -17363,6 +17567,8 @@ async function tickBotRuntime(instance: BotInstance, triggerCtx?: QuoteTickTrigg
                   executionMode: "real",
                   fillSource: "live_exchange",
                   orderId: orderId ?? null,
+                  signalTsMs: now,
+                  fillTsMs: filledAtMs,
                   eventTsMs: firstFillSeenAtMs,
                   actualFillTsMs: filledAtMs,
                 });
@@ -17381,6 +17587,8 @@ async function tickBotRuntime(instance: BotInstance, triggerCtx?: QuoteTickTrigg
                   executionMode: "real",
                   fillSource: "live_exchange",
                   orderId: orderId ?? null,
+                  signalTsMs: now,
+                  fillTsMs: filledAtMs,
                   eventTsMs: filledConfirmedAtMs,
                   actualFillTsMs: filledAtMs,
                 });
@@ -17493,6 +17701,8 @@ async function tickBotRuntime(instance: BotInstance, triggerCtx?: QuoteTickTrigg
             botStrategyRuntimes.delete(instance.instanceId);
             if (shouldRearmLiveEntryAfterErrorForStrategy(instance.strategyId, errMsg)) return false;
             throw e;
+          } finally {
+            rtAny.enterInFlight = false;
           }
         };
         // Momentum guard: after a TP on a side, require that side to dip below
@@ -24912,10 +25122,6 @@ function rejectHeavyReadOnHotHost(req: express.Request, res: express.Response, e
     endpointName === "focused-live-session" ||
     endpointName === "latest-session-card" ||
     endpointName === "rollover-ready" ||
-    // This endpoint reads the canonical run-summary artifact and is used by the
-    // Last 100 Sessions panel as the lightweight fallback when worker-heavy
-    // history routes are unavailable.
-    endpointName === "session-artifacts-summary" ||
     endpointName === "stats-summary" ||
     endpointName === "operator-notices" ||
     endpointName === "markets-volume-5m-24h" ||
@@ -24928,12 +25134,15 @@ function rejectHeavyReadOnHotHost(req: express.Request, res: express.Response, e
   if (allowHot && allowHotEndpoint) return false;
   if (allowHot && readonlyWorker) return false;
   const readonlyProxyTimeoutMs =
-    endpointName === "session-history" ||
-    endpointName === "continuity-history" ||
-    endpointName === "run-audits/review" ||
-    endpointName === "session-audits/review"
-      ? 45_000
-      : 15_000;
+    endpointName === "run-audits/review"
+      ? 120_000
+      : (
+        endpointName === "session-history" ||
+        endpointName === "continuity-history" ||
+        endpointName === "session-audits/review"
+          ? 45_000
+          : 15_000
+      );
   if (selectedReadOnlyOrigin) {
     try {
       const proxyUrl = new URL(
@@ -34440,12 +34649,6 @@ app.get("/api/compare/run-artifact", (req, res) => {
       res.type("text/plain; charset=utf-8");
       return res.send(fs.readFileSync(telemetryPath, "utf8"));
     }
-    if (kind === "session-trace-log") {
-      const tracePath = path.join(hostDir, "05_session_trace_run_1.jsonl");
-      if (!fs.existsSync(tracePath)) return res.status(404).json({ ok: false, error: "session trace log not found", path: tracePath });
-      res.type("text/plain; charset=utf-8");
-      return res.send(fs.readFileSync(tracePath, "utf8"));
-    }
     if (kind === "strategy") {
       const preservedStrategyPath = String(
         summary?.strategySourcePath
@@ -34469,6 +34672,48 @@ app.get("/api/compare/run-artifact", (req, res) => {
     const strategyId = String(req.query.strategyId || summary?.strategyId || "").trim().toLowerCase();
     const idxPath = compareRunIndexPath(hostDir, runNum, strategyId);
     if (!fs.existsSync(idxPath)) return res.status(404).json({ ok: false, error: "run index not found", path: idxPath });
+    if (kind === "session-trace-log") {
+      const indexPayload = JSON.parse(fs.readFileSync(idxPath, "utf8"));
+      const indexedSlugs = new Set(
+        (Array.isArray(indexPayload?.sessions) ? indexPayload.sessions : [])
+          .map((row: any) => String(row?.slug || "").trim())
+          .filter(Boolean)
+      );
+      const startMs = Math.max(0, Math.floor(Number(summary?.startedAtMs || summary?.launchedAtMs || 0)));
+      const endedAtMs = Number(summary?.endedAtMs || 0);
+      const endMs = Number.isFinite(endedAtMs) && endedAtMs > 0
+        ? Math.floor(endedAtMs + (SESSION_WINDOW_SEC * 1000))
+        : Number.POSITIVE_INFINITY;
+      const lines: string[] = [];
+      for (const tracePath of listSessionTraceLogFiles()) {
+        let raw = "";
+        try {
+          raw = fs.readFileSync(tracePath, "utf8");
+        } catch {
+          continue;
+        }
+        for (const ln of raw.split(/\r?\n/)) {
+          const line = String(ln || "").trim();
+          if (!line) continue;
+          let row: any = null;
+          try {
+            row = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          const slug = String(row?.slug || row?.sessionSlug || row?.marketSlug || "").trim();
+          if (!slug || !indexedSlugs.has(slug)) continue;
+          const t = Number(row?.t || row?.ts || row?.timestampMs || 0);
+          if (Number.isFinite(t) && t > 0) {
+            if (startMs > 0 && t < startMs) continue;
+            if (Number.isFinite(endMs) && t > endMs) continue;
+          }
+          lines.push(line);
+        }
+      }
+      res.type("text/plain; charset=utf-8");
+      return res.send(lines.join("\n"));
+    }
     return res.json({ ok: true, hostPort, runNum, path: idxPath, ...JSON.parse(fs.readFileSync(idxPath, "utf8")) });
   } catch (e: any) {
     return res.status(500).json({ ok: false, error: String(e?.message ?? e) });
@@ -34664,7 +34909,7 @@ app.get("/api/v2/bots/:instanceId/continuity-history", (req, res) => {
     if (Number.isFinite(currentRunNum) && currentRunNum > 0) {
       const prevRunNum = currentRunNum - 1;
       const prevIdxPath = botRunIndexPath(strategyId, prevRunNum);
-      if (prevRunNum > 0 && fs.existsSync(prevIdxPath)) {
+      if (shouldIncludePreviousRunForInstanceContinuity(inst, prevRunNum)) {
         runNums.push(prevRunNum);
         sigParts.push(fileCacheSignature(prevIdxPath));
       }
@@ -34750,6 +34995,7 @@ app.get("/api/v2/bots/:instanceId/continuity-history", (req, res) => {
           ? overlaySyntheticSettleIntoContinuitySession(normalizedBase, accountingTrace || null)
           : normalizedBase;
         const compact = readSessionAuditCompact(rn, slug);
+        const compactActual = actualAccountingFromCompactAuditSummary(compact);
         const compactCorrected = correctedAccountingFromCompactAuditSummary(compact);
         const corrected = closed
           ? (
@@ -34766,15 +35012,21 @@ app.get("/api/v2/bots/:instanceId/continuity-history", (req, res) => {
         const synthesizedSettlePnlUsd = Number(normalized?.correctedPnlUsd ?? normalized?.pnlUsd);
         const synthesizedSettleGrossPnlUsd = Number(normalized?.grossPnlUsd);
         const synthesizedSettleFeesUsd = Number(normalized?.feesUsd);
-        const actualNetPnlUsd = Number.isFinite(Number(raw?.pnlUsd))
+        const actualNetPnlUsd = Number.isFinite(Number(compactActual?.actualNetPnlUsd))
+          ? Number(compactActual?.actualNetPnlUsd)
+          : (Number.isFinite(Number(raw?.pnlUsd))
           ? Number(raw.pnlUsd)
-          : (Number.isFinite(Number(normalizedBase?.pnlUsd)) ? Number(normalizedBase.pnlUsd) : null);
-        const actualGrossPnlUsd = Number.isFinite(Number(raw?.grossPnlUsd))
+          : (Number.isFinite(Number(normalizedBase?.pnlUsd)) ? Number(normalizedBase.pnlUsd) : null));
+        const actualGrossPnlUsd = Number.isFinite(Number(compactActual?.actualGrossPnlUsd))
+          ? Number(compactActual?.actualGrossPnlUsd)
+          : (Number.isFinite(Number(raw?.grossPnlUsd))
           ? Number(raw.grossPnlUsd)
-          : (Number.isFinite(Number(normalizedBase?.grossPnlUsd)) ? Number(normalizedBase.grossPnlUsd) : null);
-        const actualFeesUsd = Number.isFinite(Number(raw?.feesUsd))
+          : (Number.isFinite(Number(normalizedBase?.grossPnlUsd)) ? Number(normalizedBase.grossPnlUsd) : null));
+        const actualFeesUsd = Number.isFinite(Number(compactActual?.actualFeesUsd))
+          ? Number(compactActual?.actualFeesUsd)
+          : (Number.isFinite(Number(raw?.feesUsd))
           ? Number(raw.feesUsd)
-          : (Number.isFinite(Number(normalizedBase?.feesUsd)) ? Number(normalizedBase.feesUsd) : null);
+          : (Number.isFinite(Number(normalizedBase?.feesUsd)) ? Number(normalizedBase.feesUsd) : null));
         const hasSynthesizedSettle =
           String(normalized?.correctedExitStrategy || "").trim().toLowerCase() === "settle_remaining"
           && Number.isFinite(synthesizedSettlePnlUsd)
@@ -34807,9 +35059,9 @@ app.get("/api/v2/bots/:instanceId/continuity-history", (req, res) => {
         const correctedExitStrategy = hasSynthesizedSettle
           ? "settle_remaining"
           : (corrected?.correctedExitStrategy ?? null);
-        const displayPnlUsd = correctedNetPnlUsd ?? corrected?.actualNetPnlUsd ?? actualNetPnlUsd;
-        const displayGrossPnlUsd = correctedGrossPnlUsd ?? corrected?.actualGrossPnlUsd ?? actualGrossPnlUsd;
-        const displayFeesUsd = correctedFeesUsd ?? corrected?.actualFeesUsd ?? actualFeesUsd;
+        const displayPnlUsd = actualNetPnlUsd;
+        const displayGrossPnlUsd = actualGrossPnlUsd;
+        const displayFeesUsd = actualFeesUsd;
         const sess = {
           ...normalized,
           actualPnlUsd: corrected?.actualNetPnlUsd ?? actualNetPnlUsd,
@@ -34859,7 +35111,7 @@ app.get("/api/v2/bots/:instanceId/continuity-history", (req, res) => {
       .slice()
       .sort((a: any, b: any) => Number(a?.startMs || 0) - Number(b?.startMs || 0));
     for (const sess of sessionsAscForBalance) {
-      if (!sess?.excludeFromPnl) continuityRunningBalanceUsd += Number(sess?.correctedPnlUsd ?? sess?.actualPnlUsd ?? sess?.pnlUsd) || 0;
+      if (!sess?.excludeFromPnl) continuityRunningBalanceUsd += Number(sess?.actualPnlUsd ?? sess?.pnlUsd) || 0;
       sess.continuityBalanceUsd = Number(Number(continuityRunningBalanceUsd).toFixed(4));
       if (!Number.isFinite(Number(sess?.balanceUsd))) sess.balanceUsd = sess.continuityBalanceUsd;
     }
@@ -34901,8 +35153,7 @@ function buildBotContinuitySessionsForInstance(
   const runNums: number[] = [];
   if (Number.isFinite(currentRunNum) && currentRunNum > 0) {
     const prevRunNum = currentRunNum - 1;
-    const prevIdxPath = botRunIndexPath(strategyId, prevRunNum);
-    if (prevRunNum > 0 && fs.existsSync(prevIdxPath)) runNums.push(prevRunNum);
+    if (shouldIncludePreviousRunForInstanceContinuity(instance, prevRunNum)) runNums.push(prevRunNum);
     runNums.push(currentRunNum);
   }
   const bySlug = new Map<string, any>();
@@ -34964,6 +35215,7 @@ function buildBotContinuitySessionsForInstance(
         ? overlaySyntheticSettleIntoContinuitySession(normalizedBase, accountingTrace || null)
         : normalizedBase;
       const compact = readSessionAuditCompact(rn, slug);
+      const compactActual = actualAccountingFromCompactAuditSummary(compact);
       const compactCorrected = correctedAccountingFromCompactAuditSummary(compact);
       const corrected = closed
         ? (
@@ -34980,15 +35232,21 @@ function buildBotContinuitySessionsForInstance(
       const synthesizedSettlePnlUsd = Number(normalized?.correctedPnlUsd ?? normalized?.pnlUsd);
       const synthesizedSettleGrossPnlUsd = Number(normalized?.grossPnlUsd);
       const synthesizedSettleFeesUsd = Number(normalized?.feesUsd);
-      const actualNetPnlUsd = Number.isFinite(Number(raw?.pnlUsd))
+      const actualNetPnlUsd = Number.isFinite(Number(compactActual?.actualNetPnlUsd))
+        ? Number(compactActual?.actualNetPnlUsd)
+        : (Number.isFinite(Number(raw?.pnlUsd))
         ? Number(raw.pnlUsd)
-        : (Number.isFinite(Number(normalizedBase?.pnlUsd)) ? Number(normalizedBase.pnlUsd) : null);
-      const actualGrossPnlUsd = Number.isFinite(Number(raw?.grossPnlUsd))
+        : (Number.isFinite(Number(normalizedBase?.pnlUsd)) ? Number(normalizedBase.pnlUsd) : null));
+      const actualGrossPnlUsd = Number.isFinite(Number(compactActual?.actualGrossPnlUsd))
+        ? Number(compactActual?.actualGrossPnlUsd)
+        : (Number.isFinite(Number(raw?.grossPnlUsd))
         ? Number(raw.grossPnlUsd)
-        : (Number.isFinite(Number(normalizedBase?.grossPnlUsd)) ? Number(normalizedBase.grossPnlUsd) : null);
-      const actualFeesUsd = Number.isFinite(Number(raw?.feesUsd))
+        : (Number.isFinite(Number(normalizedBase?.grossPnlUsd)) ? Number(normalizedBase.grossPnlUsd) : null));
+      const actualFeesUsd = Number.isFinite(Number(compactActual?.actualFeesUsd))
+        ? Number(compactActual?.actualFeesUsd)
+        : (Number.isFinite(Number(raw?.feesUsd))
         ? Number(raw.feesUsd)
-        : (Number.isFinite(Number(normalizedBase?.feesUsd)) ? Number(normalizedBase.feesUsd) : null);
+        : (Number.isFinite(Number(normalizedBase?.feesUsd)) ? Number(normalizedBase.feesUsd) : null));
       const hasSynthesizedSettle =
         String(normalized?.correctedExitStrategy || "").trim().toLowerCase() === "settle_remaining"
         && Number.isFinite(synthesizedSettlePnlUsd)
@@ -35021,9 +35279,9 @@ function buildBotContinuitySessionsForInstance(
       const correctedExitStrategy = hasSynthesizedSettle
         ? "settle_remaining"
         : (corrected?.correctedExitStrategy ?? null);
-      const displayPnlUsd = correctedNetPnlUsd ?? corrected?.actualNetPnlUsd ?? actualNetPnlUsd;
-      const displayGrossPnlUsd = correctedGrossPnlUsd ?? corrected?.actualGrossPnlUsd ?? actualGrossPnlUsd;
-      const displayFeesUsd = correctedFeesUsd ?? corrected?.actualFeesUsd ?? actualFeesUsd;
+      const displayPnlUsd = actualNetPnlUsd;
+      const displayGrossPnlUsd = actualGrossPnlUsd;
+      const displayFeesUsd = actualFeesUsd;
       bySlug.set(slug, {
         ...normalized,
         actualPnlUsd: corrected?.actualNetPnlUsd ?? actualNetPnlUsd,
@@ -35069,7 +35327,7 @@ function buildBotContinuitySessionsForInstance(
     .slice()
     .sort((a: any, b: any) => Number(a?.startMs || 0) - Number(b?.startMs || 0));
   for (const sess of sessionsAscForBalance) {
-    if (!sess?.excludeFromPnl) continuityRunningBalanceUsd += Number(sess?.correctedPnlUsd ?? sess?.actualPnlUsd ?? sess?.pnlUsd) || 0;
+    if (!sess?.excludeFromPnl) continuityRunningBalanceUsd += Number(sess?.actualPnlUsd ?? sess?.pnlUsd) || 0;
     sess.continuityBalanceUsd = Number(Number(continuityRunningBalanceUsd).toFixed(4));
     sess.balanceUsd = sess.continuityBalanceUsd;
   }
@@ -35360,43 +35618,73 @@ app.get("/api/v2/bots/:instanceId/session-artifacts-summary", (req, res) => {
         if (!slug) return false;
         return !marketPrefix || slug.startsWith(`${marketPrefix}-`);
       })
-      .map((row: any) => ({
-        slug: String(row?.slug || "").trim() || null,
-        humanLabel: String(row?.humanLabel || "").trim() || null,
-        pnlUsd: Number.isFinite(Number(row?.pnlUsd)) ? Number(row.pnlUsd) : null,
-        continuityBalanceUsd: Number.isFinite(Number(row?.cumulativeBalanceUsd)) ? Number(row.cumulativeBalanceUsd) : null,
-        noTrade: row?.noTrade === true,
-        noTradeReason: deriveNoTradeReason(row),
-        closed: row?.closed === true,
-        startMs: Number.isFinite(Number(row?.startMs)) ? Number(row.startMs) : null,
-        endMs: Number.isFinite(Number(row?.endMs)) ? Number(row.endMs) : null,
-        sessionAuditPath: buildSessionAuditPath(row?.slug),
-        source: "run_summary",
-      }));
+      .map((row: any) => {
+        const slug = String(row?.slug || "").trim() || null;
+        const actualAccounting = slug ? actualAccountingFromCompactAuditSummary(readSessionAuditCompact(runNum, slug)) : null;
+        return {
+          slug,
+          humanLabel: String(row?.humanLabel || "").trim() || null,
+          pnlUsd: Number.isFinite(Number(actualAccounting?.actualNetPnlUsd ?? row?.pnlUsd))
+            ? Number(actualAccounting?.actualNetPnlUsd ?? row?.pnlUsd)
+            : null,
+          actualPnlUsd: Number.isFinite(Number(actualAccounting?.actualNetPnlUsd))
+            ? Number(actualAccounting?.actualNetPnlUsd)
+            : null,
+          grossPnlUsd: Number.isFinite(Number(actualAccounting?.actualGrossPnlUsd))
+            ? Number(actualAccounting?.actualGrossPnlUsd)
+            : null,
+          feesUsd: Number.isFinite(Number(actualAccounting?.actualFeesUsd))
+            ? Number(actualAccounting?.actualFeesUsd)
+            : null,
+          continuityBalanceUsd: Number.isFinite(Number(row?.cumulativeBalanceUsd)) ? Number(row.cumulativeBalanceUsd) : null,
+          noTrade: row?.noTrade === true,
+          noTradeReason: deriveNoTradeReason(row),
+          closed: row?.closed === true,
+          startMs: Number.isFinite(Number(row?.startMs)) ? Number(row.startMs) : null,
+          endMs: Number.isFinite(Number(row?.endMs)) ? Number(row.endMs) : null,
+          sessionAuditPath: buildSessionAuditPath(row?.slug),
+          source: "run_summary",
+        };
+      });
     const indexedRows = indexedSessions
       .filter((row: any) => {
         const slug = String(row?.slug || "").trim().toLowerCase();
         if (!slug) return false;
         return !marketPrefix || slug.startsWith(`${marketPrefix}-`);
       })
-      .map((row: any) => ({
-        slug: String(row?.slug || "").trim() || null,
-        humanLabel: String(row?.humanLabel || "").trim() || null,
-        pnlUsd: Number.isFinite(Number(row?.pnlUsd)) ? Number(row.pnlUsd) : null,
-        continuityBalanceUsd: Number.isFinite(Number(row?.continuityBalanceUsd))
-          ? Number(row.continuityBalanceUsd)
-          : (Number.isFinite(Number(row?.balanceUsd)) ? Number(row.balanceUsd) : null),
-        latestBalanceUsd: Number.isFinite(Number(row?.balanceUsd))
-          ? Number(row.balanceUsd)
-          : (Number.isFinite(Number(row?.continuityBalanceUsd)) ? Number(row.continuityBalanceUsd) : null),
-        noTrade: row?.noTrade === true,
-        noTradeReason: deriveNoTradeReason(row),
-        closed: row?.closed === true,
-        startMs: Number.isFinite(Number(row?.startMs)) ? Number(row.startMs) : null,
-        endMs: Number.isFinite(Number(row?.endMs)) ? Number(row.endMs) : null,
-        sessionAuditPath: buildSessionAuditPath(row?.slug),
-        source: "run_index_display",
-      }));
+      .map((row: any) => {
+        const slug = String(row?.slug || "").trim() || null;
+        const actualAccounting = slug ? actualAccountingFromCompactAuditSummary(readSessionAuditCompact(runNum, slug)) : null;
+        return {
+          slug,
+          humanLabel: String(row?.humanLabel || "").trim() || null,
+          pnlUsd: Number.isFinite(Number(actualAccounting?.actualNetPnlUsd ?? row?.pnlUsd))
+            ? Number(actualAccounting?.actualNetPnlUsd ?? row?.pnlUsd)
+            : null,
+          actualPnlUsd: Number.isFinite(Number(actualAccounting?.actualNetPnlUsd))
+            ? Number(actualAccounting?.actualNetPnlUsd)
+            : null,
+          grossPnlUsd: Number.isFinite(Number(actualAccounting?.actualGrossPnlUsd))
+            ? Number(actualAccounting?.actualGrossPnlUsd)
+            : null,
+          feesUsd: Number.isFinite(Number(actualAccounting?.actualFeesUsd))
+            ? Number(actualAccounting?.actualFeesUsd)
+            : null,
+          continuityBalanceUsd: Number.isFinite(Number(row?.continuityBalanceUsd))
+            ? Number(row.continuityBalanceUsd)
+            : (Number.isFinite(Number(row?.balanceUsd)) ? Number(row.balanceUsd) : null),
+          latestBalanceUsd: Number.isFinite(Number(row?.balanceUsd))
+            ? Number(row.balanceUsd)
+            : (Number.isFinite(Number(row?.continuityBalanceUsd)) ? Number(row.continuityBalanceUsd) : null),
+          noTrade: row?.noTrade === true,
+          noTradeReason: deriveNoTradeReason(row),
+          closed: row?.closed === true,
+          startMs: Number.isFinite(Number(row?.startMs)) ? Number(row.startMs) : null,
+          endMs: Number.isFinite(Number(row?.endMs)) ? Number(row.endMs) : null,
+          sessionAuditPath: buildSessionAuditPath(row?.slug),
+          source: "run_index_display",
+        };
+      });
     const continuityRows = HOT_SERVICE_MODE ? [] : (() => {
       try {
         const bundle = buildBotContinuitySessionsForInstance(inst, false);
@@ -35410,8 +35698,15 @@ app.get("/api/v2/bots/:instanceId/session-artifacts-summary", (req, res) => {
           .map((row: any) => ({
             slug: String(row?.slug || "").trim() || null,
             humanLabel: String(row?.humanLabel || "").trim() || null,
-            pnlUsd: Number.isFinite(Number(row?.correctedPnlUsd ?? row?.actualPnlUsd ?? row?.pnlUsd))
-              ? Number(row?.correctedPnlUsd ?? row?.actualPnlUsd ?? row?.pnlUsd)
+            pnlUsd: Number.isFinite(Number(row?.actualPnlUsd ?? row?.pnlUsd))
+              ? Number(row?.actualPnlUsd ?? row?.pnlUsd)
+              : null,
+            actualPnlUsd: Number.isFinite(Number(row?.actualPnlUsd)) ? Number(row.actualPnlUsd) : null,
+            grossPnlUsd: Number.isFinite(Number(row?.actualGrossPnlUsd ?? row?.grossPnlUsd))
+              ? Number(row?.actualGrossPnlUsd ?? row?.grossPnlUsd)
+              : null,
+            feesUsd: Number.isFinite(Number(row?.actualFeesUsd ?? row?.feesUsd))
+              ? Number(row?.actualFeesUsd ?? row?.feesUsd)
               : null,
             continuityBalanceUsd: Number.isFinite(Number(row?.continuityBalanceUsd))
               ? Number(row.continuityBalanceUsd)
