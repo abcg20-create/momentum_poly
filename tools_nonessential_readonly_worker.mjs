@@ -11,6 +11,7 @@ const PORT = Math.max(1, Number(process.env.PORT || 9001));
 const HOST = String(process.env.HOST || "0.0.0.0").trim() || "0.0.0.0";
 const WORKER_LABEL = String(process.env.WORKER_LABEL || `worker:${PORT}`).trim() || `worker:${PORT}`;
 const UPSTREAM_ORIGIN = String(process.env.UPSTREAM_ORIGIN || "").trim().replace(/\/+$/, "");
+const UPSTREAM_ORIGIN_MAP_RAW = String(process.env.UPSTREAM_ORIGIN_MAP || "").trim();
 const CACHE_ROOT = path.resolve(String(process.env.CACHE_ROOT || `/tmp/nonessential_worker_${PORT}`));
 const DEFAULT_TTL_MS = Math.max(1000, Number(process.env.DEFAULT_TTL_MS || 15000));
 const ERROR_TTL_MS = Math.max(1000, Number(process.env.ERROR_TTL_MS || 5000));
@@ -80,8 +81,10 @@ const RUN_AUDIT_HOST_PORT = String(process.env.RUN_AUDIT_HOST_PORT || "8788").tr
 const RUN_AUDIT_PUBLIC_BASE = String(process.env.RUN_AUDIT_PUBLIC_BASE || UPSTREAM_ORIGIN || "").trim().replace(/\/+$/, "");
 const RUN_AUDIT_MAX_AGE_MS = Math.max(1000, Number(process.env.RUN_AUDIT_MAX_AGE_MS || 30000));
 const RUN_AUDIT_TOLERATED_MISSING_SESSIONS = Math.max(0, Number(process.env.RUN_AUDIT_TOLERATED_MISSING_SESSIONS || 3));
-const RUN_AUDIT_EXPECTED_CODE_VERSION = String(process.env.RUN_AUDIT_EXPECTED_CODE_VERSION || "run_audit_mv_v27").trim() || "run_audit_mv_v27";
+const RUN_AUDIT_EXPECTED_CODE_VERSION = String(process.env.RUN_AUDIT_EXPECTED_CODE_VERSION || "run_audit_mv_v37").trim() || "run_audit_mv_v37";
 const RUN_AUDIT_SYNC_BUILD_TIMEOUT_MS = Math.max(1000, Number(process.env.RUN_AUDIT_SYNC_BUILD_TIMEOUT_MS || 60000));
+const RUN_AUDIT_MIRROR_DETAILED_SESSION_LIMIT = Math.max(0, Number(process.env.RUN_AUDIT_MIRROR_DETAILED_SESSION_LIMIT || 40));
+const RUN_AUDIT_MIRROR_COLD_COMPACT_SESSION_LIMIT = Math.max(0, Number(process.env.RUN_AUDIT_MIRROR_COLD_COMPACT_SESSION_LIMIT || 60));
 const RUN_AUDIT_BACKGROUND_WARM_ENABLED = String(process.env.RUN_AUDIT_BACKGROUND_WARM_ENABLED || "1").trim() !== "0";
 const RUN_AUDIT_BACKGROUND_WARM_INTERVAL_MS = Math.max(5000, Number(process.env.RUN_AUDIT_BACKGROUND_WARM_INTERVAL_MS || 15000));
 const RUN_AUDIT_BACKGROUND_MAX_BOTS = Math.max(1, Number(process.env.RUN_AUDIT_BACKGROUND_MAX_BOTS || 4));
@@ -115,6 +118,25 @@ let cpuSampleLastPct = 0;
 let activitySeq = 0;
 const activityLog = [];
 const activityClients = new Set();
+
+function parseUpstreamOriginMap(raw) {
+  const out = new Map();
+  const src = String(raw || "").trim();
+  if (!src) return out;
+  for (const part of src.split(",")) {
+    const row = String(part || "").trim();
+    if (!row) continue;
+    const eqIdx = row.indexOf("=");
+    if (eqIdx <= 0) continue;
+    const key = String(row.slice(0, eqIdx) || "").trim();
+    const value = String(row.slice(eqIdx + 1) || "").trim().replace(/\/+$/, "");
+    if (!key || !value) continue;
+    out.set(key, value);
+  }
+  return out;
+}
+
+const UPSTREAM_ORIGIN_MAP = parseUpstreamOriginMap(UPSTREAM_ORIGIN_MAP_RAW);
 
 fs.mkdirSync(CACHE_ROOT, { recursive: true });
 fs.mkdirSync(PARITY_OUT_DIR, { recursive: true });
@@ -826,6 +848,7 @@ function timeoutForPath(pathname) {
   if (/^\/api\/session-history\b/i.test(pathname)) return HISTORY_UPSTREAM_TIMEOUT_MS;
   if (/^\/api\/run-audits\/review\b/i.test(pathname)) return HISTORY_UPSTREAM_TIMEOUT_MS;
   if (/^\/api\/session-audits\/review\b/i.test(pathname)) return HISTORY_UPSTREAM_TIMEOUT_MS;
+  if (/^\/api\/v2\/bots\/[^/]+\/run-index\b/i.test(pathname)) return HISTORY_UPSTREAM_TIMEOUT_MS;
   if (/^\/api\/v2\/bots\/[^/]+\/continuity-history\b/i.test(pathname)) return HISTORY_UPSTREAM_TIMEOUT_MS;
   if (/^\/api\/v2\/bots\/[^/]+\/latest-session-card\b/i.test(pathname)) return HISTORY_UPSTREAM_TIMEOUT_MS;
   return UPSTREAM_TIMEOUT_MS;
@@ -849,7 +872,14 @@ function readCache(key) {
 
 function writeCache(key, entry) {
   cacheMem.set(key, entry);
-  fs.writeFileSync(cacheFilePath(key), JSON.stringify(entry));
+  try {
+    fs.writeFileSync(cacheFilePath(key), JSON.stringify(entry));
+  } catch (error) {
+    const message = String(error?.message || error || "");
+    if (message) {
+      log(`cache_write_skipped key=${stableHash(key).slice(0, 12)} reason=${message}`);
+    }
+  }
 }
 
 function parseMarketVolumeUsd(mkt) {
@@ -887,6 +917,21 @@ function writeLastSessionHistoryCache(instanceIdLike, marketPrefixLike, payload)
   try {
     fs.writeFileSync(lastSessionHistoryCachePath(instanceIdLike, marketPrefixLike), JSON.stringify(payload, null, 2) + "\n");
   } catch {}
+}
+
+function limitLastSessionHistoryPayload(payloadLike, limitLike) {
+  const payload = payloadLike && typeof payloadLike === "object" ? payloadLike : {};
+  const allSessions = Array.isArray(payload?.sessions) ? payload.sessions.filter((row) => row && typeof row === "object") : [];
+  const limitRaw = Number(limitLike);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(5000, Math.floor(limitRaw))) : 100;
+  const sessions = allSessions.slice(0, limit);
+  return {
+    ...payload,
+    count: sessions.length,
+    totalCount: Number.isFinite(Number(payload?.totalCount)) ? Number(payload.totalCount) : allSessions.length,
+    sessions,
+    requestedLimit: limit,
+  };
 }
 
 function runIdentityFromPayload(payloadLike) {
@@ -963,6 +1008,7 @@ function buildRunAuditWarmUrl(botLike) {
   }
   reqUrl.searchParams.set("hostPort", normalizeRunAuditHostPort(RUN_AUDIT_HOST_PORT));
   reqUrl.searchParams.set("format", "json");
+  reqUrl.searchParams.set("backgroundWarm", "1");
   return reqUrl;
 }
 
@@ -986,18 +1032,24 @@ function compactSessionSortTs(row) {
 function compactSessionDisplayPnlUsd(rowLike) {
   const row = rowLike && typeof rowLike === "object" ? rowLike : null;
   if (!row) return null;
-  const auditNet = Number(row?.auditNetPnlUsd);
-  if (Number.isFinite(auditNet)) {
-    return auditNet;
-  }
   const actual = Number(row?.actualPnlUsd);
-  if (Number.isFinite(actual)) {
-    return actual;
-  }
   const corrected = Number(row?.correctedPnlUsd);
-  if (Number.isFinite(corrected)) {
-    return corrected;
+  const preferredAudit = preferNonZeroAuditNumber(row?.auditNetPnlUsd, actual);
+  const preferredCorrected = preferNonZeroAuditNumber(corrected, actual);
+  return preferNonZeroAuditNumber(preferredAudit, preferredCorrected);
+}
+
+function preferNonZeroAuditNumber(preferredLike, fallbackLike) {
+  const preferred = Number(preferredLike);
+  const fallback = Number(fallbackLike);
+  const preferredFinite = Number.isFinite(preferred);
+  const fallbackFinite = Number.isFinite(fallback);
+  if (preferredFinite) {
+    if (Math.abs(preferred) > 1e-9 || !fallbackFinite || Math.abs(fallback) <= 1e-9) {
+      return preferred;
+    }
   }
+  if (fallbackFinite) return fallback;
   return null;
 }
 
@@ -1174,8 +1226,17 @@ function normalizeLastSessionHistoryRow(rowLike) {
   return out;
 }
 
-async function fetchRunIndexPayloadForInstance(instanceId) {
+async function fetchRunIndexPayloadForInstance(instanceId, opts = {}) {
+  const sourceHostPort = String(opts.sourceHostPort || "").trim();
+  const marketPrefix = String(opts.marketPrefix || "").trim().toLowerCase();
+  const marketSlug = String(opts.marketSlug || "").trim().toLowerCase();
+  const limitRaw = Number(opts.limit || opts.maxSessions || 0);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.max(1, Math.min(5000, Math.floor(limitRaw))) : null;
   const upstreamReq = new URL(`/api/v2/bots/${encodeURIComponent(String(instanceId || "").trim())}/run-index`, "http://worker.local");
+  if (marketPrefix) upstreamReq.searchParams.set("marketPrefix", marketPrefix);
+  if (marketSlug) upstreamReq.searchParams.set("marketSlug", marketSlug);
+  if (limit != null) upstreamReq.searchParams.set("limit", String(limit));
+  if (sourceHostPort) upstreamReq.searchParams.set("sourceHostPort", normalizeRunAuditHostPort(sourceHostPort));
   const upstreamUrl = buildUpstreamUrl(upstreamReq);
   const payload = await fetchJsonDirect(upstreamUrl.toString());
   return { upstreamUrl, payload };
@@ -1183,11 +1244,13 @@ async function fetchRunIndexPayloadForInstance(instanceId) {
 
 async function fetchContinuityHistoryPayloadForInstance(instanceId, opts = {}) {
   const includeTrace = opts.includeTrace === true;
+  const sourceHostPort = String(opts.sourceHostPort || "").trim();
   const maxSessionsRaw = Number(opts.maxSessions || 0);
   const maxSessions = Number.isFinite(maxSessionsRaw) && maxSessionsRaw > 0 ? Math.max(1, Math.floor(maxSessionsRaw)) : 200;
   const upstreamReq = new URL(`/api/v2/bots/${encodeURIComponent(String(instanceId || "").trim())}/continuity-history`, "http://worker.local");
   upstreamReq.searchParams.set("includeTrace", includeTrace ? "1" : "0");
   upstreamReq.searchParams.set("maxSessions", String(maxSessions));
+  if (sourceHostPort) upstreamReq.searchParams.set("sourceHostPort", normalizeRunAuditHostPort(sourceHostPort));
   const upstreamUrl = buildUpstreamUrl(upstreamReq);
   const payload = await fetchJsonDirect(upstreamUrl.toString());
   return { upstreamUrl, payload };
@@ -1297,7 +1360,7 @@ async function buildCompactSessionHistoryPayload(reqUrl) {
       const slug = String(row?.slug || "").trim();
       if (!slug) return row;
       try {
-        const canonical = await readRemoteCanonicalSessionJson(slug, true);
+        const canonical = await readRemoteCanonicalSessionJson(slug, true, RUN_AUDIT_HOST_PORT);
         if (canonical && typeof canonical === "object") {
           return normalizeLastSessionHistoryRow({
             ...row,
@@ -1363,11 +1426,15 @@ async function buildLastSessionHistoryPayload(reqUrl) {
   let upstreamUrl = null;
   let rows = [];
   let runIndexRows = [];
+  let continuityRows = [];
   let currentRunNum = null;
   let currentRunIdText = null;
   let currentRunStartMs = null;
   try {
-    const runIndex = await fetchRunIndexPayloadForInstance(instanceId);
+    const runIndex = await fetchRunIndexPayloadForInstance(instanceId, {
+      marketPrefix,
+      limit: 5000,
+    });
     upstreamUrl = runIndex.upstreamUrl;
     const runIdentity = runIdentityFromPayload(runIndex.payload);
     currentRunNum = runIdentity.runNum;
@@ -1380,11 +1447,75 @@ async function buildLastSessionHistoryPayload(reqUrl) {
       offset: 0,
     }).filter((row) => rowWithinRunStart(row, currentRunStartMs));
   } catch {}
+  try {
+    const continuity = await fetchContinuityHistoryPayloadForInstance(instanceId, {
+      includeTrace: false,
+      maxSessions: 5000,
+    });
+    if (!upstreamUrl) upstreamUrl = continuity.upstreamUrl;
+    if (!(Number.isFinite(Number(currentRunNum)) && currentRunNum > 0) || !currentRunIdText || !currentRunStartMs) {
+      const continuityIdentity = runIdentityFromPayload(continuity.payload);
+      currentRunNum = currentRunNum || continuityIdentity.runNum;
+      currentRunIdText = currentRunIdText || continuityIdentity.runIdText;
+      currentRunStartMs = currentRunStartMs || runStartMsFromPayload(continuity.payload);
+    }
+    continuityRows = compactRowsFromContinuityPayload(continuity.payload, {
+      instanceId,
+      marketPrefix,
+      maxSessions: 5000,
+      offset: 0,
+    }).filter((row) => rowWithinRunStart(row, currentRunStartMs));
+    if (continuityRows.length) {
+      const continuityRunId = String(continuity.payload?.runId || continuity.payload?.run?.runId || continuity.payload?.summary?.runId || "").trim() || null;
+      continuityRows = continuityRows.map((row) => ({
+        ...row,
+        runNum: Number.isFinite(Number(row?.runNum)) ? Number(row.runNum) : currentRunNum,
+        runIdText: String(row?.runIdText || row?.runId || continuityRunId || currentRunIdText || "").trim() || null,
+        runId: String(row?.runId || continuityRunId || currentRunIdText || "").trim() || null,
+        actualPnlUsd: Number.isFinite(Number(row?.actualPnlUsd))
+          ? Number(row.actualPnlUsd)
+          : (Number.isFinite(Number(row?.pnlUsd)) ? Number(row.pnlUsd) : null),
+        correctedPnlUsd: Number.isFinite(Number(row?.correctedPnlUsd))
+          ? Number(row.correctedPnlUsd)
+          : null,
+        balanceUsd: Number.isFinite(Number(row?.balanceUsd))
+          ? Number(row.balanceUsd)
+          : (Number.isFinite(Number(row?.continuityBalanceUsd)) ? Number(row.continuityBalanceUsd) : null),
+      }));
+    }
+  } catch {}
   const sourceBySlug = new Map();
   for (const row of runIndexRows) {
     const slug = String(row?.slug || "").trim();
     if (!slug) continue;
     sourceBySlug.set(slug, preferSessionRowForHistory(sourceBySlug.get(slug) || null, row));
+  }
+  for (const row of continuityRows) {
+    const slug = String(row?.slug || "").trim();
+    if (!slug) continue;
+    sourceBySlug.set(slug, preferSessionRowForHistory(sourceBySlug.get(slug) || null, row));
+  }
+  for (const row of continuityRows) {
+    const slug = String(row?.slug || "").trim();
+    if (!slug) continue;
+    const existing = sourceBySlug.get(slug);
+    if (!existing || typeof existing !== "object") continue;
+    sourceBySlug.set(slug, {
+      ...existing,
+      actualPnlUsd: Number.isFinite(Number(row?.actualPnlUsd))
+        ? Number(row.actualPnlUsd)
+        : existing?.actualPnlUsd,
+      correctedPnlUsd: Number.isFinite(Number(row?.correctedPnlUsd))
+        ? Number(row.correctedPnlUsd)
+        : existing?.correctedPnlUsd,
+      balanceUsd: Number.isFinite(Number(row?.balanceUsd))
+        ? Number(row.balanceUsd)
+        : existing?.balanceUsd,
+      continuityBalanceUsd: Number.isFinite(Number(row?.continuityBalanceUsd))
+        ? Number(row.continuityBalanceUsd)
+        : existing?.continuityBalanceUsd,
+      excludeFromPnl: row?.excludeFromPnl === true ? true : existing?.excludeFromPnl,
+    });
   }
   rows = Array.from(sourceBySlug.values())
     .sort((a, b) => compactSessionSortTs(b) - compactSessionSortTs(a));
@@ -1402,33 +1533,22 @@ async function buildLastSessionHistoryPayload(reqUrl) {
     if (!slug || bySlug.has(slug)) continue;
     bySlug.set(slug, row);
   }
-  let appended = 0;
-  let refreshed = 0;
-  for (const raw of rows) {
+  const enrichedRows = await Promise.all(rows.map(async (raw) => {
     let enrichedRaw = raw;
     try {
-      const compactAudit = await readRemoteSessionAuditCompact(raw?.runNum ?? currentRunNum, raw?.slug);
+      const compactAudit = await readRemoteSessionAuditCompact(raw?.runNum ?? currentRunNum, raw?.slug, RUN_AUDIT_HOST_PORT);
       if (compactAudit) {
         const correctedAccounting = correctedAccountingFromCompactAuditSummaryWorker(compactAudit);
         const actualAccounting = actualAccountingFromCompactAuditSummaryWorker(compactAudit);
-        const authoritativeAuditNetPnlUsd = Number.isFinite(Number(actualAccounting?.actualNetPnlUsd))
-          ? Number(actualAccounting.actualNetPnlUsd)
-          : (
-              Number.isFinite(Number(correctedAccounting?.correctedNetPnlUsd))
-                ? Number(correctedAccounting.correctedNetPnlUsd)
-                : raw?.auditNetPnlUsd
-            );
+        const authoritativeAuditNetPnlUsd = preferNonZeroAuditNumber(
+          actualAccounting?.actualNetPnlUsd,
+          preferNonZeroAuditNumber(correctedAccounting?.correctedNetPnlUsd, raw?.auditNetPnlUsd ?? raw?.actualPnlUsd ?? raw?.correctedPnlUsd)
+        );
         enrichedRaw = {
           ...raw,
-          auditNetPnlUsd: Number.isFinite(Number(authoritativeAuditNetPnlUsd))
-            ? Number(authoritativeAuditNetPnlUsd)
-            : raw?.auditNetPnlUsd,
-          correctedPnlUsd: Number.isFinite(Number(correctedAccounting?.correctedNetPnlUsd))
-            ? Number(correctedAccounting.correctedNetPnlUsd)
-            : raw?.correctedPnlUsd,
-          actualPnlUsd: Number.isFinite(Number(actualAccounting?.actualNetPnlUsd))
-            ? Number(actualAccounting.actualNetPnlUsd)
-            : raw?.actualPnlUsd,
+          auditNetPnlUsd: preferNonZeroAuditNumber(authoritativeAuditNetPnlUsd, raw?.auditNetPnlUsd),
+          correctedPnlUsd: preferNonZeroAuditNumber(correctedAccounting?.correctedNetPnlUsd, raw?.correctedPnlUsd),
+          actualPnlUsd: preferNonZeroAuditNumber(actualAccounting?.actualNetPnlUsd, raw?.actualPnlUsd),
           grossPnlUsd: Number.isFinite(Number(actualAccounting?.actualGrossPnlUsd))
             ? Number(actualAccounting.actualGrossPnlUsd)
             : raw?.grossPnlUsd,
@@ -1438,6 +1558,11 @@ async function buildLastSessionHistoryPayload(reqUrl) {
         };
       }
     } catch {}
+    return enrichedRaw;
+  }));
+  let appended = 0;
+  let refreshed = 0;
+  for (const enrichedRaw of enrichedRows) {
     const normalized = normalizeLastSessionHistoryRow(enrichedRaw);
     if (!normalized) continue;
     if (marketPrefix && !String(normalized.slug || "").toLowerCase().startsWith(marketPrefix)) continue;
@@ -1456,9 +1581,43 @@ async function buildLastSessionHistoryPayload(reqUrl) {
       refreshed += 1;
     }
   }
+  const continuityBySlug = new Map();
+  for (const row of continuityRows) {
+    const slug = String(row?.slug || "").trim();
+    if (!slug || continuityBySlug.has(slug)) continue;
+    continuityBySlug.set(slug, row);
+  }
   const allRunSessions = applyAuditLedgerDisplayBalances(
     Array.from(bySlug.values())
       .sort((a, b) => compactSessionSortTs(b) - compactSessionSortTs(a))
+      .map((row) => {
+        const slug = String(row?.slug || "").trim();
+        const continuityRow = slug ? continuityBySlug.get(slug) : null;
+        if (!continuityRow || typeof continuityRow !== "object") return row;
+        const continuityDisplayPnlUsd = compactSessionDisplayPnlUsd(continuityRow);
+        return {
+          ...row,
+          auditNetPnlUsd: Number.isFinite(Number(continuityDisplayPnlUsd))
+            ? Number(continuityDisplayPnlUsd)
+            : row?.auditNetPnlUsd,
+          actualPnlUsd: Number.isFinite(Number(continuityRow?.actualPnlUsd))
+            ? Number(continuityRow.actualPnlUsd)
+            : row?.actualPnlUsd,
+          correctedPnlUsd: Number.isFinite(Number(continuityRow?.correctedPnlUsd))
+            ? Number(continuityRow.correctedPnlUsd)
+            : row?.correctedPnlUsd,
+          pnlUsd: Number.isFinite(Number(continuityDisplayPnlUsd))
+            ? Number(continuityDisplayPnlUsd)
+            : row?.pnlUsd,
+          balanceUsd: Number.isFinite(Number(continuityRow?.balanceUsd))
+            ? Number(continuityRow.balanceUsd)
+            : row?.balanceUsd,
+          continuityBalanceUsd: Number.isFinite(Number(continuityRow?.continuityBalanceUsd))
+            ? Number(continuityRow.continuityBalanceUsd)
+            : row?.continuityBalanceUsd,
+          excludeFromPnl: continuityRow?.excludeFromPnl === true ? true : row?.excludeFromPnl,
+        };
+      })
   );
   const sessions = allRunSessions
     .sort((a, b) => compactSessionSortTs(b) - compactSessionSortTs(a))
@@ -1477,9 +1636,9 @@ async function buildLastSessionHistoryPayload(reqUrl) {
     runNum: currentRunNum,
     runIdText: currentRunIdText,
     runStartMs: currentRunStartMs,
-    count: sessions.length,
+    count: allRunSessions.length,
     totalCount: allRunSessions.length,
-    sessions,
+    sessions: allRunSessions,
     appended,
     refreshed,
     gapAudit,
@@ -1504,7 +1663,260 @@ async function buildLastSessionHistoryPayload(reqUrl) {
       refreshed: String(refreshed),
     });
   }
-  return { statusCode: 200, payload: nextPayload };
+  return { statusCode: 200, payload: limitLastSessionHistoryPayload(nextPayload, limit) };
+}
+
+function renderLastSessionHistoryHtml(payloadLike) {
+  const payload = payloadLike && typeof payloadLike === "object" ? payloadLike : {};
+  const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+  const buildSessionAuditPath = (rowLike) => {
+    const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+    const slug = String(row?.slug || "").trim();
+    const runNum = Number(row?.runNum ?? payload?.runNum);
+    const runId = String(row?.runIdText || row?.runId || payload?.runIdText || "").trim();
+    const startedAtMs = Number(payload?.runStartMs);
+    if (!(Number.isFinite(runNum) && runNum > 0) || !slug) return "";
+    const params = new URLSearchParams();
+    params.set("runNum", String(Math.floor(runNum)));
+    if (runId) params.set("runId", runId);
+    if (Number.isFinite(startedAtMs) && startedAtMs > 0) params.set("startedAtMs", String(Math.floor(startedAtMs)));
+    params.set("slug", slug);
+    return `/api/session-audits/review?${params.toString()}`;
+  };
+  const fmtMoney = (valueLike) => {
+    const value = Number(valueLike);
+    if (!Number.isFinite(value)) return "—";
+    const sign = value > 0 ? "+" : (value < 0 ? "-" : "");
+    return `${sign}$${Math.abs(value).toFixed(2)}`;
+  };
+  const fmtTime = (rowLike) => {
+    const ts = Number(rowLike?.startMs ?? rowLike?.entryTsMs ?? rowLike?.attemptTsMs ?? rowLike?.endMs ?? rowLike?.exitTsMs ?? 0);
+    if (!Number.isFinite(ts) || ts <= 0) return "—";
+    try {
+      return new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/Los_Angeles",
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: true,
+      }).format(new Date(ts)) + " PT";
+    } catch {
+      return new Date(ts).toISOString();
+    }
+  };
+  const toneClass = (valueLike) => {
+    const value = Number(valueLike);
+    if (!Number.isFinite(value)) return "neu";
+    return value > 0 ? "pos" : (value < 0 ? "neg" : "neu");
+  };
+  const chartPoints = sessions
+    .slice()
+    .sort((a, b) => {
+      const ta = Number(a?.startMs ?? a?.entryTsMs ?? a?.attemptTsMs ?? a?.endMs ?? a?.exitTsMs ?? 0);
+      const tb = Number(b?.startMs ?? b?.entryTsMs ?? b?.attemptTsMs ?? b?.endMs ?? b?.exitTsMs ?? 0);
+      return ta - tb;
+    })
+    .map((row) => {
+      const ts = Number(row?.startMs ?? row?.entryTsMs ?? row?.attemptTsMs ?? row?.endMs ?? row?.exitTsMs ?? 0);
+      const balanceUsd = Number(row?.displayBalanceUsd ?? row?.balanceUsd);
+      const pnlUsd = Number(row?.auditNetPnlUsd ?? row?.actualPnlUsd ?? row?.correctedPnlUsd);
+      if (!(Number.isFinite(ts) && ts > 0 && Number.isFinite(balanceUsd))) return null;
+      return {
+        slug: String(row?.slug || "").trim(),
+        ts,
+        balanceUsd,
+        pnlUsd: Number.isFinite(pnlUsd) ? pnlUsd : null,
+        timeText: fmtTime(row),
+      };
+    })
+    .filter(Boolean);
+  const chartWidth = 1120;
+  const chartHeight = 260;
+  const chartPadX = 52;
+  const chartPadY = 20;
+  const chartInnerWidth = chartWidth - chartPadX * 2;
+  const chartInnerHeight = chartHeight - chartPadY * 2;
+  const minTs = chartPoints.length ? Math.min(...chartPoints.map((pt) => Number(pt.ts))) : 0;
+  const maxTs = chartPoints.length ? Math.max(...chartPoints.map((pt) => Number(pt.ts))) : 1;
+  const minBal = chartPoints.length ? Math.min(...chartPoints.map((pt) => Number(pt.balanceUsd))) : 0;
+  const maxBal = chartPoints.length ? Math.max(...chartPoints.map((pt) => Number(pt.balanceUsd))) : 1;
+  const tsSpan = Math.max(1, maxTs - minTs);
+  const balPad = Math.max(1, (maxBal - minBal) * 0.08);
+  const balLow = minBal - balPad;
+  const balHigh = maxBal + balPad;
+  const balSpan = Math.max(1, balHigh - balLow);
+  const sx = (ts) => chartPadX + (((Number(ts) - minTs) / tsSpan) * chartInnerWidth);
+  const sy = (bal) => chartPadY + chartInnerHeight - (((Number(bal) - balLow) / balSpan) * chartInnerHeight);
+  const chartPolyline = chartPoints.map((pt) => `${sx(pt.ts).toFixed(1)},${sy(pt.balanceUsd).toFixed(1)}`).join(" ");
+  const chartDots = chartPoints.map((pt, idx) => {
+    const x = sx(pt.ts).toFixed(1);
+    const y = sy(pt.balanceUsd).toFixed(1);
+    const label = escapeHtmlLite(`${pt.timeText} · ${fmtMoney(pt.balanceUsd)}${Number.isFinite(Number(pt.pnlUsd)) ? ` · P/L ${fmtMoney(pt.pnlUsd)}` : ""}`);
+    return `<circle class="chartDot" cx="${x}" cy="${y}" r="4.5" data-label="${label}" data-x="${x}" data-y="${y}" tabindex="0"><title>${label}</title></circle>`;
+  }).join("");
+  const chartGrid = [0, 0.25, 0.5, 0.75, 1].map((frac) => {
+    const y = chartPadY + chartInnerHeight * frac;
+    const bal = balHigh - balSpan * frac;
+    return `<g><line x1="${chartPadX}" y1="${y.toFixed(1)}" x2="${(chartPadX + chartInnerWidth).toFixed(1)}" y2="${y.toFixed(1)}" stroke="rgba(255,255,255,.08)" stroke-width="1"/><text x="10" y="${(y + 4).toFixed(1)}" fill="#7f8b9d" font-size="11">${escapeHtmlLite(fmtMoney(bal))}</text></g>`;
+  }).join("");
+  const chartSvg = chartPoints.length
+    ? `
+      <div class="curveCard">
+        <div class="curveHead">Equity Curve</div>
+        <div class="curveWrap">
+          <svg viewBox="0 0 ${chartWidth} ${chartHeight}" class="curveSvg" role="img" aria-label="Run equity curve">
+            ${chartGrid}
+            <polyline fill="none" stroke="rgba(83,223,150,.95)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" points="${chartPolyline}"></polyline>
+            ${chartDots}
+          </svg>
+          <div class="curveTooltip" id="curveTooltip" hidden></div>
+        </div>
+      </div>`
+    : "";
+  const rowsHtml = sessions.map((row, idx) => {
+    const slug = escapeHtmlLite(String(row?.slug || ""));
+    const timeText = escapeHtmlLite(fmtTime(row));
+    const pnlUsd = Number(row?.auditNetPnlUsd ?? row?.actualPnlUsd ?? row?.correctedPnlUsd);
+    const balanceUsd = Number(row?.displayBalanceUsd ?? row?.balanceUsd);
+    const sortTs = Number(row?.startMs ?? row?.entryTsMs ?? row?.attemptTsMs ?? row?.endMs ?? row?.exitTsMs ?? 0);
+    const sessionAuditPath = escapeHtmlLite(String(row?.sessionAuditPath || row?.sessionAuditHref || buildSessionAuditPath(row) || ""));
+    return `
+      <tr data-sort-idx="${idx + 1}" data-sort-session="${Number.isFinite(sortTs) ? sortTs : 0}" data-sort-pnl="${Number.isFinite(pnlUsd) ? pnlUsd : 0}" data-sort-balance="${Number.isFinite(balanceUsd) ? balanceUsd : 0}">
+        <td>${idx + 1}</td>
+        <td>${sessionAuditPath ? `<a href="${sessionAuditPath}" target="_blank" rel="noopener noreferrer">${timeText}</a>` : timeText}<div class="slug">${slug}</div></td>
+        <td class="${toneClass(pnlUsd)}">${escapeHtmlLite(fmtMoney(pnlUsd))}</td>
+        <td class="${toneClass(balanceUsd)}">${escapeHtmlLite(fmtMoney(balanceUsd))}</td>
+      </tr>`;
+  }).join("");
+  const titleBits = [
+    `Last Session History`,
+    payload?.instanceId ? `Bot ${escapeHtmlLite(String(payload.instanceId))}` : "",
+    payload?.marketPrefix ? escapeHtmlLite(String(payload.marketPrefix)) : "",
+    Number.isFinite(Number(payload?.runNum)) ? `Run ${Math.floor(Number(payload.runNum))}` : "",
+  ].filter(Boolean).join(" · ");
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtmlLite(titleBits)}</title>
+  <style>
+    :root{color-scheme:dark;}
+    body{margin:0;background:#111214;color:#eef4fb;font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
+    .wrap{max-width:1200px;margin:0 auto;padding:24px;}
+    h1{margin:0 0 8px;font-size:22px;}
+    .meta{color:#98a3b5;font-size:13px;margin-bottom:18px;}
+    .curveCard{margin:0 0 18px;padding:14px 16px;background:#17191d;border:1px solid rgba(255,255,255,.08);border-radius:14px;}
+    .curveHead{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#98a3b5;margin:0 0 10px;}
+    .curveWrap{position:relative;}
+    .curveSvg{display:block;width:100%;height:auto;overflow:visible;}
+    .chartDot{fill:#53df96;stroke:#0f1115;stroke-width:2;cursor:pointer;}
+    .chartDot:hover,.chartDot:focus-visible{fill:#f0d35b;outline:none;}
+    .curveTooltip{position:absolute;pointer-events:none;z-index:2;min-width:160px;max-width:260px;padding:8px 10px;border-radius:10px;background:rgba(9,11,14,.96);border:1px solid rgba(255,255,255,.12);color:#eef4fb;font-size:12px;box-shadow:0 10px 28px rgba(0,0,0,.35);transform:translate(-50%,-115%);}
+    table{width:100%;border-collapse:collapse;background:#17191d;border:1px solid rgba(255,255,255,.08);border-radius:14px;overflow:hidden;}
+    th,td{padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.06);text-align:left;vertical-align:top;}
+    th{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#98a3b5;background:#14161a;}
+    .sortBtn{all:unset;display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:inherit;}
+    .sortBtn:hover,.sortBtn:focus-visible{color:#eef4fb;}
+    .sortArrow{font-size:10px;opacity:.65;}
+    tr:last-child td{border-bottom:none;}
+    .slug{margin-top:4px;color:#7f8b9d;font-size:12px;word-break:break-all;}
+    .pos{color:#53df96;font-weight:700;}
+    .neg{color:#ff7d7d;font-weight:700;}
+    .neu{color:#eef4fb;}
+    a{color:#cfe3ff;text-decoration:none;}
+    a:hover,a:focus-visible{text-decoration:underline;}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>${escapeHtmlLite(titleBits)}</h1>
+    <div class="meta">Rows: ${sessions.length} · Total in run: ${Number(payload?.totalCount || sessions.length)}</div>
+    ${chartSvg}
+    <table>
+      <thead>
+        <tr>
+          <th><button class="sortBtn" type="button" data-sort-key="idx"># <span class="sortArrow">↕</span></button></th>
+          <th><button class="sortBtn" type="button" data-sort-key="session">Session <span class="sortArrow">↕</span></button></th>
+          <th><button class="sortBtn" type="button" data-sort-key="pnl">Actual P/L <span class="sortArrow">↕</span></button></th>
+          <th><button class="sortBtn" type="button" data-sort-key="balance">Balance <span class="sortArrow">↕</span></button></th>
+        </tr>
+      </thead>
+      <tbody id="runHistoryTbody">${rowsHtml || '<tr><td colspan="4">No rows available.</td></tr>'}</tbody>
+    </table>
+  </div>
+  <script>
+    (() => {
+      const tooltip = document.getElementById("curveTooltip");
+      const wrap = document.querySelector(".curveWrap");
+      if (!tooltip || !wrap) return;
+      const show = (dot) => {
+        if (!(dot instanceof Element)) return;
+        const label = String(dot.getAttribute("data-label") || "").trim();
+        const x = Number(dot.getAttribute("data-x") || 0);
+        const y = Number(dot.getAttribute("data-y") || 0);
+        if (!label) return;
+        tooltip.textContent = label;
+        tooltip.hidden = false;
+        tooltip.style.left = x + "px";
+        tooltip.style.top = y + "px";
+      };
+      const hide = () => { tooltip.hidden = true; };
+      wrap.querySelectorAll(".chartDot").forEach((dot) => {
+        dot.addEventListener("mouseenter", () => show(dot));
+        dot.addEventListener("focus", () => show(dot));
+        dot.addEventListener("mouseleave", hide);
+        dot.addEventListener("blur", hide);
+      });
+      wrap.addEventListener("mouseleave", hide);
+    })();
+    (() => {
+      const tbody = document.getElementById("runHistoryTbody");
+      const buttons = Array.from(document.querySelectorAll(".sortBtn[data-sort-key]"));
+      if (!(tbody instanceof HTMLElement) || !buttons.length) return;
+      let currentKey = "idx";
+      let currentDir = "asc";
+      const readValue = (row, key) => {
+        const attr = key === "session" ? "sortSession" : (key === "pnl" ? "sortPnl" : (key === "balance" ? "sortBalance" : "sortIdx"));
+        const value = Number(row.dataset[attr] || 0);
+        return Number.isFinite(value) ? value : 0;
+      };
+      const updateButtons = () => {
+        buttons.forEach((btn) => {
+          const key = String(btn.getAttribute("data-sort-key") || "");
+          const arrow = btn.querySelector(".sortArrow");
+          if (arrow) arrow.textContent = key === currentKey ? (currentDir === "asc" ? "↑" : "↓") : "↕";
+        });
+      };
+      const sortRows = (key, dir) => {
+        const rows = Array.from(tbody.querySelectorAll("tr")).filter((row) => row instanceof HTMLTableRowElement && row.dataset.sortIdx);
+        rows.sort((a, b) => {
+          const av = readValue(a, key);
+          const bv = readValue(b, key);
+          if (av === bv) {
+            const ai = readValue(a, "idx");
+            const bi = readValue(b, "idx");
+            return dir === "asc" ? ai - bi : bi - ai;
+          }
+          return dir === "asc" ? av - bv : bv - av;
+        });
+        rows.forEach((row) => tbody.appendChild(row));
+      };
+      buttons.forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const key = String(btn.getAttribute("data-sort-key") || "idx");
+          const nextDir = key === currentKey ? (currentDir === "asc" ? "desc" : "asc") : (key === "idx" ? "asc" : "desc");
+          currentKey = key;
+          currentDir = nextDir;
+          sortRows(currentKey, currentDir);
+          updateButtons();
+        });
+      });
+      updateButtons();
+    })();
+  </script>
+</body>
+</html>`;
 }
 
 function readRollingVolumeCache(prefix) {
@@ -1530,9 +1942,27 @@ function shouldBypassCache(reqUrl) {
 }
 
 function buildUpstreamUrl(reqUrl) {
-  if (!UPSTREAM_ORIGIN) throw new Error("UPSTREAM_ORIGIN is required");
-  const upstream = new URL(reqUrl.pathname + reqUrl.search, `${UPSTREAM_ORIGIN}/`);
-  if (!upstream.searchParams.has("allowHot")) upstream.searchParams.set("allowHot", ALLOW_HOT_QUERY);
+  const upstreamReq = new URL(reqUrl.pathname + reqUrl.search, "http://worker.local");
+  const sourceHostPort = String(upstreamReq.searchParams.get("sourceHostPort") || "").trim();
+  if (sourceHostPort) upstreamReq.searchParams.delete("sourceHostPort");
+  const mappedOrigin = sourceHostPort ? String(UPSTREAM_ORIGIN_MAP.get(sourceHostPort) || "").trim() : "";
+  const resolvedUpstreamOrigin = mappedOrigin || UPSTREAM_ORIGIN;
+  if (!resolvedUpstreamOrigin) throw new Error("UPSTREAM_ORIGIN is required");
+  const upstream = new URL(upstreamReq.pathname + upstreamReq.search, `${resolvedUpstreamOrigin}/`);
+  const pathName = String(upstream.pathname || "").trim();
+  const allowHotPath =
+    /^\/api\/v2\/bots(?:\/[^/]+)?$/i.test(pathName) ||
+    /^\/api\/v2\/bots\/[^/]+\/run-index\b/i.test(pathName) ||
+    /^\/api\/v2\/bots\/[^/]+\/focused-live-session\b/i.test(pathName) ||
+    /^\/api\/v2\/bots\/[^/]+\/latest-session-card\b/i.test(pathName) ||
+    /^\/api\/v2\/bots\/[^/]+\/rollover-ready\b/i.test(pathName) ||
+    /^\/api\/stats\/summary\b/i.test(pathName) ||
+    /^\/api\/operator-notices\b/i.test(pathName) ||
+    /^\/api\/v2\/strategies\b/i.test(pathName) ||
+    /^\/api\/v2\/markets\/(?:volume-5m-24h|hot|audit)\b/i.test(pathName) ||
+    /^\/api\/v2\/portfolio\/(?:summary|markets)\b/i.test(pathName) ||
+    /^\/api\/v2\/drive\/audit\b/i.test(pathName);
+  if (allowHotPath && !upstream.searchParams.has("allowHot")) upstream.searchParams.set("allowHot", ALLOW_HOT_QUERY);
   return upstream;
 }
 
@@ -1772,9 +2202,13 @@ async function runRemoteBash(script) {
   ]);
 }
 
-const DUBLIN_CANONICAL_HOST_ROOT = RUN_AUDIT_REMOTE_ROOT
-  ? `${RUN_AUDIT_REMOTE_ROOT}/trade_logs/hosts/host_8788`
-  : "";
+function remoteCanonicalHostRoot(hostPortLike = "") {
+  if (!RUN_AUDIT_REMOTE_ROOT) return "";
+  const safeHost = normalizeRunAuditHostPort(hostPortLike || RUN_AUDIT_HOST_PORT);
+  return `${RUN_AUDIT_REMOTE_ROOT}/trade_logs/hosts/host_${safeHost}`;
+}
+
+const DUBLIN_CANONICAL_HOST_ROOT = remoteCanonicalHostRoot("8788");
 const SESSION_CARD_TRACE_AUDIT_VERSION = 3;
 const SESSION_CARD_TRACE_AUDIT_MIN_POINTS = 12;
 const SESSION_CARD_TRACE_AUDIT_MAX_EDGE_GAP_MS = 45000;
@@ -1816,16 +2250,21 @@ async function readRemoteJsonFile(filePath) {
 
 const remoteSessionAuditCompactCache = new Map();
 
-async function readRemoteSessionAuditCompact(runNumLike, slugLike) {
+async function readRemoteSessionAuditCompact(runNumLike, slugLike, hostPortLike = "") {
   const runNum = Math.floor(Number(runNumLike));
   const slug = String(slugLike || "").trim();
-  if (!(Number.isFinite(runNum) && runNum > 0) || !slug || !DUBLIN_CANONICAL_HOST_ROOT) return null;
-  const remotePath = `${DUBLIN_CANONICAL_HOST_ROOT}/multi_runs/run_${runNum}/session_audits/${slug}.compact.json`;
-  const cacheKey = `${runNum}:${slug}`;
+  const canonicalRoot = remoteCanonicalHostRoot(hostPortLike);
+  if (!(Number.isFinite(runNum) && runNum > 0) || !slug || !canonicalRoot) return null;
+  const cacheKey = `${normalizeRunAuditHostPort(hostPortLike || RUN_AUDIT_HOST_PORT)}:${runNum}:${slug}`;
   const cached = remoteSessionAuditCompactCache.get(cacheKey);
   if (cached && (Date.now() - Number(cached.atMs || 0)) < 15_000) return cached.row ?? null;
   try {
-    const row = await readRemoteJsonFile(remotePath);
+    const sourceBase = await resolveRunAuditSourceBaseUrl(hostPortLike || RUN_AUDIT_HOST_PORT);
+    const compactUrl = new URL("/api/session-audits/review", sourceBase);
+    compactUrl.searchParams.set("runNum", String(runNum));
+    compactUrl.searchParams.set("slug", slug);
+    compactUrl.searchParams.set("format", "compact");
+    const row = JSON.parse(await fetchTextDirect(compactUrl.toString()));
     remoteSessionAuditCompactCache.set(cacheKey, { atMs: Date.now(), row: row && typeof row === "object" ? row : null });
     return row && typeof row === "object" ? row : null;
   } catch {
@@ -1934,9 +2373,10 @@ function normalizedSummarySessions(summaryPayload, marketPrefix = "", limit = 10
   return sessions.slice(0, Math.max(1, Math.min(200, Math.floor(Number(limit) || 100))));
 }
 
-async function readRemoteCanonicalSessionJson(slug, includeTrace = true) {
-  if (!DUBLIN_CANONICAL_HOST_ROOT) throw new Error("remote canonical host root missing");
-  const base = `${DUBLIN_CANONICAL_HOST_ROOT}/sessions/${String(slug || "").trim()}`;
+async function readRemoteCanonicalSessionJson(slug, includeTrace = true, hostPortLike = "") {
+  const canonicalRoot = remoteCanonicalHostRoot(hostPortLike);
+  if (!canonicalRoot) throw new Error("remote canonical host root missing");
+  const base = `${canonicalRoot}/sessions/${String(slug || "").trim()}`;
   const preferred = includeTrace ? `${base}/high_fidelity.json` : `${base}/low_fidelity.json`;
   const fallback = includeTrace ? `${base}/low_fidelity.json` : `${base}/high_fidelity.json`;
   try {
@@ -1946,9 +2386,10 @@ async function readRemoteCanonicalSessionJson(slug, includeTrace = true) {
   }
 }
 
-function remoteCanonicalSessionAssetPath(slug, fileName) {
-  if (!DUBLIN_CANONICAL_HOST_ROOT) return "";
-  return `${DUBLIN_CANONICAL_HOST_ROOT}/sessions/${String(slug || "").trim()}/${String(fileName || "").trim()}`;
+function remoteCanonicalSessionAssetPath(slug, fileName, hostPortLike = "") {
+  const canonicalRoot = remoteCanonicalHostRoot(hostPortLike);
+  if (!canonicalRoot) return "";
+  return `${canonicalRoot}/sessions/${String(slug || "").trim()}/${String(fileName || "").trim()}`;
 }
 
 async function convertSvgToJpeg(svgPath, jpgPath) {
@@ -2011,9 +2452,9 @@ async function ensureSessionCardJpeg(reqUrl) {
       type: "session-card-jpeg-start",
       refresh: refresh ? "1" : "0",
     }, slug));
-    const remoteJpegPath = remoteCanonicalSessionAssetPath(slug, "low_fidelity_trace.jpg");
-    const remoteSvgPath = remoteCanonicalSessionAssetPath(slug, "low_fidelity_trace.svg");
-    const remoteLowPath = remoteCanonicalSessionAssetPath(slug, "low_fidelity.json");
+    const remoteJpegPath = remoteCanonicalSessionAssetPath(slug, "low_fidelity_trace.jpg", RUN_AUDIT_HOST_PORT);
+    const remoteSvgPath = remoteCanonicalSessionAssetPath(slug, "low_fidelity_trace.svg", RUN_AUDIT_HOST_PORT);
+    const remoteLowPath = remoteCanonicalSessionAssetPath(slug, "low_fidelity.json", RUN_AUDIT_HOST_PORT);
     let upstreamUrl = "";
     let svgContentType = "image/svg+xml";
     let selectedPayload = null;
@@ -2774,7 +3215,7 @@ async function prepareRenderableSessionCardArtifacts(slug) {
   let highPayload = null;
   let lowPayload = null;
   try {
-    highPayload = await readRemoteCanonicalSessionJson(slug, true);
+    highPayload = await readRemoteCanonicalSessionJson(slug, true, RUN_AUDIT_HOST_PORT);
   } catch {}
   const highSession = highPayload?.session && typeof highPayload.session === "object" ? highPayload.session : null;
   const highAudit = sessionTraceAudit(highSession);
@@ -2788,7 +3229,7 @@ async function prepareRenderableSessionCardArtifacts(slug) {
     };
   }
   try {
-    lowPayload = await readRemoteCanonicalSessionJson(slug, false);
+    lowPayload = await readRemoteCanonicalSessionJson(slug, false, RUN_AUDIT_HOST_PORT);
   } catch {}
   const lowSession = lowPayload?.session && typeof lowPayload.session === "object" ? lowPayload.session : null;
   const lowAudit = sessionTraceAudit(lowSession);
@@ -3041,7 +3482,7 @@ async function buildLatestSessionCardPayload(reqUrl) {
       }
       const exactRunIndex = runIndexRows.find((row) => String(row?.slug || "").trim().toLowerCase() === expectedClosedSlug) || null;
       if (exactRunIndex?.slug) {
-        selected = await readRemoteCanonicalSessionJson(exactRunIndex.slug, true);
+        selected = await readRemoteCanonicalSessionJson(exactRunIndex.slug, true, RUN_AUDIT_HOST_PORT);
         selectedSource = "run_index_remote_canonical_session";
         continuityRuns = [];
       }
@@ -3054,7 +3495,7 @@ async function buildLatestSessionCardPayload(reqUrl) {
       const exact = rows.find((row) => String(row?.slug || "").trim().toLowerCase() === expectedClosedSlug);
       const fallbackRow = exact || rows.find((row) => row?.closed === true) || null;
       if (fallbackRow?.slug) {
-        selected = await readRemoteCanonicalSessionJson(fallbackRow.slug, true);
+        selected = await readRemoteCanonicalSessionJson(fallbackRow.slug, true, RUN_AUDIT_HOST_PORT);
         selectedSource = "remote_canonical_session";
         continuityRuns = [];
       }
@@ -3456,8 +3897,12 @@ function runAuditArtifactBaseUrl() {
   return `${base.replace(/\/+$/, "")}/`;
 }
 
-function runAuditSourceBaseUrl() {
-  const base = String(UPSTREAM_ORIGIN || "").trim() || String(RUN_AUDIT_PUBLIC_BASE || "").trim();
+function runAuditSourceBaseUrl(hostPortLike = "") {
+  const safeHostPort = String(hostPortLike || "").trim();
+  const mappedBase = safeHostPort
+    ? String(UPSTREAM_ORIGIN_MAP.get(normalizeRunAuditHostPort(safeHostPort)) || "").trim()
+    : "";
+  const base = mappedBase || String(UPSTREAM_ORIGIN || "").trim() || String(RUN_AUDIT_PUBLIC_BASE || "").trim();
   if (!base) throw new Error("run audit source base missing");
   return `${base.replace(/\/+$/, "")}/`;
 }
@@ -3465,6 +3910,7 @@ function runAuditSourceBaseUrl() {
 async function readLiveRunAuditInputsFromBotEndpoints(runNum, requestedIdentity, hostPort) {
   const botsReq = new URL("/api/v2/bots", "http://worker.local");
   botsReq.searchParams.set("engine", "paper");
+  if (hostPort) botsReq.searchParams.set("sourceHostPort", normalizeRunAuditHostPort(hostPort));
   const botsUrl = buildUpstreamUrl(botsReq).toString();
   const botsPayload = await fetchJsonDirect(botsUrl);
   const items = Array.isArray(botsPayload?.items) ? botsPayload.items : [];
@@ -3483,7 +3929,11 @@ async function readLiveRunAuditInputsFromBotEndpoints(runNum, requestedIdentity,
   if (!bot) throw new Error(`live bot payload missing run ${String(runNum)}`);
   const instanceId = String(bot?.instanceId || "").trim();
   if (!instanceId) throw new Error(`missing instanceId for live run ${String(runNum)}`);
-  const continuityResult = await fetchContinuityHistoryPayloadForInstance(instanceId, { includeTrace: false, maxSessions: 5000 });
+  const continuityResult = await fetchContinuityHistoryPayloadForInstance(instanceId, {
+    includeTrace: false,
+    maxSessions: 5000,
+    sourceHostPort: hostPort,
+  });
   const continuityUrl = continuityResult.upstreamUrl;
   const continuityPayload = continuityResult.payload;
   const sessions = compactRowsFromContinuityPayload(continuityPayload, {
@@ -3548,7 +3998,7 @@ async function readRemoteRunAuditInputs(runNum, requestedIdentity) {
   if (!runDir) {
     throw new Error(`missing run directory for run ${String(runNum)}`);
   }
-  const artifactBase = runAuditSourceBaseUrl();
+  const artifactBase = runAuditSourceBaseUrl(hostPort);
   const summaryUrl = new URL(
     `/api/compare/run-artifact?hostPort=${encodeURIComponent(hostPort)}&runNum=${encodeURIComponent(String(runNum))}&kind=summary${runIdParam}${startedAtParam}`,
     artifactBase,
@@ -3594,8 +4044,9 @@ async function readRemoteRunAuditInputs(runNum, requestedIdentity) {
   }
 }
 
-async function syncRunAuditSourceMirror(runNum, remoteInputs, hostPort) {
+async function syncRunAuditSourceMirror(runNum, remoteInputs, hostPort, opts = {}) {
   const safeHost = normalizeRunAuditHostPort(hostPort || RUN_AUDIT_HOST_PORT);
+  const coldBuild = opts && opts.coldBuild === true;
   const runDir = runAuditSourceMirrorDir(runNum, safeHost);
   fs.mkdirSync(runDir, { recursive: true });
   const hostRoot = path.resolve(runDir, "..", "..");
@@ -3617,12 +4068,16 @@ async function syncRunAuditSourceMirror(runNum, remoteInputs, hostPort) {
   fs.writeFileSync(summaryPath, `${JSON.stringify(remoteInputs.summary, null, 2)}\n`, "utf8");
   fs.writeFileSync(indexPath, `${JSON.stringify(remoteInputs.index, null, 2)}\n`, "utf8");
 
-  const artifactBase = runAuditSourceBaseUrl();
+  const artifactBase = runAuditSourceBaseUrl(safeHost);
   const eventsUrl = new URL(
     `/api/compare/run-artifact?hostPort=${encodeURIComponent(safeHost)}&runNum=${encodeURIComponent(String(runNum))}&kind=events${runIdParam}${startedAtParam}`,
     artifactBase,
   ).toString();
-  fs.writeFileSync(eventsPath, await fetchTextDirect(eventsUrl), "utf8");
+  try {
+    fs.writeFileSync(eventsPath, await fetchTextDirect(eventsUrl), "utf8");
+  } catch {
+    if (!fs.existsSync(eventsPath)) fs.writeFileSync(eventsPath, "", "utf8");
+  }
 
   const telemetryUrl = new URL(
     `/api/compare/run-artifact?hostPort=${encodeURIComponent(safeHost)}&runNum=${encodeURIComponent(String(runNum))}&kind=telemetry${runIdParam}${startedAtParam}`,
@@ -3644,13 +4099,17 @@ async function syncRunAuditSourceMirror(runNum, remoteInputs, hostPort) {
     if (!fs.existsSync(sessionTracePath)) fs.writeFileSync(sessionTracePath, "", "utf8");
   }
   const indexedSessions = Array.isArray(remoteInputs?.index?.sessions) ? remoteInputs.index.sessions : [];
+  const detailedSessions = indexedSessions
+    .slice()
+    .sort((a, b) => Number(b?.startMs || 0) - Number(a?.startMs || 0))
+    .slice(0, RUN_AUDIT_MIRROR_DETAILED_SESSION_LIMIT);
   const mirroredSessionAuditDir = path.join(runDir, "session_audits");
   fs.mkdirSync(mirroredSessionAuditDir, { recursive: true });
-  for (const session of indexedSessions) {
+  for (const session of detailedSessions) {
     const slug = String(session?.slug || "").trim();
     if (!slug) continue;
     try {
-      const canonicalPayload = await readRemoteCanonicalSessionJson(slug, true);
+      const canonicalPayload = await readRemoteCanonicalSessionJson(slug, true, safeHost);
       if (!canonicalPayload || typeof canonicalPayload !== "object") continue;
       const sessionDir = path.join(hostRoot, "sessions", slug);
       fs.mkdirSync(sessionDir, { recursive: true });
@@ -3663,18 +4122,48 @@ async function syncRunAuditSourceMirror(runNum, remoteInputs, hostPort) {
       // Leave the run-level trace log as the fallback when canonical session
       // artifacts are unavailable for a specific slug.
     }
-    try {
-      const compactPayload = await readRemoteSessionAuditCompact(runNum, slug);
-      if (compactPayload && typeof compactPayload === "object") {
+  }
+  const compactSessions = indexedSessions;
+  let mirroredCompactCount = 0;
+  try {
+    const compactBundleUrl = new URL(
+      `/api/compare/run-artifact?hostPort=${encodeURIComponent(safeHost)}&runNum=${encodeURIComponent(String(runNum))}&kind=session-audit-compacts${runIdParam}${startedAtParam}`,
+      artifactBase,
+    ).toString();
+    const bundleText = await fetchTextDirect(compactBundleUrl);
+    for (const line of String(bundleText || "").split(/\r?\n/)) {
+      const trimmed = String(line || "").trim();
+      if (!trimmed) continue;
+      try {
+        const compactPayload = JSON.parse(trimmed);
+        const slug = String(compactPayload?.slug || "").trim();
+        if (!slug || !(compactPayload && typeof compactPayload === "object")) continue;
         fs.writeFileSync(
           path.join(mirroredSessionAuditDir, `${slug}.compact.json`),
           `${JSON.stringify(compactPayload, null, 2)}\n`,
           "utf8",
         );
+        mirroredCompactCount += 1;
+      } catch {}
+    }
+  } catch {}
+  if (mirroredCompactCount === 0) {
+    for (const session of compactSessions) {
+      const slug = String(session?.slug || "").trim();
+      if (!slug) continue;
+      try {
+        const compactPayload = await readRemoteSessionAuditCompact(runNum, slug, safeHost);
+        if (compactPayload && typeof compactPayload === "object") {
+          fs.writeFileSync(
+            path.join(mirroredSessionAuditDir, `${slug}.compact.json`),
+            `${JSON.stringify(compactPayload, null, 2)}\n`,
+            "utf8",
+          );
+        }
+      } catch {
+        // Run audit can still fall back to canonical session trace plus live events
+        // when a standalone session audit compact is unavailable.
       }
-    } catch {
-      // Run audit can still fall back to canonical session trace plus live events
-      // when a standalone session audit compact is unavailable.
     }
   }
   return { runDir, summaryPath, indexPath, eventsPath, telemetryPath, strategyId };
@@ -3808,6 +4297,7 @@ async function ensureRunAuditArtifact(reqUrl) {
   }
   const wantJson = String(reqUrl.searchParams.get("format") || "").trim().toLowerCase() === "json";
   const refresh = shouldBypassCache(reqUrl);
+  const backgroundWarm = String(reqUrl.searchParams.get("backgroundWarm") || "").trim() === "1";
   const thresholdSig = ["t1", "t2", "t3", "t4"].map((key) => String(reqUrl.searchParams.get(key) || "")).join("|");
   const requestedIdentity = runAuditIdentityFromRequest(reqUrl);
   const cacheKey = `run_audit:${normalizeRunAuditHostPort(requestedIdentity.hostPort || RUN_AUDIT_HOST_PORT)}:${runNum}:${runAuditIdentityToken(runNum, reqUrl.searchParams.get("runId") || null, reqUrl.searchParams.get("startedAtMs") || null)}:${thresholdSig}`;
@@ -3886,7 +4376,7 @@ async function ensureRunAuditArtifact(reqUrl) {
         });
       }
       const needsBuild = refresh || !cacheExists || ageMs > RUN_AUDIT_MAX_AGE_MS || completenessRequiresImmediateRebuild;
-      const canServeStaleWhileBackgroundWarmCatchesUp = cacheExists && !refresh;
+      const canServeStaleWhileBackgroundWarmCatchesUp = cacheExists && !refresh && !backgroundWarm;
       if (needsBuild && canServeStaleWhileBackgroundWarmCatchesUp) {
         pushActivity(`SERVING CACHED RUN AUDIT FOR RUN ${String(runNum)} WHILE BACKGROUND REBUILD CATCHES UP`, {
           type: "run-audit-cache-serve-while-rebuild-deferred",
@@ -3911,7 +4401,9 @@ async function ensureRunAuditArtifact(reqUrl) {
         });
         let sourceMirror = null;
         if (remoteInputs) {
-          sourceMirror = await syncRunAuditSourceMirror(runNum, remoteInputs, requestedIdentity.hostPort);
+          sourceMirror = await syncRunAuditSourceMirror(runNum, remoteInputs, requestedIdentity.hostPort, {
+            coldBuild: !cacheExists,
+          });
         } else {
           sourceMirror = existingRunAuditSourceMirror(runNum, requestedIdentity.hostPort);
           if (sourceMirror) {
@@ -3930,6 +4422,9 @@ async function ensureRunAuditArtifact(reqUrl) {
             runNum,
             await readRemoteRunAuditInputs(runNum, requestedIdentity),
             requestedIdentity.hostPort,
+            {
+              coldBuild: !cacheExists,
+            },
           );
         }
         const args = [
@@ -4254,9 +4749,42 @@ const server = http.createServer(async (req, res) => {
       });
     }
     if (String(reqUrl.pathname || "").toLowerCase().includes("/last-session-history")) {
+      const wantsHtml = String(reqUrl.searchParams.get("format") || "").trim().toLowerCase() === "html";
+      const limitRaw = Number(reqUrl.searchParams.get("limit") || 100);
+      const requestedLimit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(5000, Math.floor(limitRaw))) : 100;
+      if (wantsHtml && !shouldBypassCache(reqUrl)) {
+        const parts = String(reqUrl.pathname || "").split("/").filter(Boolean);
+        const instanceId = (
+          parts.length >= 5 &&
+          String(parts[0] || "").toLowerCase() === "api" &&
+          String(parts[1] || "").toLowerCase() === "v2" &&
+          String(parts[2] || "").toLowerCase() === "bots" &&
+          String(parts[4] || "").toLowerCase() === "last-session-history"
+        )
+          ? decodeURIComponent(String(parts[3] || "").trim())
+          : "";
+        const marketPrefix = String(reqUrl.searchParams.get("marketPrefix") || "").trim().toLowerCase();
+        const cachedPayload = readLastSessionHistoryCache(instanceId, marketPrefix);
+        if (cachedPayload && Array.isArray(cachedPayload?.sessions) && cachedPayload.sessions.length) {
+          return sendText(res, 200, renderLastSessionHistoryHtml(limitLastSessionHistoryPayload(cachedPayload, requestedLimit)), "text/html", {
+            "x-mmx-worker": WORKER_LABEL,
+            "x-mmx-cache": "local",
+            "x-mmx-upstream": "local:last_session_history_cache",
+          });
+        }
+      }
       const proxied = await localJsonWithCache(reqUrl, buildLastSessionHistoryPayload, "local:last_session_history");
-      const body = Buffer.from(String(proxied.bodyBase64 || ""), "base64");
-      return sendText(res, Number(proxied.statusCode || 200), body.toString("utf8"), "application/json", {
+      const body = Buffer.from(String(proxied.bodyBase64 || ""), "base64").toString("utf8");
+      if (wantsHtml) {
+        let parsed = null;
+        try { parsed = JSON.parse(body); } catch {}
+        return sendText(res, Number(proxied.statusCode || 200), renderLastSessionHistoryHtml(limitLastSessionHistoryPayload(parsed, requestedLimit)), "text/html", {
+          "x-mmx-worker": WORKER_LABEL,
+          "x-mmx-cache": proxied.cacheStatus || "pass",
+          "x-mmx-upstream": String(proxied.upstreamUrl || ""),
+        });
+      }
+      return sendText(res, Number(proxied.statusCode || 200), body, "application/json", {
         "x-mmx-worker": WORKER_LABEL,
         "x-mmx-cache": proxied.cacheStatus || "pass",
         "x-mmx-upstream": String(proxied.upstreamUrl || ""),

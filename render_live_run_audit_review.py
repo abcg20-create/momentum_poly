@@ -53,7 +53,7 @@ RUN_AUDIT_INCREMENTAL_TAIL_SESSIONS = 5
 RUN_AUDIT_INITIAL_VISIBLE_SESSIONS = 8
 RUN_AUDIT_SESSION_LOAD_STEP = 8
 RUN_AUDIT_INLINE_DETAIL_SESSION_LIMIT = max(24, RUN_AUDIT_INITIAL_VISIBLE_SESSIONS + (RUN_AUDIT_SESSION_LOAD_STEP * 2))
-AUDIT_CODE_VERSION = "run_audit_mv_v27"
+AUDIT_CODE_VERSION = "run_audit_mv_v37"
 RUN_AUDIT_STATE_FILE = "run_audit_state.json"
 RUN_AUDIT_SESSION_CACHE_DIR = "run_audit_sessions"
 SESSION_RESOLUTION_TRUTH_FILE = "session_resolution_truth.jsonl"
@@ -61,19 +61,32 @@ SESSION_VENUE_TRUTH_FILE = "session_venue_truth.jsonl"
 RECONCILE_SOFT_PENDING_MS = 20_000
 RECONCILE_HARD_WARNING_MS = 30_000
 RECONCILE_STALE_MS = 60_000
+INTERVAL_LABEL_ORDER = (
+    "090-120s",
+    "120-150s",
+    "150-180s",
+    "180-210s",
+    "210-240s",
+    "240-270s",
+    "270-295s",
+    "295-300s",
+)
 
 DEFAULT_GOLD_SELECTION_KEYS_BY_STRATEGY: dict[str, tuple[str, ...]] = {
     "inflection_positive_iteration": (
         "1|180-210s",
         "1|210-240s",
         "1|240-270s",
-        "1|270-297s",
+        "1|270-295s",
+        "1|295-300s",
         "2|210-240s",
         "2|240-270s",
-        "2|270-297s",
+        "2|270-295s",
+        "2|295-300s",
         "3|210-240s",
         "3|240-270s",
-        "3|270-297s",
+        "3|270-295s",
+        "3|295-300s",
     ),
 }
 
@@ -82,13 +95,16 @@ DEFAULT_GOLD_SELECTION_KEYS_BY_PROFILE: dict[str, tuple[str, ...]] = {
         "1|180-210s",
         "1|210-240s",
         "1|240-270s",
-        "1|270-297s",
+        "1|270-295s",
+        "1|295-300s",
         "2|210-240s",
         "2|240-270s",
-        "2|270-297s",
+        "2|270-295s",
+        "2|295-300s",
         "3|210-240s",
         "3|240-270s",
-        "3|270-297s",
+        "3|270-295s",
+        "3|295-300s",
     ),
     "gold_bets_v2": (
         "1|090-120s",
@@ -96,10 +112,17 @@ DEFAULT_GOLD_SELECTION_KEYS_BY_PROFILE: dict[str, tuple[str, ...]] = {
         "1|150-180s",
         "2|210-240s",
         "2|240-270s",
-        "2|270-297s",
+        "2|270-295s",
+        "2|295-300s",
         "3|210-240s",
         "3|240-270s",
-        "3|270-297s",
+        "3|270-295s",
+        "3|295-300s",
+    ),
+    "gold_bets_v3": (
+        "1|090-180s",
+        "2|295-300s",
+        "3|295-300s",
     ),
 }
 
@@ -298,6 +321,10 @@ def interval_label(offset_sec: Any, bucket_sec: int = INTERVAL_BUCKET_SEC, cutof
     x = n(offset_sec)
     if not math.isfinite(x):
         return "unknown"
+    if x >= 295:
+        return "295-300s"
+    if x >= 270:
+        return "270-295s"
     lo = int(max(0, math.floor(x // bucket_sec) * bucket_sec))
     hi = min(cutoff_sec, lo + bucket_sec)
     return f"{lo:03d}-{hi:03d}s"
@@ -478,6 +505,125 @@ def session_audit_timeline_rows(compact: dict[str, Any] | None) -> list[dict[str
                 rows.append(merged)
     rows.sort(key=lambda row: (i(row.get("tsMs") or row.get("eventTsMs") or 0), str(row.get("event") or "")))
     return rows
+
+
+def session_audit_trade_summaries(
+    compact: dict[str, Any] | None,
+    slug: str,
+    session_start_ms: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not isinstance(compact, dict):
+        return [], []
+    summaries = compact.get("tradeSummaries")
+    if not isinstance(summaries, list):
+        return [], []
+    timeline_rows: list[dict[str, Any]] = []
+    trades: list[dict[str, Any]] = []
+    for idx, summary in enumerate(summaries, start=1):
+        if not isinstance(summary, dict):
+            continue
+        side = norm_side(summary.get("side"))
+        entry_ts = i(summary.get("entryTsMs"))
+        exit_ts = i(summary.get("exitTsMs"))
+        entry_px = n(summary.get("entryPx"))
+        exit_px = n(summary.get("exitPx"))
+        shares = max(0.0, n(summary.get("shares"), 0.0))
+        if not side or not (entry_ts > 0 and math.isfinite(entry_px) and shares > 0):
+            continue
+        trade_num = int(summary.get("tradeNum") or idx)
+        trade_key = f"{slug}-t{trade_num}"
+        gross = n(summary.get("grossPnlUsd"), float("nan"))
+        fees = max(0.0, n(summary.get("feesUsd"), 0.0))
+        net = n(summary.get("pnlUsd"), float("nan"))
+        if not math.isfinite(gross) and math.isfinite(entry_px) and math.isfinite(exit_px):
+            gross = (exit_px - entry_px) * shares if side == "UP" else (entry_px - exit_px) * shares
+        if not math.isfinite(net) and math.isfinite(gross):
+            net = gross - fees
+        row_enter_id = f"{trade_key}:entry"
+        row_exit_id = f"{trade_key}:exit"
+        timeline_rows.append({
+            "rowId": row_enter_id,
+            "rawEvent": "enter",
+            "stage": "fill",
+            "label": "ENTER",
+            "tsMs": entry_ts,
+            "offsetSec": round4((entry_ts - session_start_ms) / 1000.0),
+            "side": side,
+            "px": entry_px,
+            "signalPx": entry_px,
+            "intendedPx": entry_px,
+            "actualFillPx": entry_px,
+            "sharesActual": round6(shares),
+            "sharesRemainingActual": round6(shares),
+            "nominalUsd": round6(shares * entry_px),
+            "actualFeesUsd": round6(fees),
+            "actualNetPnlUsd": round6(-fees),
+            "tradeNum": trade_num,
+            "role": "entry_fill",
+            "note": "session_audit_trade_summary",
+        })
+        if exit_ts > 0 and math.isfinite(exit_px):
+            timeline_rows.append({
+                "rowId": row_exit_id,
+                "rawEvent": "exit",
+                "stage": "fill",
+                "label": "EXIT",
+                "tsMs": exit_ts,
+                "offsetSec": round4((exit_ts - session_start_ms) / 1000.0),
+                "side": side,
+                "px": exit_px,
+                "actualFillPx": exit_px,
+                "sharesClosedActual": round6(shares),
+                "sharesRemainingActual": 0.0,
+                "actualGrossPnlUsd": round6(gross),
+                "actualFeesUsd": 0.0,
+                "actualNetPnlUsd": round6(net),
+                "tradeNum": trade_num,
+                "role": "exit_fill",
+                "exitType": str(summary.get("exitType") or "").upper() or None,
+                "note": str(summary.get("reason") or ""),
+            })
+        trades.append({
+            "tradeKey": trade_key,
+            "tradeNum": trade_num,
+            "side": side,
+            "entrySignalTsMs": entry_ts,
+            "entryOrderTsMs": entry_ts,
+            "entryTsMs": entry_ts,
+            "entryPx": entry_px,
+            "entrySignalPx": entry_px,
+            "entryFeeMode": "taker",
+            "executionMode": str(summary.get("exec") or "paper"),
+            "fillSource": "session_audit_trade_summary",
+            "actualBudgetUsd": round6(shares * entry_px),
+            "actualShares": round6(shares),
+            "actualEntryFeesUsd": round6(fees),
+            "entryRowId": row_enter_id,
+            "closeLegs": [{
+                "legIndex": 0,
+                "signalRowId": None,
+                "orderRowId": None,
+                "fillRowId": row_exit_id if exit_ts > 0 and math.isfinite(exit_px) else None,
+                "signalTsMs": exit_ts if exit_ts > 0 else None,
+                "orderTsMs": exit_ts if exit_ts > 0 else None,
+                "fillTsMs": exit_ts if exit_ts > 0 else None,
+                "exitPx": exit_px if math.isfinite(exit_px) else None,
+                "exitType": str(summary.get("exitType") or "").upper() or "",
+                "reason": str(summary.get("reason") or ""),
+                "actualSharesClosed": round6(shares),
+                "shareRatio": 1.0,
+                "exitFeeMode": "none",
+                "actualNetPnlUsd": round6(net),
+                "actualGrossPnlUsd": round6(gross),
+            }] if exit_ts > 0 and math.isfinite(exit_px) else [],
+            "actualGrossPnlUsd": round6(gross),
+            "actualNetPnlUsd": round6(net),
+            "actualFeesUsd": round6(fees),
+            "entryOffsetSec": round4((entry_ts - session_start_ms) / 1000.0),
+            "intervalLabel": interval_label((entry_ts - session_start_ms) / 1000.0),
+        })
+    timeline_rows.sort(key=lambda row: (i(row.get("tsMs") or 0), str(row.get("rowId") or "")))
+    return timeline_rows, trades
 
 
 def session_audit_financials(compact: dict[str, Any] | None) -> dict[str, float] | None:
@@ -1147,17 +1293,17 @@ def normalize_event(raw: dict[str, Any], session_start_ms: int, row_id: str) -> 
     event = str(raw.get("event") or "").strip().lower()
     ts_keys = []
     if event == "enter_signal":
-        ts_keys = ["localDetectedAtMs", "signalTsMs", "eventTsMs", "t", "actualFillTsMs"]
+        ts_keys = ["tsMs", "fillTsMs", "localDetectedAtMs", "signalTsMs", "eventTsMs", "t", "actualFillTsMs"]
     elif event in {"enter_order", "enter_submit_start"}:
-        ts_keys = ["localSubmitAtMs", "orderPlacedAtMs", "eventTsMs", "t", "actualFillTsMs"]
+        ts_keys = ["tsMs", "fillTsMs", "localSubmitAtMs", "orderPlacedAtMs", "eventTsMs", "t", "actualFillTsMs"]
     elif event == "enter_submit_return":
-        ts_keys = ["localAcceptedAtMs", "eventTsMs", "t", "actualFillTsMs"]
+        ts_keys = ["tsMs", "fillTsMs", "localAcceptedAtMs", "eventTsMs", "t", "actualFillTsMs"]
     elif event in {"enter_first_fill_seen", "enter_fill_confirmed", "enter", "enter_reconciled"}:
-        ts_keys = ["localFillObservedAtMs", "eventTsMs", "t", "actualFillTsMs"]
+        ts_keys = ["tsMs", "fillTsMs", "localFillObservedAtMs", "eventTsMs", "t", "actualFillTsMs"]
     elif event in {"exit_partial", "exit"}:
-        ts_keys = ["actualFillTsMs", "eventTsMs", "t"]
+        ts_keys = ["tsMs", "fillTsMs", "actualFillTsMs", "eventTsMs", "t"]
     else:
-        ts_keys = ["eventTsMs", "t", "actualFillTsMs"]
+        ts_keys = ["tsMs", "fillTsMs", "eventTsMs", "t", "actualFillTsMs"]
     ts_ms = None
     for key in ts_keys:
         val = raw.get(key)
@@ -1166,11 +1312,11 @@ def normalize_event(raw: dict[str, Any], session_start_ms: int, row_id: str) -> 
             break
     px = None
     if event.startswith("enter"):
-        px = n(raw.get("actualFillPx", raw.get("entryPx")))
+        px = n(raw.get("actualFillPx", raw.get("entryPx", raw.get("px"))))
         if not math.isfinite(px):
-            px = n(raw.get("signalPx", raw.get("intendedPx")))
+            px = n(raw.get("signalPx", raw.get("intendedPx", raw.get("px"))))
     else:
-        px = n(raw.get("exitPx"))
+        px = n(raw.get("exitPx", raw.get("px")))
     if not math.isfinite(px):
         px = None
     side = str(raw.get("side") or "").strip().upper()
@@ -1187,7 +1333,7 @@ def normalize_event(raw: dict[str, Any], session_start_ms: int, row_id: str) -> 
     signal_ts_ms = i(raw.get("signalTsMs")) if is_finite(raw.get("signalTsMs")) else None
     order_ts_ms = i(raw.get("orderPlacedAtMs")) if is_finite(raw.get("orderPlacedAtMs")) else None
     fill_ts_ms = i(raw.get("actualFillTsMs")) if is_finite(raw.get("actualFillTsMs")) else None
-    event_ts_ms = i(raw.get("eventTsMs")) if is_finite(raw.get("eventTsMs")) else None
+    event_ts_ms = i(raw.get("eventTsMs", raw.get("tsMs"))) if is_finite(raw.get("eventTsMs", raw.get("tsMs"))) else None
     local_detected_ts_ms = i(raw.get("localDetectedAtMs")) if is_finite(raw.get("localDetectedAtMs")) else None
     local_submit_ts_ms = i(raw.get("localSubmitAtMs")) if is_finite(raw.get("localSubmitAtMs")) else None
     local_accepted_ts_ms = i(raw.get("localAcceptedAtMs")) if is_finite(raw.get("localAcceptedAtMs")) else None
@@ -1197,7 +1343,7 @@ def normalize_event(raw: dict[str, Any], session_start_ms: int, row_id: str) -> 
     local_fill_ts_ms = local_fill_observed_ts_ms or event_ts_ms or fill_ts_ms or ts_ms
     signal_px = n(raw.get("signalPx", raw.get("entryPx")))
     intended_px = n(raw.get("intendedPx", raw.get("limitPx", raw.get("targetSellPx"))))
-    actual_fill_px = n(raw.get("actualFillPx", raw.get("fillPx")))
+    actual_fill_px = n(raw.get("actualFillPx", raw.get("fillPx", raw.get("px"))))
     order_id = str(raw.get("orderId") or raw.get("tpOrderId") or "").strip()
     execution_mode = str(raw.get("executionMode") or "").strip().lower()
     fill_source = str(raw.get("fillSource") or "").strip().lower()
@@ -2025,6 +2171,10 @@ def summarize_by_trade(trades: list[dict[str, Any]], models: dict[str, dict[str,
 
 def summarize_by_trade_interval(trades: list[dict[str, Any]], models: dict[str, dict[str, Any]]) -> dict[str, dict[str, dict[str, Any]]]:
     out: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    trade_keys = sorted({str(int(trade.get("tradeNum") or 0)) for trade in trades if int(trade.get("tradeNum") or 0) > 0}, key=lambda x: int(x))
+    for trade_key in trade_keys:
+        for bucket in INTERVAL_LABEL_ORDER:
+            out[trade_key].setdefault(bucket, {"count": 0, "wins": 0, "losses": 0, "grossPnlUsd": 0.0, "feesUsd": 0.0, "netPnlUsd": 0.0})
     for trade in trades:
         trade_key = str(int(trade.get("tradeNum") or 0))
         bucket = str(trade.get("intervalLabel") or "unknown")
@@ -2615,6 +2765,7 @@ def build_doc(cfg: SourceConfig, run_num: int, out_html: str, out_json: str, t_o
         end_ms = start_ms + SESSION_WINDOW_SEC * 1000
         session_audit_compact = read_cached_session_compact(cfg, slug)
         session_audit_rows = session_audit_timeline_rows(session_audit_compact)
+        session_audit_summary_rows, session_audit_summary_trades = session_audit_trade_summaries(session_audit_compact, slug, start_ms)
         session_audit_fin = session_audit_financials(session_audit_compact)
         trace = fetch_trace_for_slug(cfg, slug, local_trace_idx, remote_trace_idx, run_index_trace_idx, telemetry_trace_idx, start_ms)
         quality = assess_trace_quality(trace, start_ms)
@@ -2639,8 +2790,12 @@ def build_doc(cfg: SourceConfig, run_num: int, out_html: str, out_json: str, t_o
             actual_all_trades.extend(cached_session.get("trades") or [])
             reused_count += 1
             continue
-        source_rows = session_audit_rows if session_audit_rows else session_events
+        source_rows = session_audit_rows if session_audit_rows else (session_audit_summary_rows if session_audit_summary_rows else session_events)
         timeline_rows, trades = build_session_timeline_and_trades(session, source_rows, trace)
+        if (not trades) and session_audit_summary_trades:
+            trades = list(session_audit_summary_trades)
+        if (not timeline_rows) and session_audit_summary_rows:
+            timeline_rows = list(session_audit_summary_rows)
         decision_snapshots = build_session_decision_snapshots(session_events, trades, start_ms)
         session_mode = classify_session_mode(session_events, trades)
         unresolved_position = session_has_unresolved_positions(session, trades, timeline_rows)
@@ -2663,11 +2818,13 @@ def build_doc(cfg: SourceConfig, run_num: int, out_html: str, out_json: str, t_o
         if isinstance(cached_session, dict) and cached_has_trace and not isinstance(trace, dict):
             trace = cached_trace
             quality = assess_trace_quality(trace, start_ms)
+        has_session_audit_detail = bool(session_audit_rows or session_audit_summary_rows or session_audit_summary_trades)
         if (
             isinstance(cached_session, dict)
             and cached_has_trades
             and cached_resolved
             and (unresolved_position or current_is_synthetic)
+            and not has_session_audit_detail
         ):
             timeline_rows = list(cached_session.get("timelineRows") or timeline_rows)
             trades = list(cached_session.get("trades") or trades)
@@ -3084,7 +3241,7 @@ def build_doc(cfg: SourceConfig, run_num: int, out_html: str, out_json: str, t_o
             "defaultGoldSelectionKeys": default_gold_selection_keys,
             "intervalBucketSec": INTERVAL_BUCKET_SEC,
             "entryCutoffSec": ENTRY_CUTOFF_SEC,
-            "goldIntervals": [f"{lo:03d}-{min(ENTRY_CUTOFF_SEC, lo + INTERVAL_BUCKET_SEC):03d}s" for lo in range(0, ENTRY_CUTOFF_SEC, INTERVAL_BUCKET_SEC)],
+            "goldIntervals": list(INTERVAL_LABEL_ORDER),
         },
         "summaries": {
             "actual": {
@@ -3273,6 +3430,17 @@ def compact_trade_for_modeling(trade: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def compact_timeline_rows_for_inline_payload(rows: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        compact = dict(row)
+        compact["decisionSnapshot"] = None
+        out.append(compact)
+    return out
+
+
 def compact_session_for_inline_payload(session: dict[str, Any], keep_details: bool) -> dict[str, Any]:
     out = dict(session or {})
     out["modelTrades"] = [compact_trade_for_modeling(trade) for trade in list(session.get("trades") or [])]
@@ -3280,9 +3448,9 @@ def compact_session_for_inline_payload(session: dict[str, Any], keep_details: bo
         return out
     out["trace"] = None
     out["streamEndSnapshot"] = None
-    out["timelineRows"] = []
+    out["timelineRows"] = compact_timeline_rows_for_inline_payload(list(session.get("timelineRows") or []))
     out["decisionSnapshots"] = []
-    out["trades"] = []
+    out["trades"] = list(session.get("trades") or [])
     out["venueTruth"] = None
     out["detailDeferred"] = True
     return out
@@ -4102,8 +4270,22 @@ def html_page(doc: dict[str, Any]) -> str:
     function summarizeActualByIntervalRows() {{
       const rows = [];
       const source = doc?.summaries?.byTradeIntervalAtDefaultBets || {{}};
-      Object.entries(source).forEach(([tradeNum, tradeMap]) => {{
-        Object.entries(tradeMap || {{}}).forEach(([intervalKey, row]) => {{
+      const intervalOrder = Array.isArray(doc?.controls?.goldIntervals) && doc.controls.goldIntervals.length
+        ? doc.controls.goldIntervals.map((label) => String(label || '').trim()).filter((label) => label.length > 0)
+        : {json.dumps(list(INTERVAL_LABEL_ORDER))};
+      const tradeNums = new Set(Object.keys(source).map((tradeNum) => String(tradeNum || '').trim()).filter((tradeNum) => tradeNum.length > 0));
+      Object.keys(doc?.controls?.defaultBetUsdByTrade || {{}}).forEach((tradeNum) => {{
+        const clean = String(tradeNum || '').trim();
+        if (clean) tradeNums.add(clean);
+      }});
+      Object.keys(doc?.controls?.defaultGoldBetUsdByTrade || {{}}).forEach((tradeNum) => {{
+        const clean = String(tradeNum || '').trim();
+        if (clean) tradeNums.add(clean);
+      }});
+      Array.from(tradeNums).sort((a,b) => Number(a) - Number(b)).forEach((tradeNum) => {{
+        const tradeMap = source?.[tradeNum] || {{}};
+        intervalOrder.forEach((intervalKey) => {{
+          const row = tradeMap?.[intervalKey] || {{}};
           rows.push({{
             key: `${{tradeNum}}|${{intervalKey}}`,
             tradeNum: String(tradeNum),
@@ -4119,7 +4301,12 @@ def html_page(doc: dict[str, Any]) -> str:
           }});
         }});
       }});
-      return rows.sort((a,b) => (Number(a.tradeNum) - Number(b.tradeNum)) || String(a.interval).localeCompare(String(b.interval)));
+      const intervalIndex = new Map(intervalOrder.map((label, idx) => [String(label), idx]));
+      return rows.sort((a,b) => (
+        (Number(a.tradeNum) - Number(b.tradeNum)) ||
+        ((intervalIndex.get(String(a.interval)) ?? 999) - (intervalIndex.get(String(b.interval)) ?? 999)) ||
+        String(a.interval).localeCompare(String(b.interval))
+      ));
     }}
 
     function buildDefaultActualSessionModels() {{
@@ -4639,7 +4826,8 @@ def html_page(doc: dict[str, Any]) -> str:
         return;
       }}
 
-      if (state.ignoredSlugs.size === 0) {{
+      const useDeltaModeledRecalc = false;
+      if (useDeltaModeledRecalc && state.ignoredSlugs.size === 0) {{
         const actual = doc.run || {{}};
         const baseline = buildDefaultActualSessionModels();
         state.tradeModels = {{}};
@@ -4673,8 +4861,8 @@ def html_page(doc: dict[str, Any]) -> str:
         let totalFees = Number(actual.actualFeesUsd ?? baseline.totalFees ?? 0);
         let totalNet = Number(actual.actualNetPnlUsd ?? baseline.totalNet ?? 0);
         const totalTrades = Number(actual.tradesClosed || 0);
-        const totalWins = Number(actual.wins || 0);
-        const totalLosses = Number(actual.losses || 0);
+        let totalWins = Number(actual.wins || 0);
+        let totalLosses = Number(actual.losses || 0);
         const includedSessions = (doc.sessions || []).filter((session) => (session.includedInActualTotals !== false) && !session.forcedIgnore).length;
         const ignoredSessions = 0;
 
@@ -4698,12 +4886,21 @@ def html_page(doc: dict[str, Any]) -> str:
             const netDelta = Number(model.netPnlUsd || 0) - actualNet;
             if (Math.abs(grossDelta) <= 1e-9 && Math.abs(feesDelta) <= 1e-9 && Math.abs(netDelta) <= 1e-9) return;
 
+            const actualOutcome = actualNet > 0 ? 1 : (actualNet < 0 ? -1 : 0);
+            const modeledOutcome = Number(model.netPnlUsd || 0) > 0 ? 1 : (Number(model.netPnlUsd || 0) < 0 ? -1 : 0);
+
             sessionModel.gross = round6(Number(sessionModel.gross || 0) + grossDelta);
             sessionModel.fees = round6(Number(sessionModel.fees || 0) + feesDelta);
             sessionModel.net = round6(Number(sessionModel.net || 0) + netDelta);
             totalGross += grossDelta;
             totalFees += feesDelta;
             totalNet += netDelta;
+            if (actualOutcome !== modeledOutcome) {{
+              if (actualOutcome > 0) totalWins -= 1;
+              else if (actualOutcome < 0) totalLosses -= 1;
+              if (modeledOutcome > 0) totalWins += 1;
+              else if (modeledOutcome < 0) totalLosses += 1;
+            }}
 
             const tradeKey = String(Number(trade.tradeNum || 0));
             const intervalKey = String(trade.intervalLabel || 'unknown');
@@ -4711,12 +4908,24 @@ def html_page(doc: dict[str, Any]) -> str:
             byTrade[tradeKey].gross += grossDelta;
             byTrade[tradeKey].fees += feesDelta;
             byTrade[tradeKey].net += netDelta;
+            if (actualOutcome !== modeledOutcome) {{
+              if (actualOutcome > 0) byTrade[tradeKey].wins -= 1;
+              else if (actualOutcome < 0) byTrade[tradeKey].losses -= 1;
+              if (modeledOutcome > 0) byTrade[tradeKey].wins += 1;
+              else if (modeledOutcome < 0) byTrade[tradeKey].losses += 1;
+            }}
 
             const comboKey = `${{tradeKey}}|${{intervalKey}}`;
             byInterval[comboKey] = byInterval[comboKey] || {{ key: comboKey, tradeNum: tradeKey, interval: intervalKey, count: 0, wins: 0, losses: 0, gross: 0, fees: 0, net: 0 }};
             byInterval[comboKey].gross += grossDelta;
             byInterval[comboKey].fees += feesDelta;
             byInterval[comboKey].net += netDelta;
+            if (actualOutcome !== modeledOutcome) {{
+              if (actualOutcome > 0) byInterval[comboKey].wins -= 1;
+              else if (actualOutcome < 0) byInterval[comboKey].losses -= 1;
+              if (modeledOutcome > 0) byInterval[comboKey].wins += 1;
+              else if (modeledOutcome < 0) byInterval[comboKey].losses += 1;
+            }}
           }});
           state.sessionModels.set(slug, sessionModel);
         }});
@@ -4816,8 +5025,26 @@ def html_page(doc: dict[str, Any]) -> str:
 
       state.tradeModels = {{}};
       state.sessionModels = new Map();
-      const byTrade = {{}};
-      const byInterval = {{}};
+      const byTrade = Object.fromEntries(
+        Object.keys(doc?.controls?.defaultBetUsdByTrade || {{}})
+          .map((tradeKey) => String(tradeKey || '').trim())
+          .filter((tradeKey) => tradeKey.length > 0)
+          .sort((a, b) => Number(a) - Number(b))
+          .map((tradeKey) => [tradeKey, {{ count:0, wins:0, losses:0, gross:0, fees:0, net:0 }}])
+      );
+      const byInterval = Object.fromEntries(
+        summarizeActualByIntervalRows().map((row) => [String(row.key || ''), {{
+          key: String(row.key || ''),
+          tradeNum: String(row.tradeNum || ''),
+          interval: String(row.interval || 'unknown'),
+          count: 0,
+          wins: 0,
+          losses: 0,
+          gross: 0,
+          fees: 0,
+          net: 0,
+        }}])
+      );
       let totalGross = 0, totalFees = 0, totalNet = 0, totalTrades = 0, totalWins = 0, totalLosses = 0;
       let includedSessions = 0, ignoredSessions = 0;
       let runningBalance = Number(doc.run.startBalanceUsd || 100);

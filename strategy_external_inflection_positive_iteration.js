@@ -25,6 +25,7 @@
     partialQtyPct: 0.20,
     profitLockMinPeakPctBet: 0.42,
     profitLockDrawdownPct: 0.20,
+    profitLockConfirmTicks: 5,
     kalmanQ: 0.00005,
     kalmanR: 0.0008,
     inflectEps: 0.0035,
@@ -87,6 +88,18 @@
       Object.freeze({ startSec: 210, endSec: 240, betUsd: 100 }),
       Object.freeze({ startSec: 240, endSec: 270, betUsd: 100 }),
       Object.freeze({ startSec: 270, endSec: 297, betUsd: 100 }),
+    ]),
+  });
+
+  const GOLD_BETS_V3_WINDOWS = Object.freeze({
+    1: Object.freeze([
+      Object.freeze({ startSec: 90, endSec: 180, betUsd: 100 }),
+    ]),
+    2: Object.freeze([
+      Object.freeze({ startSec: 295, endSec: 300, betUsd: 100 }),
+    ]),
+    3: Object.freeze([
+      Object.freeze({ startSec: 295, endSec: 300, betUsd: 100 }),
     ]),
   });
 
@@ -385,6 +398,7 @@
       partialQtyPct: Math.max(0, Math.min(1, toNum(params && params.partialQtyPct, PRESET.partialQtyPct))),
       profitLockMinPeakPctBet: Math.max(0, toNum(params && params.profitLockMinPeakPctBet, PRESET.profitLockMinPeakPctBet)),
       profitLockDrawdownPct: Math.max(0, Math.min(0.95, toNum(params && params.profitLockDrawdownPct, PRESET.profitLockDrawdownPct))),
+      profitLockConfirmTicks: Math.max(1, Math.floor(toNum(params && params.profitLockConfirmTicks, PRESET.profitLockConfirmTicks))),
       kalmanQ: Math.max(0, toNum(params && params.kalmanQ, PRESET.kalmanQ)),
       kalmanR: Math.max(1e-12, toNum(params && params.kalmanR, PRESET.kalmanR)),
       inflectEps: Math.max(0, toNum(params && params.inflectEps, PRESET.inflectEps)),
@@ -452,6 +466,16 @@
     let finalSyntheticTicks = Math.max(0, seedInt('finalSyntheticTicks', 0));
     let duplicateQuoteSeqSkippedTicks = Math.max(0, seedInt('duplicateQuoteSeqSkippedTicks', 0));
     let lastAcceptedQuoteSeq = Number.isFinite(seedNum('lastAcceptedQuoteSeq', NaN)) ? seedNum('lastAcceptedQuoteSeq', NaN) : null;
+    let lastAcceptedUpBid = Number.isFinite(seedNum('lastAcceptedUpBid', NaN))
+      ? seedNum('lastAcceptedUpBid', NaN)
+      : Number.isFinite(Number(observed.length ? observed[observed.length - 1].upBid : NaN))
+        ? Number(observed[observed.length - 1].upBid)
+        : NaN;
+    let lastAcceptedDownBid = Number.isFinite(seedNum('lastAcceptedDownBid', NaN))
+      ? seedNum('lastAcceptedDownBid', NaN)
+      : Number.isFinite(Number(observed.length ? observed[observed.length - 1].downBid : NaN))
+        ? Number(observed[observed.length - 1].downBid)
+        : NaN;
     let lastQuoteMeta = seed && seed.lastQuoteMeta && typeof seed.lastQuoteMeta === 'object'
       ? cloneSimple(seed.lastQuoteMeta)
       : null;
@@ -471,6 +495,9 @@
       activeTrade.partial.filled = !!activeTrade.partial.filled;
       activeTrade.partial.completed = !!activeTrade.partial.completed;
     }
+    if (activeTrade) {
+      activeTrade.profitLockBreachStreak = Math.max(0, Math.floor(Number(activeTrade.profitLockBreachStreak || 0)));
+    }
     if (activeTrade && Number.isFinite(Number(activeTrade.tradeNum))) {
       entriesThisSession = Math.max(entriesThisSession, Math.floor(Number(activeTrade.tradeNum)));
     }
@@ -483,6 +510,8 @@
         windows = GOLD_BETS_V1_WINDOWS[tradeNum] || [];
       } else if (profile === 'gold_bets_v2' || profile === 'gold bets v2') {
         windows = GOLD_BETS_V2_WINDOWS[tradeNum] || [];
+      } else if (profile === 'gold_bets_v3' || profile === 'gold bets v3') {
+        windows = GOLD_BETS_V3_WINDOWS[tradeNum] || [];
       }
       if (Array.isArray(windows) && windows.length) {
         for (let i = 0; i < windows.length; i += 1) {
@@ -643,6 +672,7 @@
         lastSideKal: Number.isFinite(Number(sideKal)) ? Number(sideKal) : NaN,
         entryTag: String(extra && extra.tag || '').trim() || undefined,
         negSlopeStreak: 0,
+        profitLockBreachStreak: 0,
         stopBreachStreak: 0,
         partial: {
           orderPlaced: false,
@@ -697,6 +727,41 @@
       };
     }
 
+    function maybeEvaluateImmediateRiskExit(upBid, downBid, t, nowMs) {
+      if (!activeTrade || activeTrade.status !== 'open') return null;
+      const markPx = sidePx(activeTrade.side, upBid, downBid);
+      if (!Number.isFinite(markPx)) return null;
+      const currentStopPx = computeCurrentStopPx(activeTrade);
+      if (Number.isFinite(currentStopPx) && markPx <= currentStopPx) {
+        activeTrade.stopBreachStreak = Number(activeTrade.stopBreachStreak || 0) + 1;
+      } else {
+        activeTrade.stopBreachStreak = 0;
+      }
+      const stopTriggered =
+        Number.isFinite(currentStopPx) &&
+        Number(activeTrade.stopBreachStreak || 0) >= cfg.stopConfirmTicks;
+      if (stopTriggered) {
+        const stopLabel =
+          currentStopPx >= 0.60 ? 'STOP_PROTECTED_060'
+            : currentStopPx >= 0.55 ? 'STOP_PROTECTED_055'
+              : currentStopPx >= 0.50 ? 'STOP_PROTECTED_050'
+                : 'STOP_LOSS_RAW';
+        return queueFullExit(stopLabel, markPx, {
+          orderType: 'MARKET',
+          stopReason: 'RAW_STOP_LADDER',
+          feeMode: 'taker',
+        });
+      }
+      if (t && t.isFinal) {
+        return queueFullExit('SETTLE', markPx, {
+          orderType: 'MARKET',
+          stopReason: 'SESSION_FINAL',
+          feeMode: 'none',
+        });
+      }
+      return null;
+    }
+
     function maybeSyncTradeFromRuntime(t, nowMs) {
       const pos = t && t.position && typeof t.position === 'object' ? t.position : null;
       const runtimeEntered = !!pos?.entered && (pos?.side === 'UP' || pos?.side === 'DOWN');
@@ -731,6 +796,7 @@
           peakGrossPnlUsd: 0,
           lastSideKal: NaN,
           negSlopeStreak: 0,
+          profitLockBreachStreak: 0,
           stopBreachStreak: 0,
           partial: {
             orderPlaced: false,
@@ -913,6 +979,8 @@
           finalSyntheticTicks = 0;
           duplicateQuoteSeqSkippedTicks = 0;
           lastAcceptedQuoteSeq = null;
+          lastAcceptedUpBid = NaN;
+          lastAcceptedDownBid = NaN;
           lastQuoteMeta = null;
         }
         lastElapsedSec = elapsedSec;
@@ -974,16 +1042,22 @@
           !allowSyntheticFinal &&
           quoteSeq != null &&
           lastAcceptedQuoteSeq != null &&
-          Number(quoteSeq) === Number(lastAcceptedQuoteSeq)
+          Number(quoteSeq) === Number(lastAcceptedQuoteSeq) &&
+          Number(upBid) === Number(lastAcceptedUpBid) &&
+          Number(downBid) === Number(lastAcceptedDownBid)
         ) {
           duplicateQuoteSeqSkippedTicks += 1;
           maybeSyncTradeFromRuntime(t, nowMs);
+          const fastRiskExit = maybeEvaluateImmediateRiskExit(upBid, downBid, t, nowMs);
+          if (fastRiskExit) return fastRiskExit;
           return null;
         }
 
         tickIdx += 1;
         pureObservedTicks += 1;
         if (quoteSeq != null) lastAcceptedQuoteSeq = Number(quoteSeq);
+        lastAcceptedUpBid = Number(upBid);
+        lastAcceptedDownBid = Number(downBid);
         observed.push({ tMs: nowMs, upBid: upBid, downBid: downBid });
         maybeFinalizeCheckpoints(nowMs);
 
@@ -1069,12 +1143,19 @@
           ) {
             const floorUsd = Number(activeTrade.peakGrossPnlUsd) * (1 - cfg.profitLockDrawdownPct);
             if (grossPnlUsd <= floorUsd) {
+              activeTrade.profitLockBreachStreak = Number(activeTrade.profitLockBreachStreak || 0) + 1;
+            } else {
+              activeTrade.profitLockBreachStreak = 0;
+            }
+            if (Number(activeTrade.profitLockBreachStreak || 0) >= cfg.profitLockConfirmTicks) {
               return queueFullExit('PROFIT_LOCK', markPx, {
                 orderType: 'MARKET',
                 stopReason: 'PROFIT_LOCK_DRAWDOWN',
                 feeMode: 'taker',
               });
             }
+          } else {
+            activeTrade.profitLockBreachStreak = 0;
           }
 
           if (armReached) {
@@ -1193,6 +1274,7 @@
             partialQtyPct: cfg.partialQtyPct,
             profitLockMinPeakPctBet: cfg.profitLockMinPeakPctBet,
             profitLockDrawdownPct: cfg.profitLockDrawdownPct,
+            profitLockConfirmTicks: cfg.profitLockConfirmTicks,
             rawCrossCooldownSec: cfg.rawCrossCooldownSec,
             resampleMs: cfg.resampleMs,
             checkpointDelayMs: cfg.checkpointDelayMs,
@@ -1225,6 +1307,8 @@
             finalSyntheticTicks,
             duplicateQuoteSeqSkippedTicks,
             lastAcceptedQuoteSeq,
+            lastAcceptedUpBid,
+            lastAcceptedDownBid,
             lastQuoteMeta: cloneSimple(lastQuoteMeta),
             rearmBlocked: { UP: !!rearmBlocked.UP, DOWN: !!rearmBlocked.DOWN },
             crossCooldownUntilSec: Number.isFinite(crossCooldownUntilMs) ? (crossCooldownUntilMs / 1000) : null,
@@ -1251,6 +1335,7 @@
                   realizedGrossPnlUsd: activeTrade.realizedGrossPnlUsd,
                   peakGrossPnlUsd: activeTrade.peakGrossPnlUsd,
                   negSlopeStreak: activeTrade.negSlopeStreak,
+                  profitLockBreachStreak: activeTrade.profitLockBreachStreak,
                   stopBreachStreak: activeTrade.stopBreachStreak,
                   currentStopPx,
                   partial: cloneSimple(activeTrade.partial),

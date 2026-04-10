@@ -27,10 +27,49 @@
       },
     };
   </script>
-  <script defer src="/vendor/plotly-2.30.0.min.js?v=20260225b"></script>
   <script>
-    (function ensurePlotlyLoaded(){
-      if (window.Plotly) return;
+    (function primeIosLowLoadMode(){
+      try {
+        const ua = String(navigator.userAgent || "");
+        const host = String(window.location.hostname || "").trim().toLowerCase();
+        const isiPhone = /iPhone|iPod/i.test(ua);
+        const isSafari = /Safari/i.test(ua) && !/CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo/i.test(ua);
+        const isPublicOrigin = !!host && !/^(localhost|127\.0\.0\.1)$/i.test(host);
+        window.__MMX_IOS_LOW_LOAD = !!(isiPhone && isSafari && isPublicOrigin);
+        if (window.__MMX_IOS_LOW_LOAD) {
+          document.documentElement.classList.add("mmx-ios-lite");
+        }
+      } catch {}
+    })();
+  </script>
+  <script>
+    window.mmxEnsureOutfitFontLoaded = window.mmxEnsureOutfitFontLoaded || function ensureOutfitFontLoaded(){
+      try {
+        if (document.getElementById("mmxOutfitFontStylesheet")) return;
+        const link = document.createElement("link");
+        link.id = "mmxOutfitFontStylesheet";
+        link.rel = "stylesheet";
+        link.href = "https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&display=swap";
+        document.head.appendChild(link);
+      } catch {}
+    };
+    (function bootOutfitFontLoading(){
+      if (!window.__MMX_IOS_LOW_LOAD) {
+        try { window.mmxEnsureOutfitFontLoaded(); } catch {}
+        return;
+      }
+      const schedule = () => {
+        try { window.mmxEnsureOutfitFontLoaded(); } catch {}
+      };
+      window.addEventListener("load", () => { setTimeout(schedule, 3200); }, { once: true });
+      window.addEventListener("pointerdown", schedule, { once: true, passive: true });
+      window.addEventListener("touchstart", schedule, { once: true, passive: true });
+    })();
+  </script>
+  <script>
+    window.mmxEnsurePlotlyLoaded = window.mmxEnsurePlotlyLoaded || function ensurePlotlyLoaded(){
+      if (window.Plotly || window.__mmxPlotlyLoading) return;
+      window.__mmxPlotlyLoading = true;
       const primary = document.createElement("script");
       primary.src = "https://cdn.plot.ly/plotly-2.30.0.min.js";
       primary.onerror = function(){
@@ -40,9 +79,59 @@
         document.head.appendChild(backup);
       };
       document.head.appendChild(primary);
+    };
+    (function bootPlotlyLoading(){
+      if (!window.__MMX_IOS_LOW_LOAD) {
+        const local = document.createElement("script");
+        local.defer = true;
+        local.src = "/vendor/plotly-2.30.0.min.js?v=20260225b";
+        local.onerror = function(){
+          try { window.mmxEnsurePlotlyLoaded(); } catch {}
+        };
+        document.head.appendChild(local);
+        try { window.mmxEnsurePlotlyLoaded(); } catch {}
+        return;
+      }
+      const schedule = () => {
+        try { window.mmxEnsurePlotlyLoaded(); } catch {}
+      };
+      if (!window.__MMX_IOS_LOW_LOAD) {
+        window.addEventListener("load", () => {
+          setTimeout(schedule, 1800);
+        }, { once: true });
+      }
+      window.addEventListener("pointerdown", schedule, { once: true, passive: true });
+      window.addEventListener("touchstart", schedule, { once: true, passive: true });
     })();
   </script>
-  <script defer src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+  <script>
+    window.mmxEnsureGsapLoaded = window.mmxEnsureGsapLoaded || function ensureGsapLoaded(){
+      try {
+        if (window.__mmxGsapLoading || (window.gsap && typeof window.gsap.to === "function" && String(window.gsap.to).indexOf("[native code]") !== -1)) return;
+        if (document.getElementById("mmxGsapScript")) return;
+        window.__mmxGsapLoading = true;
+        const script = document.createElement("script");
+        script.id = "mmxGsapScript";
+        script.defer = true;
+        script.src = "https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js";
+        script.onload = () => { window.__mmxGsapLoading = false; };
+        script.onerror = () => { window.__mmxGsapLoading = false; };
+        document.head.appendChild(script);
+      } catch {}
+    };
+    (function bootGsapLoading(){
+      if (!window.__MMX_IOS_LOW_LOAD) {
+        try { window.mmxEnsureGsapLoaded(); } catch {}
+        return;
+      }
+      const schedule = () => {
+        try { window.mmxEnsureGsapLoaded(); } catch {}
+      };
+      window.addEventListener("pointerdown", schedule, { once: true, passive: true });
+      window.addEventListener("touchstart", schedule, { once: true, passive: true });
+      window.addEventListener("load", () => { setTimeout(schedule, 5000); }, { once: true });
+    })();
+  </script>
   <script>
     (function primeMobileAppBootClass(){
       try {
@@ -70,7 +159,6 @@
   </script>
 
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800;900&display=swap');
     :root{
       --bg:#0a0a0a;
       --bg-soft:#111111;
@@ -91,6 +179,12 @@
       --safe-right:env(safe-area-inset-right, 0px);
       --safe-bottom:env(safe-area-inset-bottom, 0px);
       --safe-left:env(safe-area-inset-left, 0px);
+    }
+    html.mmx-ios-lite *,
+    html.mmx-ios-lite *::before,
+    html.mmx-ios-lite *::after{
+      -webkit-backdrop-filter:none !important;
+      backdrop-filter:none !important;
     }
     html,body{
       min-height:100%;
@@ -1963,6 +2057,14 @@
       font-weight:800;
       letter-spacing:.06em;
       text-transform:uppercase;
+    }
+    .sessCompactPnlTitleLink{
+      color:inherit;
+      text-decoration:none;
+    }
+    .sessCompactPnlTitleLink:hover,
+    .sessCompactPnlTitleLink:focus-visible{
+      text-decoration:underline;
     }
     .sessCompactPnlHint{
       color:#8f9aab;
@@ -4510,6 +4612,12 @@
         transform:none;
         pointer-events:auto;
       }
+      body.mobileHistorySheetOpen .mobileHistorySheetBody,
+      body.mobileBootStaged.mobileHistorySheetOpen .mobileHistorySheetBody{
+        opacity:1;
+        transform:none;
+        pointer-events:auto;
+      }
       body.mobileEquityCollapsed .mobileEquityShelf,
       body.mobileBootStaged.mobileBootStage-equity.mobileEquityCollapsed .mobileEquityShelf,
       body.mobileBootStaged.mobileBootStage-values.mobileEquityCollapsed .mobileEquityShelf,
@@ -4681,13 +4789,17 @@
         flex-direction:column;
         border:none;
         border-radius:0;
-        background:linear-gradient(180deg, rgba(18,18,19,.985), rgba(8,8,9,.99));
+        background:linear-gradient(180deg, rgba(18,18,19,1), rgba(8,8,9,1));
         box-shadow:0 -18px 42px rgba(0,0,0,.34);
-      backdrop-filter:blur(16px);
-      overflow:visible;
-      transform:translateY(100%);
-      transition:transform .28s ease;
-      pointer-events:none;
+        backdrop-filter:none;
+        -webkit-backdrop-filter:none;
+        overflow:visible;
+        transform:translateY(100%);
+        transition:transform .28s ease;
+        pointer-events:none;
+        isolation:isolate;
+        backface-visibility:hidden;
+        -webkit-backface-visibility:hidden;
       }
       body.mobileHistorySheetOpen .mobileHistorySheet{
         transform:translateY(0);
@@ -4720,6 +4832,7 @@
         min-height:0;
         height:100%;
         padding:max(34px, calc(var(--safe-top) + 18px)) 0 0;
+        background:rgba(10,10,12,.985);
       }
       .mobileHistoryHeroMount{
         flex:0 0 auto;
@@ -5041,6 +5154,7 @@
         min-height:0;
         overflow:auto;
         padding:0 4px 20px;
+        background:linear-gradient(180deg, rgba(13,13,15,.985), rgba(10,10,12,.995));
       }
       .mobileHistoryListMount .historyRecentSessionsMount{
         width:100%;
@@ -5056,7 +5170,7 @@
         top:0;
         z-index:2;
         padding-top:2px;
-        background:linear-gradient(180deg, rgba(17,17,18,.98), rgba(17,17,18,.84));
+        background:linear-gradient(180deg, rgba(17,17,18,1), rgba(17,17,18,.96));
       }
       .mobileHistoryListMount .sessCompactPnlTitle{
         width:100%;
@@ -5077,6 +5191,78 @@
         white-space:normal;
         overflow:visible;
         text-overflow:clip;
+      }
+      .mobileHistoryReadableFallback{
+        position:fixed;
+        left:max(8px, var(--safe-left));
+        right:max(8px, var(--safe-right));
+        top:max(8px, calc(var(--safe-top) + 8px));
+        bottom:max(8px, var(--safe-bottom));
+        z-index:113;
+        display:none;
+        overflow:auto;
+        padding:42px 6px 12px;
+        border:1px solid rgba(255,255,255,.12);
+        border-radius:22px;
+        background:linear-gradient(180deg, rgba(14,14,16,.995), rgba(8,8,10,.995));
+        box-shadow:0 18px 40px rgba(0,0,0,.36);
+      }
+      .mobileHistoryReadableFallbackClose{
+        position:sticky;
+        top:0;
+        z-index:2;
+        display:flex;
+        justify-content:center;
+        margin:-34px auto 8px;
+        width:54px;
+        height:28px;
+        border:1px solid rgba(255,255,255,.1);
+        border-radius:999px;
+        background:linear-gradient(180deg, rgba(24,24,28,.98), rgba(12,12,14,.98));
+        color:#f0d35b;
+        font-size:18px;
+        font-weight:900;
+        line-height:1;
+      }
+      body.mobileAppMode.mobileHistorySheetOpen .mobileHistoryReadableFallback{
+        display:block;
+      }
+      body.mobileAppMode.mobileHistorySheetOpen .mobileHistorySheet{
+        opacity:0;
+        pointer-events:none;
+      }
+      body.mobileAppMode .mobileHistorySheet,
+      body.mobileAppMode .mobileHistorySheetBody,
+      body.mobileAppMode .mobileHistoryListMount,
+      body.mobileAppMode .mobileHistoryListMount .sessCompactPnlHead,
+      body.mobileAppMode .mobileHistoryListMount .sessCompactPnlTable thead th,
+      body.mobileAppMode .mobileHistoryListMount .sessCompactPnlTable tbody td,
+      body.mobileAppMode .mobileHistoryListMount .sessCompactPnlTitle{
+        -webkit-font-smoothing:antialiased;
+        text-rendering:optimizeLegibility;
+      }
+      body.mobileAppMode .mobileHistoryListMount .sessCompactPnlWrap{
+        background:linear-gradient(180deg, rgba(24,24,27,.98), rgba(15,15,18,.98));
+        border-color:rgba(255,255,255,.14);
+        color:#f1f5fb;
+      }
+      body.mobileAppMode .mobileHistoryListMount .sessCompactPnlTableWrap{
+        background:rgba(255,255,255,.04);
+        border-color:rgba(255,255,255,.12);
+      }
+      body.mobileAppMode .mobileHistoryListMount .sessCompactPnlTable thead th{
+        background:#17181b;
+        color:#c7d0dd;
+      }
+      body.mobileAppMode .mobileHistoryListMount .sessCompactPnlTable tbody td{
+        color:#f2f6fb;
+        -webkit-text-fill-color:#f2f6fb;
+      }
+      body.mobileAppMode .mobileHistoryListMount .sessCompactPnlTable tbody tr:nth-child(even){
+        background:rgba(255,255,255,.03);
+      }
+      body.mobileAppMode .mobileHistoryListMount .sessCompactPnlTitle{
+        color:#fff2bf;
       }
       #historySessionStrip{
         display:none !important;
@@ -5493,6 +5679,7 @@
       <div id="mobileHistoryListMount" class="mobileHistoryListMount"></div>
     </div>
   </div>
+  <div id="mobileHistoryReadableFallback" class="mobileHistoryReadableFallback" hidden aria-hidden="true"></div>
   <div id="mobileHistoryHeroViewer" class="mobileHistoryHeroViewer" hidden aria-hidden="true">
     <button type="button" class="mobileHistoryHeroViewerBackdrop" aria-label="Close expanded historical session card"></button>
     <button id="mobileHistoryHeroViewerClose" class="mobileHistoryHeroViewerClose" type="button" aria-label="Close expanded historical session card">×</button>
@@ -6052,6 +6239,7 @@
   let mmxFocusedLiveSessionFetchAtMs = 0;
   let mmxMobileEquityCollapsed = false;
   let mmxMobileHistorySheetOpen = false;
+  let mmxMobileHistorySheetAutoOpened = false;
   const LEGACY_ANALYSIS_ENABLED = false;
   const OPERATOR_NOTICE_REFRESH_MS = 30000;
   const analysisFeed = [];
@@ -7134,6 +7322,10 @@
     if (typeof text === "string") stopClockText = text;
     const el = $("timer");
     if (!el) return;
+    if (mmxShouldUseIosLowLoadMode()) {
+      el.textContent = String(stopClockText || "");
+      return;
+    }
     const chars = Array.from(stopClockText || "");
     if (!chars.length) { el.textContent = ""; return; }
     const n = chars.length;
@@ -7175,7 +7367,28 @@
     renderStopClock(`${clamped.toFixed(1)}s`);
     const bar = $("timerBar");
     if (bar) bar.style.width = `${maxSec > 0 ? (clamped / maxSec) * 100 : 0}%`;
-    try { mmxSyncMobileStickyShell(); } catch {}
+    try {
+      if (mmxShouldUseIosLowLoadMode()) {
+        const shell = $("mobileStickyShell");
+        const now = Date.now();
+        const currentWholeSecond = Math.max(0, Math.floor(clamped));
+        if (
+          shell instanceof HTMLElement &&
+          (shell.classList.contains("show-stop") || shell.classList.contains("show-summary")) &&
+          currentWholeSecond !== Number(mmxLastMobileStickyStopSecond) &&
+          (now - Number(mmxLastMobileStickySyncAtMs || 0)) >= MMX_IOS_LOW_LOAD_STOPCLOCK_INTERVAL_MS
+        ) {
+          const stopText = `${currentWholeSecond}s`;
+          if (stopText === String(mmxLastMobileStickyStopText || "").trim()) return;
+          mmxLastMobileStickyStopSecond = currentWholeSecond;
+          mmxLastMobileStickyStopText = stopText;
+          mmxLastMobileStickySyncAtMs = now;
+          mmxSyncMobileStickyShell({ skipLayoutMeasure: true });
+        }
+      } else {
+        mmxSyncMobileStickyShell();
+      }
+    } catch {}
   }
   function setStopClockAnchor(startMs, serverNowMs, endMs){
     const nextStartMs = Number.isFinite(Number(startMs)) ? Number(startMs) : null;
@@ -7206,7 +7419,7 @@
     if (stopClockValueTimer) return;
     stopClockValueTimer = setInterval(() => {
       renderStopClockValueFromAnchor();
-    }, 100);
+    }, mmxShouldUseIosLowLoadMode() ? MMX_IOS_LOW_LOAD_STOPCLOCK_INTERVAL_MS : 100);
   }
   function setSlugText(value){
     const el = $("slug");
@@ -7266,6 +7479,10 @@
   const MMX_DESKTOP_STARTUP_HEAVY_DELAY_MS = 2500;
   const MMX_BOOT_DEFER_COMPARE_MS = 6000;
   const MMX_BOOT_DEFER_HISTORY_MS = 7000;
+  const MMX_IOS_LOW_LOAD_MODE = !!window.__MMX_IOS_LOW_LOAD;
+  const MMX_IOS_LOW_LOAD_STOPCLOCK_INTERVAL_MS = 250;
+  const MMX_IOS_LOW_LOAD_SCROLL_INTERVAL_MS = 120;
+  const MMX_IOS_LOW_LOAD_RELAYOUT_INTERVAL_MS = 180;
   let mmxMobileBootStage = "";
   let mmxMobileBootTimers = [];
   let mmxStartupHeavyHydrationScheduled = false;
@@ -7277,6 +7494,12 @@
   let mmxBootDeferredWorkScheduled = false;
   let mmxMobileEquityRenderReleased = false;
   let mmxMobileSecondaryBootStarted = false;
+  let mmxLastMobileStickySyncAtMs = 0;
+  let mmxLastMobileScrollWorkAtMs = 0;
+  let mmxLastMobileRelayoutAtMs = 0;
+  function mmxShouldUseIosLowLoadMode(){
+    return !!(MMX_IOS_LOW_LOAD_MODE && mmxIsMobileViewport());
+  }
   function mmxShouldUseMobileAppBoot(){
     try {
       const ua = String(navigator.userAgent || "");
@@ -7455,16 +7678,121 @@
   }
   const mmxMobileHistoryOverlayCache = new Map();
   let mmxLastRenderedMobileHistoryOverlayViewRows = [];
+  let mmxLatestRecentHistorySummaryRows = [];
+  let mmxLatestRecentHistorySourceRows = [];
   let mmxLastRenderedMobileHistoryOverlayCacheKey = "";
+  const MMX_RECENT_HISTORY_SUMMARY_MAX_ROWS = 5000;
+  const MMX_MOBILE_HISTORY_OVERLAY_MAX_ROWS = 100;
   let mmxMobileHistoryOverlayInflight = null;
+  const mmxMobileHistoryFetchInflight = new Map();
   let mmxMobileHistoryOverlayWarmScheduled = false;
   let mmxMobileHistoryOverlayWarmDone = false;
+  let mmxMobileHistoryOverlayPendingRetryTimer = null;
   const MMX_MOBILE_HISTORY_OVERLAY_WARM_DELAY_MS = 2000;
+  let mmxLiteStateFetchInflight = null;
+  let mmxLiteStateFetchAtMs = 0;
+  let mmxVisibleBotsFetchInflight = null;
+  let mmxVisibleBotsFetchAtMs = 0;
+  let mmxDeferredFocusedColdBootTimer = null;
+  function mmxResolveMobileHistoryWarmDelayMs(delayMsLike = MMX_MOBILE_HISTORY_OVERLAY_WARM_DELAY_MS){
+    const raw = Math.max(0, Number(delayMsLike) || 0);
+    if (mmxUseMobileAppShell() && mmxShouldUseIosLowLoadMode()) return 0;
+    if (mmxUseMobileAppShell() && mmxIsMobileViewport()) return Math.min(raw, 150);
+    return raw;
+  }
+  function mmxPrimeMobileHistoryWarmUi(reason = "warmup"){
+    if (!mmxUseMobileAppShell()) return;
+    const history = $("history");
+    const recent = $("historyRecentSessionsMount");
+    if (history instanceof HTMLElement && !history.childElementCount) {
+      history.innerHTML = mmxRenderMobileHistoryHeroImage({}, {
+        loading: true,
+        message: "Loading session snapshot...",
+      });
+    }
+    if (recent instanceof HTMLElement && !recent.querySelector("tbody tr")) {
+      recent.innerHTML = `<div class="sessCompactPnlWrap" data-history-summary-panel="1" data-history-warm-placeholder="${mmxCompareEsc(reason)}"><div class="sessCompactPnlHead">${mmxRecentHistoryTitleHtml()}</div><div class="sessCompactPnlEmpty">Loading last 100 sessions...</div></div>`;
+    }
+    if (mmxShouldUseIosLowLoadMode() && !mmxMobileHistorySheetOpen) {
+      mmxMobileHistorySheetAutoOpened = true;
+      mmxSetMobileHistorySheetOpen(true);
+    }
+  }
+  async function mmxFetchLiteStateShared(opts = {}){
+    const forceFresh = opts && typeof opts === "object" && opts.forceFresh === true;
+    const timeoutMs = Math.max(500, Math.floor(Number(opts?.timeoutMs) || 5000));
+    const now = Date.now();
+    if (!forceFresh && mmxLiteStateFetchInflight && (now - Number(mmxLiteStateFetchAtMs || 0)) < 1500) {
+      return await mmxLiteStateFetchInflight;
+    }
+    mmxLiteStateFetchAtMs = now;
+    mmxLiteStateFetchInflight = (async () => {
+      const res = await mmxFetchWithTimeout('/api/state?includeBots=0&lite=1', { cache: "no-store" }, timeoutMs);
+      if (!res || !res.ok) throw new Error(`lite_state_http_${Number(res?.status || 0)}`);
+      const json = await res.json();
+      return json && typeof json === "object" ? json : {};
+    })();
+    try {
+      return await mmxLiteStateFetchInflight;
+    } finally {
+      mmxLiteStateFetchInflight = null;
+    }
+  }
+  async function mmxFetchVisibleBotsShared(opts = {}){
+    const forceFresh = opts && typeof opts === "object" && opts.forceFresh === true;
+    const timeoutMs = Math.max(500, Math.floor(Number(opts?.timeoutMs) || 5000));
+    const now = Date.now();
+    if (!forceFresh && mmxVisibleBotsFetchInflight && (now - Number(mmxVisibleBotsFetchAtMs || 0)) < 1500) {
+      return await mmxVisibleBotsFetchInflight;
+    }
+    mmxVisibleBotsFetchAtMs = now;
+    mmxVisibleBotsFetchInflight = mmxFetchMobileOverlayJsonViaWorker(
+      `/api/v2/bots?includeTrace=0&includeTruth=0&includeRecentTrades=0${forceFresh ? `&cb=${now}` : ""}`,
+      { timeoutMs }
+    );
+    try {
+      return await mmxVisibleBotsFetchInflight;
+    } finally {
+      mmxVisibleBotsFetchInflight = null;
+    }
+  }
+  function mmxLowLoadMobileHistorySourceLimit(defaultLimitLike = MMX_RECENT_HISTORY_SUMMARY_MAX_ROWS){
+    const fallback = Math.max(1, Math.floor(Number(defaultLimitLike) || MMX_RECENT_HISTORY_SUMMARY_MAX_ROWS));
+    if (mmxUseMobileAppShell() && mmxShouldUseIosLowLoadMode()) {
+      return Math.min(fallback, MMX_MOBILE_HISTORY_OVERLAY_MAX_ROWS);
+    }
+    return fallback;
+  }
+  function mmxShouldDeferColdFocusedLiveReads(){
+    if (!mmxUseMobileAppShell()) return false;
+    if (!mmxShouldUseIosLowLoadMode()) return false;
+    const bootAtMs = Number(mmxBootStartedAtMs || 0);
+    const ageMs = Number.isFinite(bootAtMs) && bootAtMs > 0 ? Math.max(0, Date.now() - bootAtMs) : Infinity;
+    return ageMs < 6000;
+  }
+  function mmxScheduleDeferredFocusedColdBootHydrates(reason = "cold_boot"){
+    if (!mmxShouldDeferColdFocusedLiveReads()) return;
+    try {
+      if (mmxDeferredFocusedColdBootTimer) clearTimeout(mmxDeferredFocusedColdBootTimer);
+    } catch {}
+    mmxDeferredFocusedColdBootTimer = setTimeout(() => {
+      mmxDeferredFocusedColdBootTimer = null;
+      if (mmxShouldDeferColdFocusedLiveReads()) {
+        mmxScheduleDeferredFocusedColdBootHydrates(`${reason}:retry`);
+        return;
+      }
+      try { void mmxHydrateFocusedLiveTraceFromServer(true); } catch {}
+      try { void mmxHydrateFocusedLiveMarkers(true); } catch {}
+      try { void mmxRefreshFocusedBotOnly(true); } catch {}
+    }, 1200);
+    mmxMobileBootTimers.push(mmxDeferredFocusedColdBootTimer);
+  }
   function mmxMobileHistoryHeroImageUrl(slugLike, opts = {}){
     const slug = String(slugLike || "").trim();
     const forceFresh = !!(opts && opts.forceFresh === true);
     const heroRow = opts && typeof opts === "object" ? (opts.heroRow || null) : null;
     if (!slug) return "";
+    if (mmxUseMobileAppShell() && mmxShouldUseIosLowLoadMode()) return "";
     if (heroRow && mmxMobileHistoryRowHasTraceVisual(heroRow)) {
       return mmxMobileHistoryFallbackSvgDataUrl(heroRow, slug);
     }
@@ -7473,11 +7801,17 @@
     params.set("format", "jpeg");
     if (forceFresh) params.set("refresh", "1");
     params.set("cb", String(forceFresh ? Date.now() : `${slug}-session-card-mobile-v2`));
-    return `${window.location.origin.replace(/\/+$/, "")}/api/session-card-image?${params.toString()}`;
+    return mmxDirectReadOnlyApiUrl(`/api/session-card-image?${params.toString()}`);
   }
-  async function mmxFetchMobileHistorySessionsViaReadOnlyWorker(instanceIdLike, marketPrefixLike, forceFresh = false){
+  async function mmxFetchMobileHistorySessionsViaReadOnlyWorker(instanceIdLike, marketPrefixLike, forceFresh = false, limitLike = 100){
     const instanceId = String(instanceIdLike || "").trim();
     const marketPrefix = String(marketPrefixLike || "").trim();
+    const limit = Math.max(1, Math.floor(Number(limitLike) || 100));
+    const iosLowLoadApp = mmxUseMobileAppShell() && mmxShouldUseIosLowLoadMode();
+    const inflightKey = `${instanceId || "global"}|${marketPrefix || "all"}|${forceFresh ? "fresh" : "cached"}|${limit}`;
+    if (mmxMobileHistoryFetchInflight.has(inflightKey)) {
+      return await mmxMobileHistoryFetchInflight.get(inflightKey);
+    }
     const loadJson = async (url, viaWorker = true) => {
       if (viaWorker) {
         return await mmxFetchReadOnlyJsonViaWorker(url, {
@@ -7488,33 +7822,11 @@
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       return await res.json();
     };
+    const fetchPromise = (async () => {
     if (instanceId) {
-      const workerParams = new URLSearchParams();
-      if (marketPrefix) workerParams.set("marketPrefix", marketPrefix);
-      workerParams.set("limit", "5000");
-      if (forceFresh) workerParams.set("refresh", "1");
-      let workerSessions = [];
-      try {
-        const workerPayload = await loadJson(
-          `/api/v2/bots/${encodeURIComponent(instanceId)}/last-session-history?${workerParams.toString()}`,
-          true
-        );
-        workerSessions = Array.isArray(workerPayload?.sessions) ? workerPayload.sessions : [];
-      } catch {}
-      if (workerSessions.length) {
-        return mmxBuildRecentHistoryViewRows(
-          workerSessions.filter((row) => {
-            const slug = String(row?.slug || "").trim().toLowerCase();
-            if (!slug) return false;
-            if (marketPrefix && !slug.startsWith(String(marketPrefix).toLowerCase())) return false;
-            return true;
-          }),
-          100
-        );
-      }
       const continuityParams = new URLSearchParams();
       continuityParams.set("includeTrace", "0");
-      continuityParams.set("maxSessions", "100");
+      continuityParams.set("maxSessions", String(Math.max(limit, 100)));
       if (forceFresh) continuityParams.set("refresh", "1");
       continuityParams.set("cb", String(forceFresh ? Date.now() : `${instanceId}|${marketPrefix || "all"}|mobile-history-continuity-v3`));
       const continuityUrl = `/api/v2/bots/${encodeURIComponent(instanceId)}/continuity-history?${continuityParams.toString()}`;
@@ -7529,6 +7841,9 @@
           continuitySessions = Array.isArray(continuityPayload?.sessions) ? continuityPayload.sessions : [];
         } catch {}
       }
+      if (!continuitySessions.length) {
+        continuitySessions = [];
+      }
       return mmxBuildRecentHistoryViewRows(
         continuitySessions.filter((row) => {
           const slug = String(row?.slug || "").trim().toLowerCase();
@@ -7536,22 +7851,43 @@
           if (marketPrefix && !slug.startsWith(String(marketPrefix).toLowerCase())) return false;
           return true;
         }),
-        100
+        limit
       );
+    }
+    let sessions = [];
+    if (instanceId) {
+      const continuityParams = new URLSearchParams();
+      continuityParams.set("includeTrace", "0");
+      continuityParams.set("maxSessions", String(Math.min(limit, MMX_MOBILE_HISTORY_OVERLAY_MAX_ROWS)));
+      if (marketPrefix) continuityParams.set("marketPrefix", marketPrefix);
+      if (forceFresh) continuityParams.set("refresh", "1");
+      continuityParams.set("cb", String(forceFresh ? Date.now() : `${instanceId}|${marketPrefix || "all"}|mobile-history-continuity-v2`));
+      try {
+        const continuityPayload = await mmxFetchReadOnlyJsonViaWorker(
+          `/api/v2/bots/${encodeURIComponent(instanceId)}/continuity-history?${continuityParams.toString()}`,
+          { timeoutMs: forceFresh ? 12000 : 7000 }
+        );
+        sessions = Array.isArray(continuityPayload?.sessions) ? continuityPayload.sessions : [];
+      } catch {}
+      if (iosLowLoadApp) {
+        return mmxBuildRecentHistoryViewRows(sessions, Math.min(limit, MMX_MOBILE_HISTORY_OVERLAY_MAX_ROWS));
+      }
+    }
+    if (!instanceId && iosLowLoadApp) {
+      return [];
     }
     const params = new URLSearchParams();
     params.set("engine", "paper");
     params.set("scope", "runs");
     params.set("runs", "100");
     params.set("includeTrace", "0");
-    params.set("maxSessions", "100");
+    params.set("maxSessions", String(mmxLowLoadMobileHistorySourceLimit(MMX_RECENT_HISTORY_SUMMARY_MAX_ROWS)));
     params.set("global", "1");
     if (instanceId) params.set("instanceId", instanceId);
     if (marketPrefix) params.set("marketPrefix", marketPrefix);
     if (forceFresh) params.set("refresh", "1");
     params.set("cb", String(forceFresh ? Date.now() : `${instanceId || "global"}|${marketPrefix || "all"}|mobile-history-v1`));
     const reqUrl = `/api/session-history?${params.toString()}`;
-    let sessions = [];
     try {
       const payload = await loadJson(reqUrl, true);
       sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
@@ -7562,12 +7898,20 @@
         sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
       } catch {}
     }
-    return mmxBuildRecentHistoryViewRows(sessions, 100);
+    return mmxBuildRecentHistoryViewRows(sessions, limit);
+    })();
+    mmxMobileHistoryFetchInflight.set(inflightKey, fetchPromise);
+    try {
+      return await fetchPromise;
+    } finally {
+      mmxMobileHistoryFetchInflight.delete(inflightKey);
+    }
   }
   async function mmxFetchMobileHistoryExactSessionViaReadOnlyWorker(instanceIdLike, slugLike, forceFresh = false){
     const instanceId = String(instanceIdLike || "").trim();
     const slug = String(slugLike || "").trim();
     if (!slug) return null;
+    if (mmxUseMobileAppShell() && mmxShouldUseIosLowLoadMode()) return null;
     if (instanceId) {
       const continuityParams = new URLSearchParams();
       continuityParams.set("includeTrace", "1");
@@ -7692,18 +8036,25 @@
     const ts = mmxRecentHistoryDisplayStartTs(rowLike);
     return Number.isFinite(ts) ? mmxFormatSessionCardTime(ts) : "";
   }
+  function mmxIsRecentHistoryListRowRenderable(rowLike){
+    const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+    if (!row) return false;
+    const slug = String(row?.slug || "").trim();
+    if (!slug) return false;
+    const looksCompleted =
+      !!row?.closed ||
+      !!row?.noTrade ||
+      mmxSessionLooksCompleted(row);
+    if (!looksCompleted) return false;
+    if (!mmxHistoryRowHasAuditBackedPnl(row)) return false;
+    if (!Number.isFinite(mmxRecentHistoryDisplayStartTs(row))) return false;
+    if (!Number.isFinite(mmxRecentHistoryDisplaySortTs(row))) return false;
+    if (!Number.isFinite(mmxRecentHistoryResolvedPnlUsd(row))) return false;
+    return true;
+  }
   function mmxBuildRecentHistoryViewRows(rowsLike, limit = 100){
     const sourceRows = Array.isArray(rowsLike) ? rowsLike : [];
-    const eligibleRows = sourceRows.filter((row) => {
-      const slug = String(row?.slug || "").trim();
-      if (!slug) return false;
-      if (!isSessionFinalizedForCard(row)) return false;
-      if (!mmxHistoryRowHasAuditBackedPnl(row)) return false;
-      if (!Number.isFinite(mmxRecentHistoryDisplayStartTs(row))) return false;
-      if (!Number.isFinite(mmxRecentHistoryDisplaySortTs(row))) return false;
-      if (!Number.isFinite(mmxRecentHistoryResolvedPnlUsd(row))) return false;
-      return true;
-    });
+    const eligibleRows = sourceRows.filter((row) => mmxIsRecentHistoryListRowRenderable(row));
     const rowsAsc = eligibleRows
       .slice()
       .sort((a, b) => mmxRecentHistoryDisplayStartTs(a) - mmxRecentHistoryDisplayStartTs(b));
@@ -7711,7 +8062,7 @@
     const displayBalanceBySlug = new Map();
     for (const row of rowsAsc) {
       const slug = String(row?.slug || "").trim();
-      const precomputedBalanceUsd = Number(row?.displayBalanceUsd ?? row?.balanceUsd);
+      const precomputedBalanceUsd = Number(row?.displayBalanceUsd);
       if (Number.isFinite(precomputedBalanceUsd)) {
         if (slug) displayBalanceBySlug.set(slug, Number(precomputedBalanceUsd.toFixed(4)));
         runningBalanceUsd = precomputedBalanceUsd;
@@ -7742,6 +8093,100 @@
           && Number.isFinite(Number(row?._balanceUsd));
       });
   }
+  function mmxSetLatestRecentHistorySummaryRows(rowsLike){
+    const rows = Array.isArray(rowsLike) ? rowsLike.slice() : [];
+    mmxLatestRecentHistorySummaryRows = rows;
+    return rows;
+  }
+  function mmxSetLatestRecentHistorySourceRows(rowsLike){
+    const rows = Array.isArray(rowsLike) ? rowsLike.slice() : [];
+    mmxLatestRecentHistorySourceRows = rows;
+    return rows;
+  }
+  function mmxRecentHistoryStorageKey(instanceIdLike = "", marketPrefixLike = "", runNumLike = null, runIdLike = null){
+    const instanceId = String(instanceIdLike || "global").trim() || "global";
+    const marketPrefix = String(marketPrefixLike || "all").trim().toLowerCase() || "all";
+    const runNum = Number(runNumLike);
+    const runId = String(runIdLike || "").trim() || "norunid";
+    const runScope = Number.isFinite(runNum) && runNum > 0 ? `run_${Math.floor(runNum)}` : runId;
+    return `mmx:recent-history:v2:${instanceId}:${marketPrefix}:${runScope}`;
+  }
+  function mmxShouldBypassMobileHistoryOverlayCache(){
+    return mmxShouldUseIosLowLoadMode();
+  }
+  function mmxMobileHistoryOverlayPayloadPending(payloadLike){
+    const payload = payloadLike && typeof payloadLike === "object" ? payloadLike : null;
+    if (!payload) return false;
+    if (String(payload?.wantedInstance || "").trim()) return false;
+    const key = String(payload?.key || "").trim().toLowerCase();
+    return key.startsWith("pending|");
+  }
+  function mmxSchedulePendingMobileHistoryOverlayRetry(delayMs = 900){
+    if (!mmxUseMobileAppShell()) return;
+    try {
+      if (mmxMobileHistoryOverlayPendingRetryTimer) clearTimeout(mmxMobileHistoryOverlayPendingRetryTimer);
+    } catch {}
+    mmxMobileHistoryOverlayPendingRetryTimer = setTimeout(() => {
+      mmxMobileHistoryOverlayPendingRetryTimer = null;
+      if (!mmxMobileHistorySheetOpen) return;
+      void mmxRenderMobileHistorySheetFromPayload({ forceFresh: true });
+    }, Math.max(150, Number(delayMs) || 900));
+    mmxMobileBootTimers.push(mmxMobileHistoryOverlayPendingRetryTimer);
+  }
+  function mmxNotifyMobileHistoryInstanceReady(reason = "instance_ready"){
+    if (!mmxUseMobileAppShell()) return;
+    const wantedInstance = String(
+      historyFocusedInstanceId ||
+      mmxState?.selectedInstanceId ||
+      activeHistoryFallbackInstanceId() ||
+      ""
+    ).trim();
+    if (!wantedInstance) return;
+    mmxMobileHistoryOverlayWarmDone = false;
+    if (mmxMobileHistorySheetOpen) {
+      void mmxRenderMobileHistorySheetFromPayload({ forceFresh: true });
+      return;
+    }
+    mmxScheduleMobileHistoryOverlayWarmup(0);
+  }
+  function mmxAdoptMobileHistoryWantedInstance(payloadLike, reason = "history_payload"){
+    if (!mmxUseMobileAppShell()) return "";
+    const payload = payloadLike && typeof payloadLike === "object" ? payloadLike : null;
+    const wantedInstance = String(payload?.wantedInstance || "").trim();
+    if (!wantedInstance) return "";
+    if (!String(mmxState?.selectedInstanceId || "").trim()) {
+      mmxState.selectedInstanceId = wantedInstance;
+    }
+    if (!String(historyFocusedInstanceId || "").trim()) {
+      historyFocusedInstanceId = wantedInstance;
+    }
+    if (!mmxState.focusPinned && String(mmxState?.selectedInstanceId || "").trim()) {
+      mmxState.focusPinned = true;
+    }
+    return wantedInstance;
+  }
+  function mmxReadRecentHistoryRowsFromStorage(instanceIdLike = "", marketPrefixLike = "", runNumLike = null, runIdLike = null){
+    try {
+      const raw = localStorage.getItem(mmxRecentHistoryStorageKey(instanceIdLike, marketPrefixLike, runNumLike, runIdLike));
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed)
+        ? parsed.filter((row) => row && typeof row === "object").slice(0, MMX_RECENT_HISTORY_SUMMARY_MAX_ROWS)
+        : [];
+    } catch {
+      return [];
+    }
+  }
+  function mmxWriteRecentHistoryRowsToStorage(instanceIdLike = "", marketPrefixLike = "", runNumLike = null, runIdLike = null, rowsLike = null){
+    try {
+      const rows = Array.isArray(rowsLike) ? rowsLike.filter((row) => row && typeof row === "object").slice(0, MMX_RECENT_HISTORY_SUMMARY_MAX_ROWS) : [];
+      if (!rows.length) return;
+      localStorage.setItem(
+        mmxRecentHistoryStorageKey(instanceIdLike, marketPrefixLike, runNumLike, runIdLike),
+        JSON.stringify(rows)
+      );
+    } catch {}
+  }
   function mmxMobileHistoryOverlayUsd(valueLike){
     const value = Number(valueLike);
     if (!Number.isFinite(value)) return "—";
@@ -7752,7 +8197,7 @@
     const slug = String(slugLike || row?.slug || "").trim();
     const timeText = mmxMobileHistoryOverlayFormatTime(row);
     const pnlValue = mmxMobileHistoryOverlayResolvedPnlUsd(row);
-    const balValue = Number(row?.balanceUsd ?? row?.continuityBalanceUsd);
+    const balValue = Number(row?.displayBalanceUsd ?? row?._balanceUsd ?? row?.balanceUsd ?? row?.continuityBalanceUsd);
     return {
       slug,
       timeText,
@@ -8044,8 +8489,18 @@
   function mmxBuildMobileHistoryOverlayViewRows(rowsLike, limit = 100){
     return mmxBuildRecentHistoryViewRows(rowsLike, limit);
   }
+  function mmxRecentHistorySummaryRows(rowsLike){
+    const sourceRows = Array.isArray(rowsLike) ? rowsLike : [];
+    const alreadyNormalized = sourceRows.every((row) => {
+      return row && typeof row === "object"
+        && Number.isFinite(Number(row?._balanceUsd))
+        && Number.isFinite(Number(row?._pnlUsd));
+    });
+    if (alreadyNormalized) return sourceRows.slice();
+    return mmxBuildRecentHistoryViewRows(sourceRows, MMX_RECENT_HISTORY_SUMMARY_MAX_ROWS);
+  }
   function mmxComputeMobileStickySummaryFromHistoryRows(rowsLike){
-    const viewRows = mmxBuildMobileHistoryOverlayViewRows(rowsLike, 100);
+    const viewRows = mmxRecentHistorySummaryRows(rowsLike);
     if (!viewRows.length) return null;
     const rowsAsc = viewRows
       .slice()
@@ -8085,6 +8540,21 @@
       maxDdTone: Number.isFinite(maxDdUsd) ? (maxDdUsd > 0 ? "neg" : "neu") : "neu",
     };
   }
+  function mmxCurrentRecentHistorySummaryModel(){
+    if (Array.isArray(mmxLatestRecentHistorySourceRows) && mmxLatestRecentHistorySourceRows.length) {
+      return mmxComputeMobileStickySummaryFromHistoryRows(mmxLatestRecentHistorySourceRows);
+    }
+    if (Array.isArray(mmxLatestRecentHistorySummaryRows) && mmxLatestRecentHistorySummaryRows.length) {
+      return mmxComputeMobileStickySummaryFromHistoryRows(mmxLatestRecentHistorySummaryRows);
+    }
+    return null;
+  }
+  function mmxCurrentRunHistorySummaryModelStrict(){
+    if (Array.isArray(mmxLatestRecentHistorySourceRows) && mmxLatestRecentHistorySourceRows.length) {
+      return mmxComputeMobileStickySummaryFromHistoryRows(mmxLatestRecentHistorySourceRows);
+    }
+    return null;
+  }
   function mmxCurrentMobileHistorySummaryModel(){
     if (
       Array.isArray(mmxLastRenderedMobileHistoryOverlayViewRows) &&
@@ -8116,18 +8586,75 @@
     try { renderTestSummaryPanel(botLike || null); } catch {}
     try { mmxSyncMobileStickyShell(); } catch {}
   }
+  function mmxRecentHistoryRunLedgerHref(instanceIdLike = "", marketPrefixLike = ""){
+    const focusedBot = (typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null;
+    const instanceId = String(
+      instanceIdLike ||
+      focusedBot?.instanceId ||
+      mmxState?.selectedInstanceId ||
+      historyFocusedInstanceId ||
+      activeHistoryFallbackInstanceId() ||
+      ""
+    ).trim();
+    if (!instanceId) return "";
+    const marketPrefix = String(
+      marketPrefixLike ||
+      sessionSlugBase(String(focusedBot?.marketSlug || currentSlug || focusedMarketSlug || "").trim().toLowerCase()) ||
+      ""
+    ).trim();
+    const params = new URLSearchParams();
+    params.set("includeTrace", "0");
+    params.set("maxSessions", "100");
+    if (marketPrefix) params.set("marketPrefix", marketPrefix);
+    return mmxDirectReadOnlyApiUrl(`/api/v2/bots/${encodeURIComponent(instanceId)}/continuity-history?${params.toString()}`);
+  }
+  function mmxRecentHistoryTitleHtml(instanceIdLike = "", marketPrefixLike = "", labelLike = "Last 100 Sessions"){
+    const label = String(labelLike || "Last 100 Sessions").trim() || "Last 100 Sessions";
+    const href = String(mmxRecentHistoryRunLedgerHref(instanceIdLike, marketPrefixLike) || "").trim();
+    if (!href) return `<div class="sessCompactPnlTitle">${mmxCompareEsc(label)}</div>`;
+    return `<div class="sessCompactPnlTitle"><a class="sessCompactPnlTitleLink" href="${mmxCompareEsc(href)}" target="_blank" rel="noopener noreferrer">${mmxCompareEsc(label)}</a></div>`;
+  }
+  function mmxRecentHistorySessionAuditHref(rowLike){
+    const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+    const explicitHref = String(row?.sessionAuditPath || row?.sessionAuditHref || "").trim();
+    if (explicitHref) return explicitHref;
+    const slug = String(row?.slug || "").trim();
+    if (!slug) return "";
+    const focusedBot = (typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null;
+    const runLike = {
+      runNum: Number(row?.runNum ?? focusedBot?.runNum ?? PINNED_RUN_ID ?? NaN),
+      runId: String(row?.runIdText || row?.runId || focusedBot?.runId || PINNED_RUN_ID || "").trim(),
+      startedAtMs: Number(row?.startedAtMs ?? row?.launchedAtMs ?? focusedBot?.launchedAtMs ?? NaN),
+    };
+    return String(historySessionAuditCandidatesForSlug(slug, runLike)[0] || "").trim();
+  }
   function mmxRenderMobileHistoryOverlayList(rowsLike, opts = {}){
     const rows = Array.isArray(rowsLike) ? rowsLike : [];
     const cacheKey = String(opts?.cacheKey || "").trim();
+    const focusedBot = (typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null;
+    const titleInstanceId = String(
+      opts?.instanceId ||
+      focusedBot?.instanceId ||
+      mmxState?.selectedInstanceId ||
+      historyFocusedInstanceId ||
+      activeHistoryFallbackInstanceId() ||
+      ""
+    ).trim();
+    const titleMarketPrefix = String(
+      opts?.marketPrefix ||
+      sessionSlugBase(String(focusedBot?.marketSlug || currentSlug || focusedMarketSlug || "").trim().toLowerCase()) ||
+      ""
+    ).trim();
     if (!rows.length) {
       if (cacheKey) {
         mmxLastRenderedMobileHistoryOverlayCacheKey = cacheKey;
         mmxLastRenderedMobileHistoryOverlayViewRows = [];
       }
+      mmxSetLatestRecentHistorySummaryRows([]);
       return `
         <div class="sessCompactPnlWrap" data-history-summary-panel="1">
           <div class="sessCompactPnlHead">
-            <div class="sessCompactPnlTitle">Last 100 Sessions</div>
+            ${mmxRecentHistoryTitleHtml(titleInstanceId, titleMarketPrefix)}
           </div>
           <div class="sessCompactPnlEmpty">No recent session history available.</div>
         </div>
@@ -8138,10 +8665,11 @@
       mmxLastRenderedMobileHistoryOverlayCacheKey = cacheKey;
       mmxLastRenderedMobileHistoryOverlayViewRows = viewRows.slice();
     }
+    mmxSetLatestRecentHistorySummaryRows(viewRows);
     return `
       <div class="sessCompactPnlWrap" data-history-summary-panel="1">
         <div class="sessCompactPnlHead">
-          <div class="sessCompactPnlTitle">Last 100 Sessions</div>
+          ${mmxRecentHistoryTitleHtml(titleInstanceId, titleMarketPrefix)}
         </div>
         <div class="sessCompactPnlTableWrap">
           <table class="sessCompactPnlTable">
@@ -8155,11 +8683,68 @@
             <tbody>
               ${viewRows.map((row) => `
                 <tr data-mobile-history-slug="${mmxCompareEsc(String(row?.slug || "").trim())}"${String(row?.slug || "").trim() === String(historySelectedSessionSlug || "").trim() ? ` class="mobileHistoryRowActive"` : ""}>
-                  <td><div class="sessCompactPnlSlug">${mmxCompareEsc(String(row?._timeText || mmxMobileHistoryOverlayFormatTime(row)))}</div></td>
+                  <td><div class="sessCompactPnlSlug">${(() => {
+                    const sessionAuditHref = String(mmxRecentHistorySessionAuditHref(row) || "").trim();
+                    const timeLabel = String(row?._timeText || mmxMobileHistoryOverlayFormatTime(row)).trim();
+                    return sessionAuditHref
+                      ? `<a class="sessCompactPnlSlugLink" href="${mmxCompareEsc(sessionAuditHref)}" target="_blank" rel="noopener noreferrer">${mmxCompareEsc(timeLabel)}</a>`
+                      : mmxCompareEsc(timeLabel);
+                  })()}</div></td>
                   <td><span class="sessCompactPnlVal ${mmxMobileHistoryOverlayToneClass(row?._pnlUsd)}">${mmxCompareEsc(mmxMobileHistoryOverlayUsd(row?._pnlUsd))}</span></td>
                   <td><span class="sessCompactPnlVal ${mmxMobileHistoryOverlayToneClass(row?._balanceUsd)}">${mmxCompareEsc(mmxMobileHistoryOverlayUsd(row?._balanceUsd))}</span></td>
                 </tr>
               `).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+  function mmxRecentHistoryStandaloneTableHtml(rowsLike, instanceIdLike = "", marketPrefixLike = ""){
+    const rows = Array.isArray(rowsLike) ? rowsLike.slice(0, 100) : [];
+    const usd = (value) => {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return "—";
+      const sign = n > 0 ? "+" : (n < 0 ? "-" : "");
+      return `${sign}$${Math.abs(n).toFixed(2)}`;
+    };
+    const tone = (value) => {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return "neu";
+      return n > 0 ? "pos" : (n < 0 ? "neg" : "neu");
+    };
+    return `
+      <div class="sessCompactPnlWrap" data-history-summary-panel="1" data-standalone-recent-sessions="1">
+        <div class="sessCompactPnlHead">
+          ${mmxRecentHistoryTitleHtml(instanceIdLike, marketPrefixLike)}
+        </div>
+        <div class="sessCompactPnlTableWrap">
+          <table class="sessCompactPnlTable">
+            <thead>
+              <tr>
+                <th>Session</th>
+                <th>Actual P/L</th>
+                <th>Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map((row) => {
+                const slug = String(row?.slug || "").trim();
+                const pnlUsd = Number(row?._pnlUsd);
+                const balance = Number(row?._balanceUsd);
+                const sessionAuditHref = String(mmxRecentHistorySessionAuditHref(row) || "").trim();
+                const timeLabel = String(row?._timeText || "").trim();
+                const timeHtml = sessionAuditHref
+                  ? `<a class="sessCompactPnlSlugLink" href="${mmxCompareEsc(sessionAuditHref)}" target="_blank" rel="noopener noreferrer">${mmxCompareEsc(timeLabel)}</a>`
+                  : mmxCompareEsc(timeLabel);
+                return `
+                  <tr data-history-session-slug="${mmxCompareEsc(slug)}">
+                    <td><div class="sessCompactPnlSlug">${timeHtml}</div></td>
+                    <td><span class="sessCompactPnlVal ${tone(pnlUsd)}">${usd(pnlUsd)}</span></td>
+                    <td><span class="sessCompactPnlVal ${tone(balance)}">${usd(balance)}</span></td>
+                  </tr>
+                `;
+              }).join("")}
             </tbody>
           </table>
         </div>
@@ -8323,17 +8908,55 @@
     if (!(history instanceof HTMLElement) || !(recent instanceof HTMLElement)) return false;
     const forceFresh = opts && typeof opts === "object" && opts.forceFresh === true;
     const payload = await mmxBuildMobileHistoryOverlayPayload("sheet_open", { forceFresh });
-    history.replaceChildren();
-    history.innerHTML = mmxRenderMobileHistoryHeroImage(payload, { message: "Session snapshot unavailable." });
-    if (Array.isArray(payload?.listRows) && payload.listRows.length) {
-      recent.replaceChildren();
-      recent.innerHTML = mmxRenderMobileHistoryOverlayList(payload.listRows, { cacheKey: String(payload?.key || "") });
-      try { mmxRefreshHistoryDrivenBalanceDisplays(); } catch {}
+    let listRows = Array.isArray(payload?.listRows) ? payload.listRows.slice() : [];
+    let listOnlyPayload = null;
+    let listOnlyPending = false;
+    if (!listRows.length && mmxUseMobileAppShell()) {
+      try {
+        listOnlyPayload = await mmxBuildMobileHistoryOverlayListOnly("sheet_open", { forceFresh: true });
+        listRows = Array.isArray(listOnlyPayload?.listRows) ? listOnlyPayload.listRows.slice() : [];
+        listOnlyPending = mmxMobileHistoryOverlayPayloadPending(listOnlyPayload);
+      } catch {}
     }
-    return !!(payload?.heroImageUrl || (Array.isArray(payload?.listRows) && payload.listRows.length));
+    const effectivePayload = (
+      listRows.length &&
+      listOnlyPayload &&
+      (!Array.isArray(payload?.listRows) || !payload.listRows.length)
+    )
+      ? {
+          ...payload,
+          key: String(listOnlyPayload?.key || payload?.key || "").trim(),
+          wantedInstance: String(listOnlyPayload?.wantedInstance || payload?.wantedInstance || "").trim(),
+          marketPrefix: String(listOnlyPayload?.marketPrefix || payload?.marketPrefix || "").trim(),
+          heroRow: listOnlyPayload?.heroRow || payload?.heroRow || listRows[0] || null,
+          heroSlug: String(listOnlyPayload?.heroSlug || payload?.heroSlug || listRows?.[0]?.slug || "").trim(),
+          heroImageUrl: String(listOnlyPayload?.heroImageUrl || payload?.heroImageUrl || "").trim(),
+          listRows: listRows.slice(),
+        }
+      : {
+          ...payload,
+          listRows: listRows.slice(),
+        };
+    mmxAdoptMobileHistoryWantedInstance(effectivePayload, "sheet_render_payload");
+    history.replaceChildren();
+    history.innerHTML = mmxRenderMobileHistoryHeroImage(effectivePayload, { message: "Session snapshot unavailable." });
+    if (listRows.length) {
+      recent.replaceChildren();
+      recent.innerHTML = mmxRenderMobileHistoryOverlayList(listRows, { cacheKey: String(effectivePayload?.key || "") });
+      try { mmxRefreshHistoryDrivenBalanceDisplays(); } catch {}
+    } else {
+      recent.replaceChildren();
+      recent.innerHTML = `<div class="sessCompactPnlWrap" data-history-summary-panel="1"><div class="sessCompactPnlHead">${mmxRecentHistoryTitleHtml()}</div><div class="sessCompactPnlEmpty">Loading recent session history...</div></div>`;
+      if (mmxUseMobileAppShell() && (mmxMobileHistoryOverlayPayloadPending(effectivePayload) || listOnlyPending)) {
+        mmxSchedulePendingMobileHistoryOverlayRetry(forceFresh ? 1200 : 700);
+      }
+    }
+    try { mmxSyncMobileHistoryReadableFallback(); } catch {}
+    return !!(effectivePayload?.heroImageUrl || listRows.length);
   }
   async function mmxBuildMobileHistoryOverlayPayload(reason = "sheet_open", opts = {}){
     const forceFresh = opts && typeof opts === "object" && opts.forceFresh === true;
+    const bypassLocalCache = mmxShouldBypassMobileHistoryOverlayCache();
     let focusedBot = (typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null;
     let wantedInstance = String(
       focusedBot?.instanceId ||
@@ -8350,10 +8973,7 @@
     ).trim().toLowerCase();
     if (!wantedInstance) {
       try {
-        const botsPayload = await mmxFetchMobileOverlayJsonViaWorker(
-          `/api/v2/bots?includeTrace=0&includeTruth=0&includeRecentTrades=0${forceFresh ? `&cb=${Date.now()}` : ""}`,
-          { timeoutMs: forceFresh ? 9000 : 5000 }
-        );
+        const botsPayload = await mmxFetchVisibleBotsShared({ forceFresh, timeoutMs: forceFresh ? 9000 : 5000 });
         const botItems = mmxFilterVisibleBots(Array.isArray(botsPayload?.items) ? botsPayload.items : []);
         const bootBot = botItems[0] || null;
         if (bootBot) {
@@ -8361,20 +8981,62 @@
           mmxState.selectedInstanceId = String(bootBot?.instanceId || "").trim();
           historyFocusedInstanceId = mmxState.selectedInstanceId || null;
           mmxState.focusPinned = !!mmxState.selectedInstanceId;
+          mmxNotifyMobileHistoryInstanceReady("overlay_payload_boot_bot");
           focusedBot = bootBot;
           wantedInstance = String(bootBot?.instanceId || "").trim();
           currentSlugText = String(bootBot?.marketSlug || focusedMarketSlug || currentSlug || "").trim().toLowerCase();
         }
       } catch {}
     }
+    if (mmxUseMobileAppShell() && !wantedInstance) {
+      return {
+        key: `pending|${String(currentSlugText || "").trim().toLowerCase() || "all"}`,
+        wantedInstance: "",
+        marketPrefix: currentSlugText ? sessionSlugBase(currentSlugText) : "",
+        heroRow: null,
+        heroSlug: "",
+        heroImageUrl: "",
+        listRows: [],
+      };
+    }
     const marketPrefix = currentSlugText ? sessionSlugBase(currentSlugText) : "";
     const cacheKey = `${wantedInstance || "global"}|${marketPrefix || "all"}`;
     const cached = mmxMobileHistoryOverlayCache.get(cacheKey);
-    if (!forceFresh && cached?.heroImageUrl && Array.isArray(cached?.listRows) && cached.listRows.length) {
+    const expectedRowFloor = Math.max(1, Math.min(100, MMX_RECENT_HISTORY_SUMMARY_MAX_ROWS));
+    const storageRows = mmxReadRecentHistoryRowsFromStorage(
+      wantedInstance,
+      marketPrefix,
+      focusedBot?.runNum,
+      focusedBot?.runId
+    );
+    if (
+      !forceFresh &&
+      !bypassLocalCache &&
+      cached?.heroImageUrl &&
+      Array.isArray(cached?.listRows) &&
+      cached.listRows.length >= expectedRowFloor
+    ) {
       return cached;
     }
+    if (!forceFresh && !bypassLocalCache && Array.isArray(storageRows) && storageRows.length >= expectedRowFloor) {
+      const storageHeroSlug = String(storageRows?.[0]?.slug || "").trim();
+      return {
+        key: cacheKey,
+        wantedInstance,
+        marketPrefix,
+        heroRow: storageRows[0] || null,
+        heroSlug: storageHeroSlug,
+        heroImageUrl: storageHeroSlug ? mmxMobileHistoryHeroImageUrl(storageHeroSlug, { forceFresh: false }) : "",
+        listRows: storageRows.slice(0, 100),
+      };
+    }
     const listRows = await (async () => {
-      return await mmxFetchMobileHistorySessionsViaReadOnlyWorker(wantedInstance, marketPrefix, forceFresh);
+      return await mmxFetchMobileHistorySessionsViaReadOnlyWorker(
+        wantedInstance,
+        marketPrefix,
+        forceFresh,
+        MMX_MOBILE_HISTORY_OVERLAY_MAX_ROWS
+      );
     })();
     const filteredRows = listRows
       .filter((row) => {
@@ -8392,6 +9054,7 @@
         const tb = Number(b?.exitTsMs ?? b?.endMs ?? b?.entryTsMs ?? b?.attemptTsMs ?? b?.startMs ?? 0);
         return tb - ta;
       });
+    mmxSetLatestRecentHistorySourceRows(filteredRows);
     const heroMeta = mmxResolveMobileHistoryHeroMeta(filteredRows, { forceFresh, instanceId: wantedInstance, marketPrefix });
     let heroRow = heroMeta.heroRow;
     if (heroRow && !mmxMobileHistoryRowHasTraceVisual(heroRow)) {
@@ -8402,7 +9065,7 @@
         }
       } catch {}
     }
-    const displayRows = filteredRows.slice(0, 100);
+    const displayRows = filteredRows.slice(0, MMX_MOBILE_HISTORY_OVERLAY_MAX_ROWS);
     const next = {
       key: cacheKey,
       wantedInstance,
@@ -8417,10 +9080,14 @@
     if (heroMeta.heroImageUrl || displayRows.length) {
       mmxMobileHistoryOverlayCache.set(cacheKey, next);
     }
+    if (displayRows.length) {
+      mmxWriteRecentHistoryRowsToStorage(wantedInstance, marketPrefix, focusedBot?.runNum, focusedBot?.runId, displayRows);
+    }
     return next;
   }
   async function mmxBuildMobileHistoryOverlayListOnly(reason = "sheet_open", opts = {}){
     const forceFresh = opts && typeof opts === "object" && opts.forceFresh === true;
+    const bypassLocalCache = mmxShouldBypassMobileHistoryOverlayCache();
     let focusedBot = (typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null;
     let wantedInstance = String(
       focusedBot?.instanceId ||
@@ -8437,10 +9104,7 @@
     ).trim().toLowerCase();
     if (!wantedInstance) {
       try {
-        const botsPayload = await mmxFetchMobileOverlayJsonViaWorker(
-          `/api/v2/bots?includeTrace=0&includeTruth=0&includeRecentTrades=0${forceFresh ? `&cb=${Date.now()}` : ""}`,
-          { timeoutMs: forceFresh ? 9000 : 5000 }
-        );
+        const botsPayload = await mmxFetchVisibleBotsShared({ forceFresh, timeoutMs: forceFresh ? 9000 : 5000 });
         const botItems = mmxFilterVisibleBots(Array.isArray(botsPayload?.items) ? botsPayload.items : []);
         const bootBot = botItems[0] || null;
         if (bootBot) {
@@ -8448,16 +9112,29 @@
           mmxState.selectedInstanceId = String(bootBot?.instanceId || "").trim();
           historyFocusedInstanceId = mmxState.selectedInstanceId || null;
           mmxState.focusPinned = !!mmxState.selectedInstanceId;
+          mmxNotifyMobileHistoryInstanceReady("overlay_list_boot_bot");
           focusedBot = bootBot;
           wantedInstance = String(bootBot?.instanceId || "").trim();
           currentSlugText = String(bootBot?.marketSlug || focusedMarketSlug || currentSlug || "").trim().toLowerCase();
         }
       } catch {}
     }
+    if (mmxUseMobileAppShell() && !wantedInstance) {
+      return {
+        key: `pending|${String(currentSlugText || "").trim().toLowerCase() || "all"}`,
+        wantedInstance: "",
+        marketPrefix: currentSlugText ? sessionSlugBase(currentSlugText) : "",
+        heroRow: null,
+        heroSlug: "",
+        heroImageUrl: "",
+        listRows: [],
+      };
+    }
     const marketPrefix = currentSlugText ? sessionSlugBase(currentSlugText) : "";
     const cacheKey = `${wantedInstance || "global"}|${marketPrefix || "all"}`;
     const cached = mmxMobileHistoryOverlayCache.get(cacheKey);
-    if (!forceFresh && Array.isArray(cached?.listRows) && cached.listRows.length) {
+    const expectedRowFloor = Math.max(1, Math.min(100, MMX_RECENT_HISTORY_SUMMARY_MAX_ROWS));
+    if (!forceFresh && !bypassLocalCache && Array.isArray(cached?.listRows) && cached.listRows.length >= expectedRowFloor) {
       return {
         key: cacheKey,
         wantedInstance,
@@ -8468,7 +9145,12 @@
         listRows: cached.listRows.slice(),
       };
     }
-    const listRows = (await mmxFetchMobileHistorySessionsViaReadOnlyWorker(wantedInstance, marketPrefix, forceFresh))
+    const listRows = (await mmxFetchMobileHistorySessionsViaReadOnlyWorker(
+      wantedInstance,
+      marketPrefix,
+      forceFresh,
+      MMX_MOBILE_HISTORY_OVERLAY_MAX_ROWS
+    ))
       .filter((row) => {
         const slug = String(row?.slug || "").trim().toLowerCase();
         if (!slug) return false;
@@ -8484,7 +9166,8 @@
         const tb = Number(b?.exitTsMs ?? b?.endMs ?? b?.entryTsMs ?? b?.attemptTsMs ?? b?.startMs ?? 0);
         return tb - ta;
       })
-      .slice(0, 100);
+      .slice(0, MMX_MOBILE_HISTORY_OVERLAY_MAX_ROWS);
+    mmxSetLatestRecentHistorySourceRows(listRows);
     const heroMeta = mmxResolveMobileHistoryHeroMeta(listRows, { forceFresh, instanceId: wantedInstance, marketPrefix });
     return {
       key: cacheKey,
@@ -8496,8 +9179,50 @@
       listRows,
     };
   }
-  function mmxScheduleMobileHistoryOverlayWarmup(delayMs = MMX_MOBILE_HISTORY_OVERLAY_WARM_DELAY_MS){
-    return;
+  function mmxScheduleMobileHistoryOverlayWarmup(delayMs = MMX_MOBILE_HISTORY_OVERLAY_WARM_DELAY_MS, opts = {}){
+    if (!mmxUseMobileAppShell()) return;
+    if (mmxMobileHistoryOverlayWarmDone || mmxMobileHistoryOverlayWarmScheduled) return;
+    const forceFresh = opts && typeof opts === "object" && opts.forceFresh === true;
+    const resolvedDelayMs = mmxResolveMobileHistoryWarmDelayMs(delayMs);
+    mmxPrimeMobileHistoryWarmUi(forceFresh ? "force_fresh" : "warmup");
+    mmxMobileHistoryOverlayWarmScheduled = true;
+    const timer = setTimeout(() => {
+      mmxMobileHistoryOverlayWarmScheduled = false;
+      void mmxBuildMobileHistoryOverlayListOnly("warmup", { forceFresh }).then((payload) => {
+        const adoptedInstance = mmxAdoptMobileHistoryWantedInstance(payload, "warmup_payload");
+        const listRows = Array.isArray(payload?.listRows) ? payload.listRows : [];
+        const hasWantedInstance = !!String(adoptedInstance || payload?.wantedInstance || "").trim();
+        let renderedRows = 0;
+        const recent = $("historyRecentSessionsMount");
+        if (hasWantedInstance && listRows.length >= MMX_MOBILE_HISTORY_OVERLAY_MAX_ROWS && recent instanceof HTMLElement) {
+          try {
+            recent.innerHTML = mmxRenderMobileHistoryOverlayList(listRows, { cacheKey: String(payload?.key || "") });
+            renderedRows = recent.querySelectorAll("tbody tr").length;
+          } catch {}
+        }
+        const selectedInstanceMatches =
+          hasWantedInstance &&
+          String(mmxState?.selectedInstanceId || "").trim() === String(adoptedInstance || payload?.wantedInstance || "").trim() &&
+          String(historyFocusedInstanceId || "").trim() === String(adoptedInstance || payload?.wantedInstance || "").trim();
+        mmxMobileHistoryOverlayWarmDone =
+          selectedInstanceMatches &&
+          listRows.length >= MMX_MOBILE_HISTORY_OVERLAY_MAX_ROWS &&
+          renderedRows >= 1;
+        if (
+          mmxMobileHistoryOverlayWarmDone &&
+          mmxUseMobileAppShell() &&
+          !mmxMobileHistorySheetOpen &&
+          !mmxMobileHistorySheetAutoOpened
+        ) {
+          mmxMobileHistorySheetAutoOpened = true;
+          mmxSetMobileHistorySheetOpen(true);
+        }
+        if (!mmxMobileHistoryOverlayWarmDone) {
+          mmxScheduleMobileHistoryOverlayWarmup(900, { forceFresh: true });
+        }
+      }).catch(() => {});
+    }, resolvedDelayMs);
+    mmxMobileBootTimers.push(timer);
   }
   async function mmxPopulateMobileHistoryOverlay(reason = "startup", opts = {}){
     if (!mmxUseMobileAppShell()) return false;
@@ -8512,13 +9237,13 @@
         history.replaceChildren();
         history.innerHTML = mmxRenderMobileHistoryHeroImage({}, { loading: true });
         recent.replaceChildren();
-        recent.innerHTML = `<div class="sessCompactPnlWrap" data-history-summary-panel="1"><div class="sessCompactPnlHead"><div class="sessCompactPnlTitle">Last 100 Sessions</div></div><div class="sessCompactPnlEmpty">Loading recent session history...</div></div>`;
+        recent.innerHTML = `<div class="sessCompactPnlWrap" data-history-summary-panel="1"><div class="sessCompactPnlHead">${mmxRecentHistoryTitleHtml()}</div><div class="sessCompactPnlEmpty">Loading recent session history...</div></div>`;
         const ok = await mmxRenderMobileHistorySheetFromPayload({ forceFresh: opts?.forceFresh === true });
         mmxMobileHistoryOverlayWarmDone = ok;
         return ok;
       } catch (err) {
         recent.replaceChildren();
-        recent.innerHTML = `<div class="sessCompactPnlWrap" data-history-summary-panel="1"><div class="sessCompactPnlHead"><div class="sessCompactPnlTitle">Last 100 Sessions</div></div><div class="sessCompactPnlEmpty">History overlay unavailable.</div></div>`;
+        recent.innerHTML = `<div class="sessCompactPnlWrap" data-history-summary-panel="1"><div class="sessCompactPnlHead">${mmxRecentHistoryTitleHtml()}</div><div class="sessCompactPnlEmpty">History overlay unavailable.</div></div>`;
         history.replaceChildren();
         history.innerHTML = mmxRenderMobileHistoryHeroImage({}, { message: "Session snapshot unavailable." });
         try { console.warn("[MOBILE HISTORY] populate failed", String(err?.message || err || "unknown")); } catch {}
@@ -8645,6 +9370,11 @@
   }
   function mmxMarkBootMinimalReady(){
     mmxBootMinimalReady = true;
+    if (mmxIsMobileViewport() && mmxUseMobileAppShell()) {
+      try { mmxEnsureMobileEquityShelfMounted("boot_minimal_ready"); } catch {}
+      try { renderEquityCurve(); } catch {}
+      mmxScheduleMobileHistoryOverlayWarmup(0, { forceFresh: true });
+    }
     if (!mmxIsMobileViewport()) {
       try { mmxEnsureRunEquityHydrated("boot-minimal-ready", false); } catch {}
     }
@@ -8680,7 +9410,10 @@
             );
           }
           historyFocusedInstanceId = String(mmxState.selectedInstanceId || "") || null;
+          mmxNotifyMobileHistoryInstanceReady("secondary_boot_selection_ready");
           mmxState.focusPinned = !!mmxState.selectedInstanceId;
+          mmxPrimeMobileHistoryWarmUi("secondary_boot_selection_ready");
+          mmxScheduleMobileHistoryOverlayWarmup(0, { forceFresh: true });
           try { mmxRenderMarketRail(); } catch {}
           if (mmxState.focusPinned) {
             try { mmxApplyFocusedMarketToMain(); } catch {}
@@ -8704,10 +9437,7 @@
             return;
           }
           try {
-            const botsPayload = await mmxFetchMobileOverlayJsonViaWorker(
-              `/api/v2/bots?includeTrace=0&includeTruth=0&includeRecentTrades=0&cb=${Date.now()}`,
-              { timeoutMs: 2000 }
-            );
+            const botsPayload = await mmxFetchVisibleBotsShared({ forceFresh: true, timeoutMs: 2000 });
             ensureFocusedBotSelected(Array.isArray(botsPayload?.items) ? botsPayload.items : []);
           } catch {}
         }
@@ -8763,7 +9493,7 @@
     if (!mmxIsMobileViewport()) return;
     if (MMX_MOBILE_BOOT_STAGES.indexOf(mmxMobileBootStage) < MMX_MOBILE_BOOT_STAGES.indexOf("values")) return;
     mmxSetMobileBootStage("overlay");
-    mmxScheduleMobileHistoryOverlayWarmup();
+    mmxScheduleMobileHistoryOverlayWarmup(0, { forceFresh: true });
   }
   function mmxStickyTopOffsetPx(){
     const safeTop = (() => {
@@ -9008,6 +9738,7 @@
   let mmxMobileStickyWorkerSeedInflight = null;
   let mmxMobileStickyWorkerSeedDone = false;
   let mmxMobileStickyMirrorRetryScheduled = false;
+  let mmxLastMobileStickyStopSecond = null;
   let mmxMobileStickySummaryObserver = null;
   let mmxMobileStickyPostBootRefreshDone = false;
   let mmxLastMobileStickyMeasuredHeightPx = -1;
@@ -9075,6 +9806,7 @@
   function mmxComputeMobileStickySummaryModel(summaryLike = null){
     const summary = summaryLike && typeof summaryLike === "object" ? summaryLike : {};
     const historyModel = mmxCurrentMobileHistorySummaryModel();
+    const directRunHistoryModel = mmxCurrentRunHistorySummaryModelStrict();
     const cpuPct = Number(lastBackendCpuPct);
     return {
       ...summary,
@@ -9082,8 +9814,8 @@
       balanceTone: String(historyModel?.balanceTone || summary?.balanceTone || "neu").trim() || "neu",
       perHourText: String(summary?.perHourText || historyModel?.perHourText || "").trim() || "—",
       perHourTone: String(summary?.perHourTone || historyModel?.perHourTone || "neu").trim() || "neu",
-      maxDdText: String(historyModel?.maxDdText || summary?.maxDdText || "").trim() || "—",
-      maxDdTone: String(historyModel?.maxDdTone || summary?.maxDdTone || "neu").trim() || "neu",
+      maxDdText: String(directRunHistoryModel?.maxDdText || "").trim() || "—",
+      maxDdTone: String(directRunHistoryModel?.maxDdTone || "neu").trim() || "neu",
       cpuText: Number.isFinite(cpuPct) && cpuPct >= 0 ? `${cpuPct.toFixed(1)}%` : "—",
       cpuTone: "neu",
       cpuSeverity: mmxCpuSeverityFromPct(cpuPct),
@@ -9091,7 +9823,7 @@
   }
   function mmxResolvedSummaryBalanceModel(summaryLike = null, botLike = null){
     const summary = summaryLike && typeof summaryLike === "object" ? summaryLike : {};
-    const historyModel = mmxCurrentMobileHistorySummaryModel();
+    const historyModel = mmxCurrentRecentHistorySummaryModel();
     if (historyModel?.balanceText) {
       return {
         text: String(historyModel.balanceText || "").trim() || "$—",
@@ -9107,6 +9839,28 @@
       tone = balanceUsd > startBal ? "pos" : (balanceUsd < startBal ? "neg" : "neu");
     }
     return { text: balanceText, tone };
+  }
+  function mmxParseUsdTextValue(textLike){
+    const text = String(textLike || "").replace(/[^0-9.+-]/g, "");
+    const n = Number(text);
+    return Number.isFinite(n) ? n : NaN;
+  }
+  function mmxResolvedRecentHistorySummaryModel(summaryLike = null){
+    const summary = summaryLike && typeof summaryLike === "object" ? summaryLike : {};
+    const historyModel = mmxCurrentRecentHistorySummaryModel();
+    if (!historyModel || typeof historyModel !== "object") return summary;
+    return {
+      ...summary,
+      balanceText: String(historyModel?.balanceText || summary?.balanceText || "").trim() || "$—",
+      balanceTone: String(historyModel?.balanceTone || summary?.balanceTone || "neu").trim() || "neu",
+      perHourText: String(historyModel?.perHourText || summary?.perHourText || "").trim() || "—",
+      perHourTone: String(historyModel?.perHourTone || summary?.perHourTone || "neu").trim() || "neu",
+      maxDdText: String(historyModel?.maxDdText || summary?.maxDdText || "").trim() || "—",
+      maxDdTone: String(historyModel?.maxDdTone || summary?.maxDdTone || "neu").trim() || "neu",
+    };
+  }
+  function mmxHasAuthoritativeRecentHistorySummary(){
+    return !!(mmxCurrentRecentHistorySummaryModel()?.balanceText);
   }
   function mmxSummaryBalanceTargets(){
     return [$("testSummaryBalance"), $("mobileStickySummaryBalance")].filter((el) => el instanceof HTMLElement);
@@ -9342,6 +10096,7 @@
   }
   function mmxScheduleMobileStickyMirrorRetries(){
     if (!mmxIsMobileViewport()) return;
+    if (mmxShouldUseIosLowLoadMode()) return;
     if (mmxMobileStickyMirrorRetryScheduled) return;
     mmxMobileStickyMirrorRetryScheduled = true;
     const delays = [150, 500, 1200, 2500, 5000, 9000];
@@ -9354,6 +10109,7 @@
   }
   function mmxEnsureMobileStickySummaryObserver(){
     if (!mmxIsMobileViewport()) return;
+    if (mmxShouldUseIosLowLoadMode()) return;
     if (!mmxBootMinimalReady) return;
     if (!mmxMobileDeferredInteractiveReady()) return;
     if (mmxMobileStickySummaryObserver || typeof MutationObserver !== "function") return;
@@ -9398,10 +10154,7 @@
       let bot = ((typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null) || null;
       if (!bot) {
         try {
-          const botsPayload = await mmxFetchMobileOverlayJsonViaWorker(
-            `/api/v2/bots?includeTrace=0&includeTruth=0&includeRecentTrades=0&cb=${Date.now()}`,
-            { timeoutMs: 2000 }
-          );
+          const botsPayload = await mmxFetchVisibleBotsShared({ forceFresh: true, timeoutMs: 2000 });
           const botItems = mmxFilterVisibleBots(Array.isArray(botsPayload?.items) ? botsPayload.items : []);
           if (botItems.length) {
             mmxState.bots = botItems;
@@ -9415,7 +10168,10 @@
               );
             }
             historyFocusedInstanceId = String(mmxState.selectedInstanceId || "") || null;
+            mmxNotifyMobileHistoryInstanceReady("sticky_seed_selection_ready");
             mmxState.focusPinned = !!mmxState.selectedInstanceId;
+            mmxPrimeMobileHistoryWarmUi("sticky_seed_selection_ready");
+            mmxScheduleMobileHistoryOverlayWarmup(0, { forceFresh: true });
             if (mmxState.focusPinned) {
               try { mmxApplyFocusedMarketToMain(); } catch {}
             }
@@ -9462,12 +10218,39 @@
     mmxSyncMobileOverlayLayout();
     if (!opts?.skipStageUpdate) mmxUpdateMobileLiveStage();
   }
+  function mmxSyncMobileHistoryReadableFallback(){
+    const fallback = $("mobileHistoryReadableFallback");
+    if (!(fallback instanceof HTMLElement)) return;
+    const shouldShow =
+      mmxUseMobileAppShell() &&
+      mmxMobileHistorySheetOpen &&
+      mmxShouldUseIosLowLoadMode();
+    fallback.hidden = !shouldShow;
+    fallback.setAttribute("aria-hidden", shouldShow ? "false" : "true");
+    if (!shouldShow) {
+      fallback.replaceChildren();
+      return;
+    }
+    const recent = $("historyRecentSessionsMount");
+    const recentHtml = recent instanceof HTMLElement ? String(recent.innerHTML || "").trim() : "";
+    fallback.innerHTML = `
+      <button id="mobileHistoryReadableFallbackClose" class="mobileHistoryReadableFallbackClose" type="button" aria-label="Hide historical sessions">▾</button>
+      ${recentHtml || `<div class="sessCompactPnlWrap" data-history-summary-panel="1"><div class="sessCompactPnlHead">${mmxRecentHistoryTitleHtml()}</div><div class="sessCompactPnlEmpty">Loading recent session history...</div></div>`}
+    `;
+    const closeBtn = $("mobileHistoryReadableFallbackClose");
+    if (closeBtn instanceof HTMLElement) {
+      closeBtn.onclick = () => mmxSetMobileHistorySheetOpen(false);
+    }
+  }
   function mmxSetMobileHistorySheetOpen(open){
     mmxMobileHistorySheetOpen = !!open;
     document.body.classList.toggle("mobileHistorySheetOpen", mmxMobileHistorySheetOpen);
     const sheet = $("mobileHistorySheet");
     const btn = $("mobileHistorySheetToggle");
-    if (sheet instanceof HTMLElement) sheet.setAttribute("aria-hidden", mmxMobileHistorySheetOpen ? "false" : "true");
+    if (sheet instanceof HTMLElement) {
+      sheet.hidden = !mmxMobileHistorySheetOpen;
+      sheet.setAttribute("aria-hidden", mmxMobileHistorySheetOpen ? "false" : "true");
+    }
     if (btn instanceof HTMLElement) {
       btn.textContent = mmxMobileHistorySheetOpen ? "▾" : "▴";
       btn.setAttribute("aria-expanded", mmxMobileHistorySheetOpen ? "true" : "false");
@@ -9476,15 +10259,17 @@
     if (!mmxMobileHistorySheetOpen) {
       try { mmxSetMobileHistoryHeroViewerOpen(false); } catch {}
     }
+    try { mmxSyncMobileHistoryReadableFallback(); } catch {}
     if (mmxMobileHistorySheetOpen && mmxUseMobileAppShell()) {
       setTimeout(() => {
         if (!mmxMobileHistorySheetOpen) return;
         void mmxRenderMobileHistorySheetFromPayload({ forceFresh: false });
       }, 250);
+      const retryDelayMs = mmxShouldUseIosLowLoadMode() ? 1200 : 3000;
       setTimeout(() => {
         if (!mmxMobileHistorySheetOpen) return;
-        void mmxRenderMobileHistorySheetFromPayload({ forceFresh: false });
-      }, 3000);
+        void mmxRenderMobileHistorySheetFromPayload({ forceFresh: true });
+      }, retryDelayMs);
     }
   }
   function mmxMobileStickyShellHeightPx(){
@@ -9500,7 +10285,7 @@
     const summaryH = summaryVisible ? Math.ceil(Number(summary?.getBoundingClientRect?.().height || 0)) : 0;
     return stopH + summaryH;
   }
-  function mmxSyncMobileStickyShell(){
+  function mmxSyncMobileStickyShell(opts = {}){
     if (!mmxIsMobileViewport()) return;
     const prevStickyHeightPx = Number(mmxLastMobileStickyMeasuredHeightPx);
     const timerSrc = $("timer");
@@ -9548,11 +10333,14 @@
     if (missingSummary && !mmxMobileStickyWorkerSeedDone && chartBooted) {
       void mmxSeedMobileStickyShellFromWorker("sync_blank");
     }
-    const nextStickyHeightPx = Number(mmxMobileStickyShellHeightPx());
-    if (Number.isFinite(nextStickyHeightPx) && nextStickyHeightPx !== prevStickyHeightPx) {
-      mmxLastMobileStickyMeasuredHeightPx = nextStickyHeightPx;
-      try { mmxSyncMobileOverlayLayout(); } catch {}
-      try { mmxUpdateMobileLiveStage(); } catch {}
+    const skipLayoutMeasure = opts?.skipLayoutMeasure === true;
+    if (!skipLayoutMeasure) {
+      const nextStickyHeightPx = Number(mmxMobileStickyShellHeightPx());
+      if (Number.isFinite(nextStickyHeightPx) && nextStickyHeightPx !== prevStickyHeightPx) {
+        mmxLastMobileStickyMeasuredHeightPx = nextStickyHeightPx;
+        try { mmxSyncMobileOverlayLayout(); } catch {}
+        try { mmxUpdateMobileLiveStage(); } catch {}
+      }
     }
     mmxMaybeAdvanceMobileBootFromValues();
   }
@@ -9954,7 +10742,7 @@
     const activeBet = Number.isFinite(stBet) ? stBet : NaN;
     const displayBet = (hasOpenPos && Number.isFinite(activeBet) && activeBet > 0) ? activeBet : uiBet;
     const sizingProfile = String(st?.sizingProfile || uiCfg?.sizingProfile || "").trim().toLowerCase();
-    const sizingLabel = sizingProfile === "gold_bets_v1" ? " GOLD" : "";
+    const sizingLabel = /^gold_bets_v\d+$/i.test(String(sizingProfile || "")) ? " GOLD" : "";
     signEl.textContent = `BET $${Math.max(0, Math.round(Number.isFinite(displayBet) ? displayBet : 0))}${sizingLabel}`;
     signEl.classList.toggle("on", hasOpenPos);
   }
@@ -10220,7 +11008,10 @@
     $("mobileHistorySheetToggle").onclick = () => {
       const nextOpen = !mmxMobileHistorySheetOpen;
       mmxSetMobileHistorySheetOpen(nextOpen);
-      if (nextOpen) {
+      if (nextOpen && mmxShouldUseIosLowLoadMode()) {
+        void mmxRenderMobileHistorySheetFromPayload({ forceFresh: true });
+      }
+      if (nextOpen && !mmxShouldUseIosLowLoadMode()) {
         [150, 500, 1200, 2200, 3600].forEach((delayMs, idx) => {
           setTimeout(() => {
             if (!mmxMobileHistorySheetOpen) return;
@@ -11383,6 +12174,28 @@
   let lastBackendCpuBreakdown = null;
   let lastBackendCpuBreakdownFetchMs = 0;
   let lastBackendHealthMsgMs = 0;
+  function applyBackendCpuSnapshot(processStatsLike){
+    const processStats = processStatsLike && typeof processStatsLike === "object" ? processStatsLike : null;
+    const cpuPct = Number(processStats?.cpuPct);
+    const rssMb = Number(processStats?.rssMb);
+    const heapUsedMb = Number(processStats?.heapUsedMb);
+    const cpuBreakdown = processStats?.breakdown && typeof processStats.breakdown === "object"
+      ? processStats.breakdown
+      : null;
+    const hasBreakdown = cpuBreakdown && Array.isArray(cpuBreakdown.items);
+    if (hasBreakdown) {
+      if (Number.isFinite(cpuPct) && cpuPct >= 0) lastBackendCpuPct = cpuPct;
+      if (Number.isFinite(rssMb) && rssMb >= 0) lastBackendRssMb = rssMb;
+      if (Number.isFinite(heapUsedMb) && heapUsedMb >= 0) lastBackendHeapUsedMb = heapUsedMb;
+      lastBackendCpuBreakdown = cpuBreakdown;
+      return;
+    }
+    if (!lastBackendCpuBreakdown) {
+      if (Number.isFinite(cpuPct) && cpuPct >= 0) lastBackendCpuPct = cpuPct;
+      if (Number.isFinite(rssMb) && rssMb >= 0) lastBackendRssMb = rssMb;
+      if (Number.isFinite(heapUsedMb) && heapUsedMb >= 0) lastBackendHeapUsedMb = heapUsedMb;
+    }
+  }
   let lastReadOnlyWorkerHealth = null;
   let lastReadOnlyWorkerCpuPct = null;
   let lastReadOnlyWorkerRssMb = null;
@@ -12560,18 +13373,18 @@
     }
     equityRunSessionRowsHydratePromise = (async () => {
       try {
-        const cutoffMs = equityCurveCanonicalRunStartMs();
         let focused = (typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null;
         let instanceId = String(focused?.instanceId || "").trim();
-        let focusedRunNum = Number(focused?.runNum);
-        let focusedRunId = String(focused?.runId || "").trim();
+        let currentSlugText = String(
+          focused?.marketSlug ||
+          focusedMarketSlug ||
+          currentSlug ||
+          ""
+        ).trim().toLowerCase();
         if (!instanceId) {
           try {
             const botsPayload = mmxIsMobileViewport()
-              ? await mmxFetchMobileOverlayJsonViaWorker(
-                  `/api/v2/bots?includeTrace=0&includeTruth=0&includeRecentTrades=0&cb=${Date.now()}`,
-                  { timeoutMs: forceBust ? 12000 : 6000 }
-                )
+              ? await mmxFetchVisibleBotsShared({ forceFresh: true, timeoutMs: forceBust ? 12000 : 6000 })
               : await mmxJget(`/api/v2/bots?includeTrace=0&includeTruth=0&includeRecentTrades=0&cb=${Date.now()}`, {
                   readOnly: true,
                   timeoutMs: forceBust ? 12000 : 6000,
@@ -12583,141 +13396,34 @@
             if (fallbackBot) {
               focused = fallbackBot;
               instanceId = String(fallbackBot?.instanceId || "").trim();
-              focusedRunNum = Number(fallbackBot?.runNum);
-              focusedRunId = String(fallbackBot?.runId || "").trim();
+              currentSlugText = String(
+                fallbackBot?.marketSlug ||
+                focusedMarketSlug ||
+                currentSlug ||
+                ""
+              ).trim().toLowerCase();
             }
           } catch {}
         }
-        const finitePositive = (valueLike) => {
-          const n = Number(valueLike);
-          return Number.isFinite(n) && n > 0 ? n : NaN;
-        };
-        const laneStartMs = (lanesLike) => {
-          const vals = (Array.isArray(lanesLike) ? lanesLike : [])
-            .map((lane) => finitePositive(lane?.entryTsMs))
-            .filter(Number.isFinite);
-          return vals.length ? Math.min(...vals) : NaN;
-        };
-        const laneEndMs = (lanesLike) => {
-          const vals = (Array.isArray(lanesLike) ? lanesLike : [])
-            .map((lane) => finitePositive(lane?.exitTsMs))
-            .filter(Number.isFinite);
-          return vals.length ? Math.max(...vals) : NaN;
-        };
-        const normalizeRunIndexRow = (rowLike) => {
-          const row = rowLike && typeof rowLike === "object" ? { ...rowLike } : {};
-          const lanes = Array.isArray(row?.lanes) ? row.lanes : [];
-          const slugStartMs = Number(sessionSlugStartMs(row?.slug));
-          const startMs = [
-            finitePositive(row?.startMs),
-            finitePositive(row?.entryTsMs),
-            finitePositive(row?.firstTsMs),
-            laneStartMs(lanes),
-            Number.isFinite(slugStartMs) && slugStartMs > 0 ? slugStartMs : NaN,
-          ].find(Number.isFinite);
-          const endMs = [
-            finitePositive(row?.endMs),
-            finitePositive(row?.exitTsMs),
-            finitePositive(row?.lastTsMs),
-            laneEndMs(lanes),
-            Number.isFinite(startMs) ? startMs : NaN,
-          ].find(Number.isFinite);
-          const entryTsMs = [
-            finitePositive(row?.entryTsMs),
-            laneStartMs(lanes),
-            Number.isFinite(startMs) ? startMs : NaN,
-          ].find(Number.isFinite);
-          const exitTsMs = [
-            finitePositive(row?.exitTsMs),
-            laneEndMs(lanes),
-            Number.isFinite(endMs) ? endMs : NaN,
-          ].find(Number.isFinite);
-          const balanceUsd = Number(row?.continuityBalanceUsd ?? row?.balanceUsd);
-          return {
-            ...row,
-            startMs: Number.isFinite(startMs) ? Number(startMs) : null,
-            endMs: Number.isFinite(endMs) ? Number(endMs) : null,
-            entryTsMs: Number.isFinite(entryTsMs) ? Number(entryTsMs) : null,
-            exitTsMs: Number.isFinite(exitTsMs) ? Number(exitTsMs) : null,
-            continuityBalanceUsd: Number.isFinite(balanceUsd) ? Number(balanceUsd) : null,
-            balanceUsd: Number.isFinite(balanceUsd) ? Number(balanceUsd) : Number(row?.balanceUsd),
-          };
-        };
-        const normalizeContinuityRows = (rowsLike) => {
-          const hasFocusedRunScope = Number.isFinite(focusedRunNum) || !!focusedRunId;
-          return (Array.isArray(rowsLike) ? rowsLike : [])
-            .filter((row) => mmxEquityRunRowEligible(row))
-            .filter((row) => {
-              if (!hasFocusedRunScope) return true;
-              return serverSessionMatchesRunScope(row, focusedRunNum, focusedRunId);
-            })
-            .map((row) => normalizeRunIndexRow(row))
-            .filter((row) => {
-              const t = Number(row?.startMs ?? row?.entryTsMs ?? row?.attemptTsMs ?? row?.endMs ?? 0);
-              return Number.isFinite(t) ? t >= cutoffMs : false;
-            })
-            .sort((a, b) => {
-              const ta = Number(a?.startMs ?? a?.entryTsMs ?? a?.endMs ?? 0);
-              const tb = Number(b?.startMs ?? b?.entryTsMs ?? b?.endMs ?? 0);
-              return ta - tb;
-            });
-        };
-        let continuityRows = [];
+        const marketPrefix = "";
+        let historyRows = [];
         if (instanceId) {
           try {
-            const continuityMaxSessions = Number(EQUITY_RUN_HISTORY_MAX_SESSIONS);
-            if (mmxIsMobileViewport()) {
-              const workerRows = await mmxFetchMobileEquityRowsViaWorker(instanceId, continuityMaxSessions, forceBust);
-              continuityRows = normalizeContinuityRows(workerRows);
-            } else {
-              const continuityUrl = `/api/v2/bots/${encodeURIComponent(instanceId)}/continuity-history?includeTrace=0&maxSessions=${encodeURIComponent(String(continuityMaxSessions))}${forceBust ? `&cb=${Date.now()}` : ""}`;
-              const resp = await fetch(mmxApiUrl(continuityUrl, { readOnly: true }), { cache: "no-store" });
-              if (resp.ok) {
-                const payload = await resp.json();
-                continuityRows = normalizeContinuityRows(payload?.sessions);
-              }
-            }
+            historyRows = await mmxFetchMobileHistorySessionsViaReadOnlyWorker(
+              instanceId,
+              marketPrefix,
+              forceBust,
+              mmxLowLoadMobileHistorySourceLimit(MMX_RECENT_HISTORY_SUMMARY_MAX_ROWS)
+            );
           } catch {}
         }
-        if (Array.isArray(continuityRows) && continuityRows.length) {
-          equityRunSessionRows = continuityRows.map((row) => ({ ...row }));
-          equityRunSessionRowsLastGood = equityRunSessionRows.map((row) => ({ ...row }));
-          return equityRunSessionRows;
-        }
-        const reqUrl = sessionHistoryUrl(forceBust, 0, EQUITY_RUN_HISTORY_MAX_SESSIONS, {
-          sinceMsOverride: cutoffMs,
-          omitInstance: true,
-        });
-        let historyRows = [];
-        try {
-          if (mmxIsMobileViewport()) {
-            const j = await mmxFetchMobileOverlayJsonViaWorker(reqUrl, {
-              timeoutMs: forceBust ? 12000 : 6000,
-            });
-            historyRows = mmxResolveAvailableRunEquityRows(Array.isArray(j?.sessions) ? j.sessions : []);
-          } else {
-            const resp = await fetch(mmxApiUrl(reqUrl, { readOnly: true }), { cache: "no-store" });
-            if (resp.ok) {
-              const j = await resp.json();
-              historyRows = mmxResolveAvailableRunEquityRows(Array.isArray(j?.sessions) ? j.sessions : []);
-            }
-          }
-        } catch {}
-        if (Array.isArray(historyRows) && historyRows.length) {
-          equityRunSessionRows = historyRows.map((row) => ({ ...row }));
-          equityRunSessionRowsLastGood = equityRunSessionRows.map((row) => ({ ...row }));
-          return equityRunSessionRows;
-        }
-        const bootstrapRows = mmxResolveAvailableRunEquityRows();
-        if (bootstrapRows.length) {
-          equityRunSessionRows = bootstrapRows.map((row) => ({ ...row }));
-          equityRunSessionRowsLastGood = equityRunSessionRows.map((row) => ({ ...row }));
-        } else if (Array.isArray(equityRunSessionRowsLastGood) && equityRunSessionRowsLastGood.length) {
-          equityRunSessionRows = equityRunSessionRowsLastGood.map((row) => ({ ...row }));
-        }
+        mmxSetLatestRecentHistorySourceRows(historyRows);
+        equityRunSessionRows = Array.isArray(historyRows) ? historyRows.map((row) => ({ ...row })) : [];
+        try { mmxRefreshHistoryDrivenBalanceDisplays(focused || null); } catch {}
         return equityRunSessionRows;
       } catch {
-        return equityRunSessionRows;
+        equityRunSessionRows = [];
+        return [];
       } finally {
         equityRunSessionRowsHydratePromise = null;
       }
@@ -12727,9 +13433,6 @@
   async function mmxHydrateRunEquityRowsAndRender(reason = "unknown", forceBust = false){
     if (!equityCurveUsesRunStart()) return false;
     try { await hydrateRunEquitySessionRows(!!forceBust); } catch {}
-    try {
-      if (mmxBootstrapRunEquityRowsFromAvailableSources(reason)) return true;
-    } catch {}
     try {
       if (Array.isArray(equityRunSessionRows) && equityRunSessionRows.length && renderEquityCurveFromRows(equityRunSessionRows)) {
         updateEquityRangeUi();
@@ -12877,18 +13580,9 @@
     const processStats = m?.health?.processStats || null;
     const runtimeLagMs = Number(m?.health?.runtimeLagMs);
     const eventLoopLagMs = Number(m?.health?.eventLoop?.latestLagMs);
-    const cpuPct = Number(processStats?.cpuPct);
-    const rssMb = Number(processStats?.rssMb);
-    const heapUsedMb = Number(processStats?.heapUsedMb);
-    const cpuBreakdown = processStats?.breakdown && typeof processStats.breakdown === "object"
-      ? processStats.breakdown
-      : null;
     if (Number.isFinite(runtimeLagMs) && runtimeLagMs >= 0) lastBackendRuntimeLagMs = runtimeLagMs;
     if (Number.isFinite(eventLoopLagMs) && eventLoopLagMs >= 0) lastBackendEventLoopLagMs = eventLoopLagMs;
-    if (Number.isFinite(cpuPct) && cpuPct >= 0) lastBackendCpuPct = cpuPct;
-    if (Number.isFinite(rssMb) && rssMb >= 0) lastBackendRssMb = rssMb;
-    if (Number.isFinite(heapUsedMb) && heapUsedMb >= 0) lastBackendHeapUsedMb = heapUsedMb;
-    if (cpuBreakdown && Array.isArray(cpuBreakdown.items)) lastBackendCpuBreakdown = cpuBreakdown;
+    applyBackendCpuSnapshot(processStats);
     if (m?.health) lastBackendHealthMsgMs = Date.now();
     if (!qf) return;
     const pairLag = Number(qf?.pairLagMs);
@@ -14146,6 +14840,39 @@
     const pnl = Number(row?.pnlUsd);
     return Number.isFinite(pnl) ? pnl : NaN;
   }
+  function mmxCurrentRecentHistoryEquityRows(){
+    return Array.isArray(mmxLatestRecentHistorySourceRows) && mmxLatestRecentHistorySourceRows.length
+      ? mmxLatestRecentHistorySourceRows.slice()
+      : [];
+  }
+  function mmxEquityCanonicalPnlUsd(rowLike){
+    const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+    const recentPnl = Number(row?._pnlUsd);
+    if (Number.isFinite(recentPnl)) return recentPnl;
+    const auditNet = Number(row?.auditNetPnlUsd);
+    if (Number.isFinite(auditNet)) return auditNet;
+    const actual = Number(row?.actualPnlUsd);
+    if (Number.isFinite(actual)) return actual;
+    const corrected = Number(row?.correctedPnlUsd);
+    if (Number.isFinite(corrected)) return corrected;
+    const pnl = Number(row?.pnlUsd);
+    return Number.isFinite(pnl) ? pnl : NaN;
+  }
+  function mmxEquityCanonicalBalanceUsd(rowLike){
+    const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+    const recentBalance = Number(row?._balanceUsd);
+    if (Number.isFinite(recentBalance)) return recentBalance;
+    const displayBalance = Number(row?.displayBalanceUsd);
+    if (Number.isFinite(displayBalance)) return displayBalance;
+    const balance = Number(row?.balanceUsd);
+    return Number.isFinite(balance) ? balance : NaN;
+  }
+  function mmxPreferredRunEquitySourceRows(rowsLike = null){
+    const recentRows = mmxCurrentRecentHistoryEquityRows();
+    if (recentRows.length) return recentRows;
+    if (Array.isArray(rowsLike) && rowsLike.length) return rowsLike;
+    return Array.isArray(equityRunSessionRows) ? equityRunSessionRows : [];
+  }
 
   function mmxEquityRunRowEligible(rowLike){
     const row = rowLike && typeof rowLike === "object" ? rowLike : null;
@@ -14153,7 +14880,7 @@
     const startMs = Number(mmxSessionStartMs(row));
     const endMs = Number(mmxSessionNaturalEndMs(row));
     const balanceUsd = Number(row?.continuityBalanceUsd ?? row?.balanceUsd);
-    const pnlUsd = Number(mmxResolvedSessionAuditPnlUsd(row));
+    const pnlUsd = Number(mmxEquityCanonicalPnlUsd(row));
     const hasTiming = Number.isFinite(startMs) || Number.isFinite(endMs);
     const hasBalance = Number.isFinite(balanceUsd);
     const hasPnl = Number.isFinite(pnlUsd);
@@ -14194,8 +14921,12 @@
       const endMsRaw = Number(mmxSessionNaturalEndMs(row));
       const endMs = Number.isFinite(endMsRaw) ? endMsRaw : startMs;
       const ignored = !!row?.excludeFromPnl;
-      const pnl = ignored ? 0 : mmxResolvedSessionAuditPnlUsd(row);
-      const nextBal = running + (Number.isFinite(pnl) ? pnl : 0);
+      const preferredBalance = mmxEquityCanonicalBalanceUsd(row);
+      const fallbackPnl = ignored ? 0 : mmxEquityCanonicalPnlUsd(row);
+      const nextBal = Number.isFinite(preferredBalance)
+        ? preferredBalance
+        : (running + (Number.isFinite(fallbackPnl) ? fallbackPnl : 0));
+      const pnl = nextBal - running;
       const segment = {
         slug: String(row?.slug || "").trim(),
         x0Ms: Math.min(startMs, endMs),
@@ -14214,12 +14945,11 @@
       ? botLike
       : ((typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null);
     const startBalanceUsd = mmxCompareStartBalanceUsd(bot);
-    const rows = Array.isArray(rowsLike) && rowsLike.length
-      ? mmxCanonicalRunEquityRows(rowsLike)
-      : mmxResolveAvailableRunEquityRows();
+    const rows = mmxCanonicalRunEquityRows(mmxPreferredRunEquitySourceRows(rowsLike));
     const segments = mmxCanonicalRunEquitySegments(rows);
     let running = startBalanceUsd;
     let peak = startBalanceUsd;
+    let minBalanceUsd = startBalanceUsd;
     let maxBalanceUsd = startBalanceUsd;
     let maxDrawdownUsd = 0;
     if (!segments.length) {
@@ -14227,6 +14957,7 @@
         startBalanceUsd,
         endBalanceUsd: startBalanceUsd,
         totalPnlUsd: 0,
+        minBalanceUsd,
         maxBalanceUsd,
         maxDrawdownUsd,
         sessionCount: 0,
@@ -14238,6 +14969,7 @@
       if (!Number.isFinite(endBalanceUsd)) continue;
       running = endBalanceUsd;
       peak = Math.max(peak, running);
+      minBalanceUsd = Math.min(minBalanceUsd, Number(seg?.y0), running);
       maxBalanceUsd = Math.max(maxBalanceUsd, running);
       maxDrawdownUsd = Math.max(maxDrawdownUsd, peak - running);
     }
@@ -14245,6 +14977,7 @@
       startBalanceUsd,
       endBalanceUsd: running,
       totalPnlUsd: running - startBalanceUsd,
+      minBalanceUsd,
       maxBalanceUsd,
       maxDrawdownUsd,
       sessionCount: segments.length,
@@ -14281,16 +15014,7 @@
   }
 
   function mmxResolveAvailableRunEquityRows(rowsLike = null){
-    const candidates = Array.isArray(rowsLike) && rowsLike.length
-      ? rowsLike
-      : (Array.isArray(equityRunSessionRows) && equityRunSessionRows.length
-        ? equityRunSessionRows
-        : (Array.isArray(equityRunSessionRowsLastGood) && equityRunSessionRowsLastGood.length
-          ? equityRunSessionRowsLastGood
-        : (Array.isArray(lastSessionHistoryResponse?.sessions) && lastSessionHistoryResponse.sessions.length
-          ? lastSessionHistoryResponse.sessions
-          : (Array.isArray(equitySessionRows) ? equitySessionRows : []))));
-    return mmxCanonicalRunEquityRows(candidates);
+    return mmxCanonicalRunEquityRows(mmxPreferredRunEquitySourceRows(rowsLike));
   }
 
   function mmxBootstrapRunEquityRowsFromAvailableSources(reason = "unknown"){
@@ -14374,6 +15098,7 @@
         if (!canonicalSegments.length) return false;
         const displaySegments = mmxCompressEquitySegmentsForDisplay(canonicalSegments, EQUITY_MAX_DISPLAY_SEGMENTS);
         const nowV = Number(canonicalSnapshot?.endBalanceUsd);
+        const runMinV = Number(canonicalSnapshot?.minBalanceUsd);
         const runMaxV = Number(canonicalSnapshot?.maxBalanceUsd);
         const focusedInstanceId = String(focused?.instanceId || "").trim();
         if (focusedInstanceId && Number.isFinite(Number(canonicalSnapshot?.maxDrawdownUsd))) {
@@ -14381,7 +15106,7 @@
         }
         return renderEquityCurveFromSessionSegments(displaySegments, {
           updateRangeUi: false,
-          minV: 100,
+          minV: runMinV,
           maxV: runMaxV,
           nowV,
         });
@@ -14482,20 +15207,11 @@
     if (equityCurveUsesRunStart()) {
       if (Array.isArray(equityRunSessionRows) && equityRunSessionRows.length) {
         if (renderEquityCurveFromRows(equityRunSessionRows)) {
-          equityRunSessionRowsLastGood = equityRunSessionRows.map((row) => ({ ...row }));
           updateEquityRangeUi();
           return;
         }
       }
-      const fallbackRunRows = mmxResolveAvailableRunEquityRows();
-      if (Array.isArray(fallbackRunRows) && fallbackRunRows.length) {
-        equityRunSessionRows = fallbackRunRows.map((row) => ({ ...row }));
-        if (renderEquityCurveFromRows(equityRunSessionRows)) {
-          equityRunSessionRowsLastGood = equityRunSessionRows.map((row) => ({ ...row }));
-          updateEquityRangeUi();
-          return;
-        }
-      } else if (!equityRunSessionRowsHydratePromise) {
+      if (!equityRunSessionRowsHydratePromise) {
         void hydrateRunEquitySessionRows(false).then((rows) => {
           if (Array.isArray(rows) && rows.length) renderEquityCurve();
         }).catch(() => {});
@@ -14699,7 +15415,6 @@
   }
   async function mmxRefreshEquityCurveForViewport(forceBust = false){
     if (equityCurveUsesRunStart()) {
-      mmxBootstrapRunEquityRowsFromAvailableSources("viewport");
       const needHydrate =
         !Array.isArray(equityRunSessionRows) ||
         !equityRunSessionRows.length ||
@@ -14909,9 +15624,7 @@
     // not the global /api/state paper balance.
     if (shouldHydrateFocusedHistory()) return;
     try {
-      const r = await fetch("/api/state?includeBots=0&lite=1", { cache: "no-store" });
-      if (!r.ok) return;
-      const s = await r.json();
+      const s = await mmxFetchLiteStateShared({ timeoutMs: 5000 });
       updateHealthFromStateMessage(s);
       renderHealthPanel();
       const b =
@@ -15804,6 +16517,7 @@
     if (!(mount instanceof HTMLElement)) return false;
     const forceFresh = !!(opts && opts.forceFresh === true);
     const existingPanel = mount.querySelector('.sessCompactPnlWrap[data-history-summary-panel="1"][data-standalone-recent-sessions="1"]');
+    const existingHasRows = !!(existingPanel && existingPanel.querySelector('.sessCompactPnlTable tbody tr'));
     if (!forceFresh && existingPanel && existingPanel.querySelector('.sessCompactPnlTable tbody tr')) return true;
     const focused = (typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null;
     const instanceId = String(
@@ -15813,64 +16527,40 @@
       ""
     ).trim();
     const marketPrefix = sessionSlugBase(String(focused?.marketSlug || currentSlug || focusedMarketSlug || "").trim().toLowerCase());
+    const sourceMarketPrefix = "";
+    const storedRows = mmxReadRecentHistoryRowsFromStorage(instanceId, marketPrefix, focused?.runNum, focused?.runId);
     if (!instanceId) return false;
-    mount.innerHTML = `<div class="sessCompactPnlWrap" data-history-summary-panel="1" data-standalone-recent-sessions="1"><div class="sessCompactPnlHead"><div class="sessCompactPnlTitle">Last 100 Sessions</div></div><div class="sessCompactPnlEmpty">Loading recent session history...</div></div>`;
+    const hasStoredRows = Array.isArray(storedRows) && storedRows.length > 0;
+    if (!existingHasRows && hasStoredRows) {
+      mmxSetLatestRecentHistorySummaryRows(storedRows);
+      mount.innerHTML = mmxRecentHistoryStandaloneTableHtml(storedRows, instanceId, marketPrefix);
+    }
+    if (!existingHasRows && !hasStoredRows) {
+      mount.innerHTML = `<div class="sessCompactPnlWrap" data-history-summary-panel="1" data-standalone-recent-sessions="1"><div class="sessCompactPnlHead">${mmxRecentHistoryTitleHtml(instanceId, marketPrefix)}</div><div class="sessCompactPnlEmpty">Loading recent session history...</div></div>`;
+    }
+    const hasVisibleRows = existingHasRows || hasStoredRows;
     let viewRows = [];
     try {
-      viewRows = await mmxFetchMobileHistorySessionsViaReadOnlyWorker(instanceId, marketPrefix, forceFresh);
+      viewRows = await mmxFetchMobileHistorySessionsViaReadOnlyWorker(
+        instanceId,
+        sourceMarketPrefix,
+        forceFresh,
+        MMX_RECENT_HISTORY_SUMMARY_MAX_ROWS
+      );
     } catch {}
     if (!Array.isArray(viewRows) || !viewRows.length) {
-      mount.innerHTML = `<div class="sessCompactPnlWrap" data-history-summary-panel="1" data-standalone-recent-sessions="1"><div class="sessCompactPnlHead"><div class="sessCompactPnlTitle">Last 100 Sessions</div></div><div class="sessCompactPnlEmpty">Recent session history unavailable.</div></div>`;
+      if (hasVisibleRows) return true;
+      mmxSetLatestRecentHistorySourceRows([]);
+      mmxSetLatestRecentHistorySummaryRows([]);
+      mount.innerHTML = `<div class="sessCompactPnlWrap" data-history-summary-panel="1" data-standalone-recent-sessions="1"><div class="sessCompactPnlHead">${mmxRecentHistoryTitleHtml(instanceId, marketPrefix)}</div><div class="sessCompactPnlEmpty">Recent session history unavailable.</div></div>`;
       return false;
     }
-    const usd = (value) => {
-      const n = Number(value);
-      if (!Number.isFinite(n)) return "—";
-      const sign = n > 0 ? "+" : (n < 0 ? "-" : "");
-      return `${sign}$${Math.abs(n).toFixed(2)}`;
-    };
-    const tone = (value) => {
-      const n = Number(value);
-      if (!Number.isFinite(n)) return "neu";
-      return n > 0 ? "pos" : (n < 0 ? "neg" : "neu");
-    };
-    mount.innerHTML = `
-      <div class="sessCompactPnlWrap" data-history-summary-panel="1" data-standalone-recent-sessions="1">
-        <div class="sessCompactPnlHead">
-          <div class="sessCompactPnlTitle">Last 100 Sessions</div>
-        </div>
-        <div class="sessCompactPnlTableWrap">
-          <table class="sessCompactPnlTable">
-            <thead>
-              <tr>
-                <th>Session</th>
-                <th>Actual P/L</th>
-                <th>Balance</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${viewRows.map((row) => {
-                const slug = String(row?.slug || "").trim();
-                const pnlUsd = Number(row?._pnlUsd);
-                const balance = Number(row?._balanceUsd);
-                const sessionAuditHref = String(row?.sessionAuditPath || row?.sessionAuditHref || "").trim();
-                const timeLabel = String(row?._timeText || "").trim();
-                const timeHtml = sessionAuditHref
-                  ? `<a class="sessCompactPnlSlugLink" href="${mmxCompareEsc(sessionAuditHref)}" target="_blank" rel="noopener noreferrer">${mmxCompareEsc(timeLabel)}</a>`
-                  : mmxCompareEsc(timeLabel);
-                return `
-                  <tr data-history-session-slug="${mmxCompareEsc(slug)}">
-                    <td><div class="sessCompactPnlSlug">${timeHtml}</div></td>
-                    <td><span class="sessCompactPnlVal ${tone(pnlUsd)}">${usd(pnlUsd)}</span></td>
-                    <td><span class="sessCompactPnlVal ${tone(balance)}">${usd(balance)}</span></td>
-                  </tr>
-                `;
-              }).join("")}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    `;
+    mmxSetLatestRecentHistorySourceRows(viewRows);
+    mmxSetLatestRecentHistorySummaryRows(viewRows);
+    mmxWriteRecentHistoryRowsToStorage(instanceId, marketPrefix, focused?.runNum, focused?.runId, viewRows);
+    const displayRows = viewRows.slice(0, 100);
+    mount.innerHTML = mmxRecentHistoryStandaloneTableHtml(displayRows, instanceId, marketPrefix);
+    try { mmxRefreshHistoryDrivenBalanceDisplays(focused || null); } catch {}
     return true;
   }
   let mmxStandaloneRecentSessionsWarmTimer = null;
@@ -18441,8 +19131,8 @@
     const timeoutMsRaw = Number(opts?.timeoutMs);
     const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 5000;
     try {
-      const payload = await mmxJgetHotHostHeavy(
-        `/api/v2/bots/${encodeURIComponent(wantedInstance)}/run-index`,
+      const payload = await mmxJget(
+        mmxApiUrl(`/api/v2/bots/${encodeURIComponent(wantedInstance)}/run-index`, { readOnly: true }),
         { timeoutMs }
       );
       const rows = Array.isArray(payload?.sessions) ? payload.sessions : [];
@@ -18508,8 +19198,8 @@
         }
       } catch {}
       try {
-        const runIndexPayload = await mmxJgetHotHostHeavy(
-          `/api/v2/bots/${encodeURIComponent(instanceId)}/run-index`,
+        const runIndexPayload = await mmxJget(
+          mmxApiUrl(`/api/v2/bots/${encodeURIComponent(instanceId)}/run-index`, { readOnly: true }),
           { timeoutMs: 5000 }
         );
         if (!sessionRolloverHydrateCtxStillValid({
@@ -19201,7 +19891,7 @@
       equitySessionRows = equityRowsForCurve.map((s) => ({ ...s }));
       renderEquityCurve();
       if (equityCurveUsesRunStart() && equityCurveLooksLikeBaseline()) {
-        mmxBootstrapRunEquityRowsFromAvailableSources("session-history");
+        void mmxHydrateRunEquityRowsAndRender("session-history", true);
       }
       const snaps = [];
       for (const s of sessions) {
@@ -20105,6 +20795,17 @@
           if (!parts.length) return NaN;
           return Math.max(...parts);
         })();
+      if (equityCurveUsesRunStart() && !chartRunMatchesFocused) {
+        try {
+          const rendered = await mmxHydrateRunEquityRowsAndRender("server:chart_history_run_mismatch", !!forceBust);
+          if (rendered) {
+            renderStoredSessionCards();
+            if (!mmxIsMobileViewport()) mmxForceRefreshStandaloneRecentSessions();
+          }
+        } catch {}
+        setDisplayedBalanceFromSources(null, Date.now());
+        return;
+      }
       if (Number.isFinite(effectiveRunStartMs)) {
         serverRunStartMs = Number(effectiveRunStartMs);
         maybeResetLocalHistoryForRun(Number(effectiveRunStartMs));
@@ -20760,6 +21461,7 @@
   const MMX_MOBILE_LIVE_WINDOW_QUANTUM_MS = 250;
   let mmxMobileLiveWindowRaf = 0;
   let mmxMobileLiveWindowLastFrameMs = 0;
+  let mmxLastLiveRollingAnchorMs = 0;
 
   function mmxLiteLiveChartMarginFor(div){
     const mobile = window.matchMedia("(max-width: 560px), (pointer: coarse)").matches;
@@ -20785,12 +21487,11 @@
     const track = $("mobileLiveTickerTrack");
     if (!(root instanceof HTMLElement) || !(track instanceof HTMLElement)) return;
     const mobileHero = mmxIsMobileViewport() && !!document.getElementById(LIVE_DIV)?.closest?.(".liveWrap");
-    const sessionStartMs = Number(opts?.sessionStartMs);
     const xMin = Number(opts?.xMin);
     const xMax = Number(opts?.xMax);
     const marginLeft = Number(opts?.marginLeft);
     const innerW = Number(opts?.innerW);
-    if (!mobileHero || !Number.isFinite(sessionStartMs) || !Number.isFinite(xMin) || !Number.isFinite(xMax) || !Number.isFinite(marginLeft) || !Number.isFinite(innerW) || innerW <= 0) {
+    if (!mobileHero || !Number.isFinite(xMin) || !Number.isFinite(xMax) || !Number.isFinite(marginLeft) || !Number.isFinite(innerW) || innerW <= 0) {
       root.hidden = true;
       track.innerHTML = "";
       track.style.transform = "";
@@ -20800,26 +21501,21 @@
     }
 
     root.hidden = false;
-    const stepSec = 15;
-    const trackSpanSec = 300;
-    const pxPerSec = innerW / 30;
-    const totalW = Math.max(innerW + 40, (trackSpanSec * pxPerSec) + 40);
-    const labelSig = `${stepSec}:${trackSpanSec}:${Math.round(pxPerSec * 100)}`;
+    const tickSecs = liveChartMobileTickerSecTicks();
+    const labelSig = `${tickSecs.join(",")}|${Math.round(innerW * 100)}`;
     if (track.dataset.labelSig !== labelSig) {
-      const labels = [];
-      for (let sec = 0; sec <= trackSpanSec; sec += stepSec) {
-        labels.push(`<span class="mobileLiveTickerLabel" style="left:${(sec * pxPerSec).toFixed(2)}px">${sec}s</span>`);
-      }
+      const labels = tickSecs.map((sec) => {
+        const ratio = (sec + 15) / 30;
+        const leftPx = ratio * innerW;
+        const label = sec === 0 ? "0s" : `${sec > 0 ? "+" : ""}${sec}s`;
+        return `<span class="mobileLiveTickerLabel" style="left:${leftPx.toFixed(2)}px">${label}</span>`;
+      });
       track.innerHTML = labels.join("");
       track.dataset.labelSig = labelSig;
     }
     track.style.left = `${marginLeft}px`;
-    track.style.width = `${totalW.toFixed(2)}px`;
-
-    const anchorMs = (xMin + xMax) / 2;
-    const elapsedSec = Math.max(0, (anchorMs - sessionStartMs) / 1000);
-    const tx = (15 - elapsedSec) * pxPerSec;
-    track.style.transform = `translateX(${tx.toFixed(2)}px)`;
+    track.style.width = `${innerW.toFixed(2)}px`;
+    track.style.transform = "";
   }
 
   function mmxChartEscapeHtml(v){
@@ -21260,6 +21956,7 @@
   }
 
   function plotlyAvailable(){
+    if (mmxShouldUseIosLowLoadMode()) return true;
     return !!(window.Plotly && typeof Plotly.newPlot === "function");
   }
 
@@ -21493,15 +22190,18 @@
       Number(lastFocusedChartTickTsMs),
       Number(lastFocusedPriceTickMs),
       Number(mmxReadFocusedPlotLastMs()),
-      Date.now(),
     ].filter((v) => Number.isFinite(v) && v > 0);
-    const rawAnchorMs = anchorCandidates.length ? Math.max(...anchorCandidates) : Date.now();
+    const fallbackAnchorMs = Number.isFinite(Number(mmxLastLiveRollingAnchorMs)) && Number(mmxLastLiveRollingAnchorMs) > 0
+      ? Number(mmxLastLiveRollingAnchorMs)
+      : Date.now();
+    const rawAnchorMs = anchorCandidates.length ? Math.max(...anchorCandidates) : fallbackAnchorMs;
     const clampedAnchorMs = Math.max(sessionStartMs + 1000, Math.min(sessionEndMs, rawAnchorMs));
     const quantumMs = Math.max(1, Number(MMX_MOBILE_LIVE_WINDOW_QUANTUM_MS) || 1);
     const anchorMs = Math.max(
       sessionStartMs + 1000,
       Math.round(clampedAnchorMs / quantumMs) * quantumMs
     );
+    mmxLastLiveRollingAnchorMs = anchorMs;
     const startMs = anchorMs - 15000;
     const endMs = anchorMs + 15000;
     return [new Date(startMs), new Date(endMs)];
@@ -22495,6 +23195,10 @@
   }
 
   async function mmxHydrateFocusedLiveMarkers(force = false){
+    if (mmxShouldDeferColdFocusedLiveReads()) {
+      mmxScheduleDeferredFocusedColdBootHydrates("live_markers");
+      return 0;
+    }
     if (mmxLiveMarkerOverlayInflight) return 0;
     const focused = (typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null;
     const instanceId = String(focused?.instanceId || "").trim();
@@ -25617,16 +26321,13 @@
             <tbody>
               ${recentCompactRows.map((row, idx) => {
                 const slug = String(row?.slug || "").trim();
-                const sessionAuditHref = String(
-                  row?.sessionAuditPath ||
-                  row?.sessionAuditHref ||
-                  historySessionAuditCandidatesForSlug(slug, {
-                    runNum: Number(row?.runNum ?? snapshot?.runNum ?? NaN),
-                    runId: String(row?.runIdText || row?.runId || snapshot?.runId || "").trim(),
-                    startedAtMs: Number(row?.startedAtMs ?? row?.launchedAtMs ?? snapshot?.startedAtMs ?? snapshot?.launchedAtMs ?? NaN),
-                  })[0] ||
-                  ""
-                ).trim();
+                const sessionAuditHref = String(mmxRecentHistorySessionAuditHref({
+                  ...row,
+                  runNum: row?.runNum ?? snapshot?.runNum,
+                  runId: row?.runId ?? snapshot?.runId,
+                  runIdText: row?.runIdText ?? snapshot?.runId,
+                  startedAtMs: row?.startedAtMs ?? row?.launchedAtMs ?? snapshot?.startedAtMs ?? snapshot?.launchedAtMs,
+                }) || "").trim();
                 const pnlUsd = Number(row?._pnlUsd);
                 const balance = Number(row?._balanceUsd);
                 const timeLabel = String(row?._timeText || formatCompactRowTime(row)).trim();
@@ -25885,9 +26586,8 @@
             };
             if (wantedInstance) {
               let fetched = await tryLoadCompactRows(async () => {
-                const params = buildWorkerHistoryParams();
                 const payload = await fetchReadOnlyJson(
-                  `/api/v2/bots/${encodeURIComponent(wantedInstance)}/last-session-history?${params.toString()}`
+                  `/api/v2/bots/${encodeURIComponent(wantedInstance)}/continuity-history?includeTrace=0&maxSessions=100${marketPrefix ? `&marketPrefix=${encodeURIComponent(marketPrefix)}` : ""}${forceFresh ? `&refresh=1` : ""}`
                 );
                 return payload?.sessions;
               });
@@ -31476,7 +32176,10 @@
     if (!path) return false;
     return (
       /^\/api\/session-history\b/i.test(path) ||
+      /^\/api\/session-card-image\b/i.test(path) ||
+      /^\/api\/compare\/run-artifact\b/i.test(path) ||
       /^\/api\/v2\/bots\/[^/]+\/continuity-history\b/i.test(path) ||
+      /^\/api\/v2\/bots\/[^/]+\/run-index\b/i.test(path) ||
       /^\/api\/v2\/bots\/[^/]+\/last-session-history\b/i.test(path) ||
       /^\/api\/v2\/bots\/[^/]+\/latest-session-card\b/i.test(path) ||
       /^\/api\/v2\/bots\/[^/]+\/session-artifacts-summary\b/i.test(path) ||
@@ -31489,6 +32192,9 @@
     if (!raw) return readOnlyOrigin;
     try {
       const candidate = new URL(raw, window.location.origin);
+      if (mmxShouldPreferReadOnlyWorkerPath(candidate.pathname)) {
+        return mmxOverlayWorkerApiUrl(`${candidate.pathname}${candidate.search}${candidate.hash}`);
+      }
       return new URL(`${candidate.pathname}${candidate.search}${candidate.hash}`, readOnlyOrigin).toString();
     } catch {}
     try { return new URL(raw).toString(); } catch {}
@@ -31818,6 +32524,21 @@
     mmxUpdateMobileStickyShell();
     mmxUpdateMobileLiveStage();
   }
+  function mmxEnsureMobileEquityShelfMounted(reason = "ensure_mount"){
+    const shelf = $("mobileEquityShelf");
+    const mount = $("mobileEquityMount");
+    const equityPanel = document.querySelector(".equityPanel");
+    if (!(shelf instanceof HTMLElement) || !(mount instanceof HTMLElement) || !(equityPanel instanceof HTMLElement)) return false;
+    if (!mmxIsMobileViewport()) return false;
+    if (!mmxDesktopEquityParent) {
+      mmxDesktopEquityParent = equityPanel.parentNode;
+      mmxDesktopEquityNextSibling = equityPanel.nextSibling;
+    }
+    shelf.hidden = false;
+    shelf.setAttribute("aria-hidden", mmxMobileEquityCollapsed ? "true" : "false");
+    if (equityPanel.parentNode !== mount) mount.appendChild(equityPanel);
+    return true;
+  }
   function mmxArrangeMobileEquityShelf(){
     const shelf = $("mobileEquityShelf");
     const mount = $("mobileEquityMount");
@@ -31828,9 +32549,7 @@
       mmxDesktopEquityNextSibling = equityPanel.nextSibling;
     }
     if (mmxIsMobileViewport()) {
-      shelf.hidden = false;
-      shelf.setAttribute("aria-hidden", mmxMobileEquityCollapsed ? "true" : "false");
-      if (equityPanel.parentNode !== mount) mount.appendChild(equityPanel);
+      mmxEnsureMobileEquityShelfMounted("arrange");
       mmxSetMobileEquityCollapsed(mmxMobileEquityCollapsed, { persist: false, skipStageUpdate: true });
       try { mmxUpdateMobileLiveStage(); } catch {}
       requestAnimationFrame(() => {
@@ -31867,14 +32586,10 @@
       if (history.parentNode !== heroMount) heroMount.appendChild(history);
       if (recent.parentNode !== listMount) listMount.appendChild(recent);
       mmxSetMobileHistorySheetOpen(mmxMobileHistorySheetOpen);
-      setTimeout(() => {
-        void mmxRenderMobileHistorySheetFromPayload({ forceFresh: false });
-      }, 2800);
-      if (mmxMobileHistorySheetOpen) {
+      if (!mmxShouldUseIosLowLoadMode()) {
         setTimeout(() => {
-          if (!mmxMobileHistorySheetOpen) return;
           void mmxRenderMobileHistorySheetFromPayload({ forceFresh: false });
-        }, 200);
+        }, 2800);
       }
       mmxScheduleMobileBootOverlayAdvance(360);
       return;
@@ -32591,6 +33306,22 @@ function mmxCompareActualBalanceAtCutoff(bot, sessionsLike, cutoffMs = NaN){
       }
       return hasAny ? total : NaN;
     };
+    const isRenderableTradePoint = (pt) => {
+      const kind = String(pt?.kind || "").trim().toLowerCase();
+      const eventType = String(pt?.eventType || pt?.exitType || "").trim().toLowerCase();
+      const normalized = kind || eventType;
+      return normalized === "entry" ||
+        normalized === "derisk" ||
+        normalized === "partial_exit" ||
+        normalized === "tp" ||
+        normalized === "take_profit" ||
+        normalized === "sl" ||
+        normalized === "stop" ||
+        normalized === "stop_loss" ||
+        normalized === "exit" ||
+        normalized === "final_exit" ||
+        normalized === "settle";
+    };
     const lanesRaw = Array.isArray(sessionLike?.lanes)
       ? sessionLike.lanes
       : (Array.isArray(sessionLike?.laneTrades) ? sessionLike.laneTrades : []);
@@ -32615,6 +33346,7 @@ function mmxCompareActualBalanceAtCutoff(bot, sessionsLike, cutoffMs = NaN){
                 const tsMs = Number(pt?.tsMs);
                 const px = Number(pt?.px);
                 if (!(Number.isFinite(tsMs) && Number.isFinite(px))) return null;
+                if (!isRenderableTradePoint(pt)) return null;
                 const kindRaw = String(pt?.kind || pt?.eventType || "").toLowerCase();
                 const kind = kindRaw === "tp"
                   ? "exit"
@@ -32749,6 +33481,7 @@ function mmxCompareActualBalanceAtCutoff(bot, sessionsLike, cutoffMs = NaN){
           const tsMs = Number(pt?.tsMs);
           const px = Number(pt?.px);
           if (!(Number.isFinite(tsMs) && Number.isFinite(px))) return null;
+          if (!isRenderableTradePoint(pt)) return null;
           const kindRaw = String(pt?.kind || pt?.eventType || "").trim().toLowerCase();
           const eventTypeRaw = String(pt?.eventType || pt?.exitType || kindRaw || "").trim().toLowerCase();
           let kind = kindRaw || "event";
@@ -33537,7 +34270,9 @@ function mmxCompareActualBalanceAtCutoff(bot, sessionsLike, cutoffMs = NaN){
     const elapsedHours = launchedAtMs > 0 ? Math.max((Date.now() - launchedAtMs) / 3600000, 1 / 60) : NaN;
     const perHour = Number.isFinite(elapsedHours) ? (pnl / elapsedHours) : NaN;
     const compareMaxDd = Number(bot?.compareMaxDdUsd);
-    const curveMaxDd = Number(mmxCurveMaxDdByInstance.get(instanceId));
+    const curveMaxDd = mmxCanUseCurveStatsForBot(bot)
+      ? Number(mmxCurveMaxDdByInstance.get(instanceId))
+      : NaN;
     const runtimeMaxDd = Number(mmxMaxDdByInstance.get(instanceId));
     const maxDdUsd = Number.isFinite(Number(maxDdUsdOverride))
       ? Number(maxDdUsdOverride)
@@ -33603,7 +34338,7 @@ function mmxCompareActualBalanceAtCutoff(bot, sessionsLike, cutoffMs = NaN){
       maxDdTone: Number.isFinite(maxDd) ? (maxDd > 0 ? "neg" : "neu") : "neu",
     };
   }
-function renderTestSummaryPanel(botLike = null){
+  function renderTestSummaryPanel(botLike = null){
   const balanceEl = $("testSummaryBalance");
   const phrEl = $("testSummaryPhr");
   const maxDdEl = $("testSummaryMaxDd");
@@ -33622,19 +34357,25 @@ function renderTestSummaryPanel(botLike = null){
       return;
     }
     const summary = mmxComputeTestSummarySnapshot(bot);
-    const balanceModel = mmxResolvedSummaryBalanceModel(summary, bot);
+    const displaySummary = mmxResolvedRecentHistorySummaryModel(summary);
+    const directRunHistoryModel = mmxCurrentRunHistorySummaryModelStrict();
+    const balanceModel = mmxResolvedSummaryBalanceModel(displaySummary, bot);
     mmxSetLatestTestSummarySnapshot({
       ...summary,
+      perHourText: String(displaySummary?.perHourText || summary?.perHourText || "—"),
+      perHourTone: String(displaySummary?.perHourTone || summary?.perHourTone || "neu"),
+      maxDdText: String(directRunHistoryModel?.maxDdText || "").trim() || "—",
+      maxDdTone: String(directRunHistoryModel?.maxDdTone || "neu").trim() || "neu",
       balanceText: balanceModel.text,
       balanceTone: balanceModel.tone,
       instanceId: String(bot?.instanceId || "").trim(),
     });
     balanceEl.textContent = String(balanceModel.text || "$—");
-    phrEl.textContent = String(summary?.perHourText || "—");
-    maxDdEl.textContent = String(summary?.maxDdText || "—");
+    phrEl.textContent = String(displaySummary?.perHourText || "—");
+    maxDdEl.textContent = String(directRunHistoryModel?.maxDdText || "").trim() || "—";
     balanceEl.className = `v ${String(balanceModel.tone || "neu")}`;
-    phrEl.className = `v ${String(summary?.perHourTone || "neu")}`;
-    maxDdEl.className = `v ${String(summary?.maxDdTone || "neu")}`;
+    phrEl.className = `v ${String(displaySummary?.perHourTone || "neu")}`;
+    maxDdEl.className = `v ${String(directRunHistoryModel?.maxDdTone || "neu").trim() || "neu"}`;
     try { mmxSyncMobileStickyShell(); } catch {}
   }
   function renderHistoryRunAuditButton(botLike = null){
@@ -33902,6 +34643,30 @@ function renderTestSummaryPanel(botLike = null){
     if (Number.isFinite(compareDd)) return compareDd;
     return liveCurveDd;
   }
+  function mmxResolvedBotRunNum(botLike = null){
+    const bot = botLike && typeof botLike === "object" ? botLike : null;
+    return resolveRunId(
+      bot?.runNum,
+      bot?.runId,
+      parseRunIdFromLabel(bot?.runId)
+    );
+  }
+  function mmxResolvedChartHistoryRunNum(){
+    return resolveRunId(
+      lastChartHistoryResponse?.runId,
+      parseRunIdFromLabel(lastChartHistoryResponse?.runLabel),
+      equityLastRunId,
+      serverRunId
+    );
+  }
+  function mmxCanUseCurveStatsForBot(botLike = null){
+    const botRunNum = mmxResolvedBotRunNum(botLike);
+    const chartRunNum = mmxResolvedChartHistoryRunNum();
+    if (Number.isFinite(Number(botRunNum)) && Number.isFinite(Number(chartRunNum))) {
+      return Math.floor(Number(botRunNum)) === Math.floor(Number(chartRunNum));
+    }
+    return true;
+  }
   function mmxFocusedBotOrigin(){
     const focused = (typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null;
     const instanceId = String(focused?.instanceId || "").trim();
@@ -34095,10 +34860,13 @@ function renderTestSummaryPanel(botLike = null){
         });
       }
     }
-    const curveMaxDdUsd = mmxComputeMaxDdFromCurvePoints(curvePoints);
-    const maxDdUsd = Number.isFinite(curveMaxDdUsd)
-      ? curveMaxDdUsd
-      : Number(bot?.compareMaxDdUsd);
+    const compareMaxDdUsd = Number(bot?.compareMaxDdUsd);
+    const curveMaxDdUsd = mmxCanUseCurveStatsForBot(bot)
+      ? mmxComputeMaxDdFromCurvePoints(curvePoints)
+      : NaN;
+    const maxDdUsd = Number.isFinite(compareMaxDdUsd)
+      ? compareMaxDdUsd
+      : curveMaxDdUsd;
     return {
       normalizedStartMs,
       cutoffBalanceUsd,
@@ -34305,7 +35073,7 @@ function renderTestSummaryPanel(botLike = null){
       links.push(`<a class="compareLink" href="${mmxCompareEsc(sessionTunerHref)}" target="_blank" rel="noopener noreferrer">SESSION TUNER</a>`);
     }
     if (bot?.instanceId) {
-      links.push(`<a class="compareLink" href="${origin}/api/v2/bots/${encodeURIComponent(String(bot.instanceId))}/run-index" target="_blank" rel="noopener noreferrer">Run Index</a>`);
+      links.push(`<a class="compareLink" href="${mmxCompareEsc(mmxApiUrl(`/api/v2/bots/${encodeURIComponent(String(bot.instanceId))}/run-index`, { readOnly: true, origin }))}" target="_blank" rel="noopener noreferrer">Run Index</a>`);
       links.push(
         `<button class="compareLink" type="button" data-instance-id="${mmxCompareEsc(String(bot.instanceId || ""))}" data-slug="${mmxCompareEsc(String(sess?.slug || ""))}" data-origin="${mmxCompareEsc(String(origin || ""))}" data-next-ignored="${ignoreState?.manualIgnored ? "0" : "1"}" onclick="window.mmxHandleCompareSessionIgnoreButton(this)">${mmxCompareEsc(compareIgnoreLabel)}</button>`
       );
@@ -37818,7 +38586,9 @@ self.onmessage = async (ev) => {
     if (strictOnly && !origin) {
       throw new Error("strict_readonly_origin_unavailable");
     }
-    const url = new URL(path, origin).toString();
+    const url = mmxShouldPreferReadOnlyWorkerPath(path)
+      ? mmxOverlayWorkerApiUrl(path)
+      : new URL(path, origin).toString();
     const worker = mmxEnsureReadOnlyJsonWorker();
     const id = ++mmxReadOnlyJsonWorkerReqSeq;
     const timeoutMs = Math.max(500, Math.floor(Number(opts?.timeoutMs) || 10000));
@@ -39249,6 +40019,10 @@ self.onmessage = async (ev) => {
     mmxPruneLiveChartMemory(effectiveTickMs);
   }
   async function mmxHydrateFocusedLiveTraceFromServer(force = false){
+    if (mmxShouldDeferColdFocusedLiveReads()) {
+      mmxScheduleDeferredFocusedColdBootHydrates("focused_live_trace");
+      return 0;
+    }
     if (mmxFocusedTraceHydrateInflight) return 0;
     const focused = (typeof mmxFocusedBot === "function") ? mmxFocusedBot() : null;
     const instanceId = String(focused?.instanceId || "").trim();
@@ -40095,19 +40869,35 @@ self.onmessage = async (ev) => {
       ? (startBal + fillRealizedRun + aggUnrealized)
       : NaN;
     const currentEq = mmxSanitizeFocusedBalanceCandidate(mmxReadFocusedEquityBalance(), startBal);
-    const testBalance = (equityCurveUsesRunStart() && Number.isFinite(currentEq))
+    const hasAuthoritativeHistorySummary = mmxHasAuthoritativeRecentHistorySummary();
+    const historySummaryBalance = mmxSanitizeFocusedBalanceCandidate(
+      mmxParseUsdTextValue(mmxResolvedRecentHistorySummaryModel(null)?.balanceText),
+      startBal
+    );
+    const testBalance = Number.isFinite(historySummaryBalance)
+      ? historySummaryBalance
+      : ((equityCurveUsesRunStart() && !hasAuthoritativeHistorySummary)
+      ? NaN
+      : ((equityCurveUsesRunStart() && Number.isFinite(currentEq))
       ? currentEq
       : (Number.isFinite(tradeLogBalance)
       ? tradeLogBalance
       : ((!ignoredCount && Number.isFinite(fillLedgerBalance))
       ? fillLedgerBalance
-      : Number(resolvedBal.testBalance)));
+      : Number(resolvedBal.testBalance)))));
     const balEl = $("balance");
-    if (balEl && Number.isFinite(testBalance)) {
-      balEl.textContent = `$${testBalance.toFixed(2)}`;
-      balEl.dataset.v = String(testBalance);
-      balEl.classList.remove("profit", "loss", "neu");
-      balEl.classList.add(testBalance > startBal ? "profit" : (testBalance < startBal ? "loss" : "neu"));
+    if (balEl) {
+      if (Number.isFinite(testBalance)) {
+        balEl.textContent = `$${testBalance.toFixed(2)}`;
+        balEl.dataset.v = String(testBalance);
+        balEl.classList.remove("profit", "loss", "neu");
+        balEl.classList.add(testBalance > startBal ? "profit" : (testBalance < startBal ? "loss" : "neu"));
+      } else if (equityCurveUsesRunStart() && !hasAuthoritativeHistorySummary) {
+        balEl.textContent = "$—";
+        balEl.dataset.v = "";
+        balEl.classList.remove("profit", "loss");
+        balEl.classList.add("neu");
+      }
     }
     if (!equityCurveUsesRunStart() && $("equityNow") && Number.isFinite(testBalance)) {
       $("equityNow").textContent = `$${testBalance.toFixed(2)}`;
@@ -40448,19 +41238,35 @@ self.onmessage = async (ev) => {
       ? (startBal + fillRealizedRun + aggUnrealized)
       : NaN;
     const currentEq = mmxSanitizeFocusedBalanceCandidate(mmxReadFocusedEquityBalance(), startBal);
-    const testBalance = (equityCurveUsesRunStart() && Number.isFinite(currentEq))
+    const hasAuthoritativeHistorySummary = mmxHasAuthoritativeRecentHistorySummary();
+    const historySummaryBalance = mmxSanitizeFocusedBalanceCandidate(
+      mmxParseUsdTextValue(mmxResolvedRecentHistorySummaryModel(null)?.balanceText),
+      startBal
+    );
+    const testBalance = Number.isFinite(historySummaryBalance)
+      ? historySummaryBalance
+      : ((equityCurveUsesRunStart() && !hasAuthoritativeHistorySummary)
+      ? NaN
+      : ((equityCurveUsesRunStart() && Number.isFinite(currentEq))
       ? currentEq
       : (Number.isFinite(tradeLogBalance)
       ? tradeLogBalance
       : ((!ignoredCount && Number.isFinite(fillLedgerBalance))
       ? fillLedgerBalance
-      : Number(resolvedBal.testBalance)));
+      : Number(resolvedBal.testBalance)))));
     const balEl = $("balance");
-    if (balEl && Number.isFinite(testBalance)) {
-      balEl.textContent = `$${testBalance.toFixed(2)}`;
-      balEl.dataset.v = String(testBalance);
-      balEl.classList.remove("profit", "loss", "neu");
-      balEl.classList.add(testBalance > startBal ? "profit" : (testBalance < startBal ? "loss" : "neu"));
+    if (balEl) {
+      if (Number.isFinite(testBalance)) {
+        balEl.textContent = `$${testBalance.toFixed(2)}`;
+        balEl.dataset.v = String(testBalance);
+        balEl.classList.remove("profit", "loss", "neu");
+        balEl.classList.add(testBalance > startBal ? "profit" : (testBalance < startBal ? "loss" : "neu"));
+      } else if (equityCurveUsesRunStart() && !hasAuthoritativeHistorySummary) {
+        balEl.textContent = "$—";
+        balEl.dataset.v = "";
+        balEl.classList.remove("profit", "loss");
+        balEl.classList.add("neu");
+      }
     }
     if (!equityCurveUsesRunStart() && $("equityNow") && Number.isFinite(testBalance)) {
       $("equityNow").textContent = `$${testBalance.toFixed(2)}`;
@@ -40625,6 +41431,10 @@ self.onmessage = async (ev) => {
     return merged;
   }
   async function mmxRefreshFocusedBotOnly(force = false){
+    if (mmxShouldDeferColdFocusedLiveReads()) {
+      mmxScheduleDeferredFocusedColdBootHydrates("focused_bot_only");
+      return null;
+    }
     const now = Date.now();
     const selectedId = String(mmxState?.selectedInstanceId || "").trim();
     const wsFresh = wsConnected && ((now - Number(mmxLastWsMsgMs || 0)) < 5000);
@@ -40762,6 +41572,16 @@ self.onmessage = async (ev) => {
         historyFocusedInstanceId = mmxState.bots.length
           ? String(restoredFocusedBot?.instanceId || mmxResolveReplacementBot(mmxState.bots, null)?.instanceId || mmxState.bots[0].instanceId || "")
           : null;
+      }
+      if (
+        mmxUseMobileAppShell() &&
+        String(mmxState.selectedInstanceId || "").trim() &&
+        (
+          String(mmxState.selectedInstanceId || "").trim() !== String(prevSelectedId || "").trim() ||
+          String(historyFocusedInstanceId || "").trim() !== String(prevSelectedId || "").trim()
+        )
+      ) {
+        mmxNotifyMobileHistoryInstanceReady("refresh_all_selection_ready");
       }
       if (!mmxState.bots.length) {
         mmxHandlePotentialNoBotsState();
@@ -41122,6 +41942,7 @@ self.onmessage = async (ev) => {
       mmxState.selectedInstanceId = id;
       mmxState.focusPinned = true;
       historyFocusedInstanceId = id;
+      mmxNotifyMobileHistoryInstanceReady("focus_instance");
       const bot = Array.isArray(mmxState?.bots)
         ? mmxState.bots.find((row) => String(row?.instanceId || "").trim() === id) || null
         : null;
@@ -41339,6 +42160,7 @@ self.onmessage = async (ev) => {
   }
   function mmxConnectWs(){
     if (!MMX_WS_ENABLED) return;
+    if (mmxShouldUseIosLowLoadMode()) return;
     try {
       const proto = location.protocol === "https:" ? "wss" : "ws";
       const ws = new WebSocket(`${proto}://${location.host}`);
@@ -41462,8 +42284,7 @@ self.onmessage = async (ev) => {
   }
   async function mmxSyncFromServerLite(reason = "startup"){
     try{
-      const r = await fetch('/api/state?includeBots=0&lite=1', { cache: "no-store" });
-      const s = await r.json();
+      const s = await mmxFetchLiteStateShared({ timeoutMs: 5000 });
       mmxLastServerLiteState = s && typeof s === "object" ? s : null;
       updateHealthFromStateMessage(s);
       lastPricesStateMsgMs = Date.now();
@@ -41615,11 +42436,24 @@ self.onmessage = async (ev) => {
 
   connectWS();
   if (mmxIsMobileViewport()) {
-    mmxConnectWs();
+    if (!mmxShouldUseIosLowLoadMode()) {
+      mmxConnectWs();
+    }
     void (async () => {
       try {
-        await mmxRefreshAll({ includeHeavy: false, forceFreshBots: true, bypassDedup: true });
-        try { mmxStartMobileSecondaryBoot("boot_timer", { skipInitialRefresh: true }); } catch {}
+        if (mmxShouldUseIosLowLoadMode()) {
+          try { await mmxSyncFromServerLite("boot_ios_low"); } catch {}
+          try { await mmxSeedMobileStickyShellFromWorker("boot_ios_low"); } catch {}
+          try {
+            const timer = setTimeout(() => {
+              try { mmxStartMobileSecondaryBoot("boot_timer_low_load", { skipInitialRefresh: true }); } catch {}
+            }, 250);
+            mmxMobileBootTimers.push(timer);
+          } catch {}
+        } else {
+          await mmxRefreshAll({ includeHeavy: false, forceFreshBots: true, bypassDedup: true });
+          try { mmxStartMobileSecondaryBoot("boot_timer", { skipInitialRefresh: true }); } catch {}
+        }
       } finally {
         mmxMarkBootMinimalReady();
       }
@@ -41661,22 +42495,40 @@ self.onmessage = async (ev) => {
       clearTimeout(mmxMobileRelayoutTimer);
       mmxMobileRelayoutTimer = null;
     }
+    const iosLowLoad = mmxShouldUseIosLowLoadMode();
+    const minDelayMs = iosLowLoad
+      ? Math.max(Number(delayMs) || 0, 90)
+      : Math.max(0, Number(delayMs) || 0);
     mmxMobileRelayoutTimer = setTimeout(() => {
       mmxMobileRelayoutTimer = null;
-      mmxArrangeMobileEquityShelf();
-      mmxArrangeMobileLiveHero({ lightweight: true });
-      mmxArrangeMobileHistorySheet();
-      mmxArrangeCompareMobileHero();
-      mmxApplyMobileLiveOverlayPositions();
-      if (mmxMobileDeferredInteractiveReady()) {
+      const now = Date.now();
+      if (iosLowLoad && (now - Number(mmxLastMobileRelayoutAtMs || 0)) < MMX_IOS_LOW_LOAD_RELAYOUT_INTERVAL_MS) {
+        return;
+      }
+      if (iosLowLoad) mmxLastMobileRelayoutAtMs = now;
+      if (iosLowLoad) {
+        mmxArrangeMobileLiveHero({ lightweight: true });
+        mmxApplyMobileLiveOverlayPositions();
+      } else {
+        mmxArrangeMobileEquityShelf();
+        mmxArrangeMobileLiveHero({ lightweight: true });
+        mmxArrangeMobileHistorySheet();
+        mmxArrangeCompareMobileHero();
+        mmxApplyMobileLiveOverlayPositions();
+      }
+      if (mmxMobileDeferredInteractiveReady() && !iosLowLoad) {
         try { renderEquityCurve(); } catch {}
         scheduleEquityCurveViewportRefresh(0);
       }
       try { mmxUpdateMobileLiveStage(); } catch {}
-      try { mmxInitHistoryViewportObserver(); } catch {}
+      if (!iosLowLoad) {
+        try { mmxInitHistoryViewportObserver(); } catch {}
+      }
       try { setLiveChartSessionWindow(String(currentSlug || focusedMarketSlug || "").trim()); } catch {}
-      try { mmxRefreshMobileStickyAfterBoot(); } catch {}
-    }, Math.max(0, Number(delayMs) || 0));
+      if (!iosLowLoad) {
+        try { mmxRefreshMobileStickyAfterBoot(); } catch {}
+      }
+    }, minDelayMs);
   }
   window.addEventListener("resize", () => {
     if (mmxIsMobileViewport()) {
@@ -41698,9 +42550,14 @@ self.onmessage = async (ev) => {
     try { setLiveChartSessionWindow(String(currentSlug || focusedMarketSlug || "").trim()); } catch {}
   });
   window.addEventListener("scroll", () => {
+    if (mmxShouldUseIosLowLoadMode()) {
+      const now = Date.now();
+      if ((now - Number(mmxLastMobileScrollWorkAtMs || 0)) < MMX_IOS_LOW_LOAD_SCROLL_INTERVAL_MS) return;
+      mmxLastMobileScrollWorkAtMs = now;
+    }
     mmxUpdateMobileDockVisibility(false);
     mmxUpdateMobileLiveStage();
-    if (!mmxHistoryViewportPrimed) mmxInitHistoryViewportObserver();
+    if (!mmxShouldUseIosLowLoadMode() && !mmxHistoryViewportPrimed) mmxInitHistoryViewportObserver();
   }, { passive: true });
   window.addEventListener("pageshow", () => {
     if (mmxIsMobileViewport()) {
@@ -41734,6 +42591,10 @@ self.onmessage = async (ev) => {
   });
   if (window.visualViewport && typeof window.visualViewport.addEventListener === "function") {
     window.visualViewport.addEventListener("resize", () => {
+      if (mmxShouldUseIosLowLoadMode()) {
+        mmxScheduleMobileRelayout("visual_viewport", 80);
+        return;
+      }
       scheduleEquityCurveViewportRefresh(30);
     });
   }

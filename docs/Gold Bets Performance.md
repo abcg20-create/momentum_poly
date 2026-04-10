@@ -35,3 +35,10 @@ Notes:
 - Explicit strategy file: `strategy_external_inflection_positive_iteration_goldbetsv2.js`
 - In the Run Audit, profile-aware default gold selections now recognize `gold_bets_v2` as a first-class preset.
 - This version is meant to be easier to reason about operationally: early confidence for `Trade 1`, late confidence for follow-on trades.
+
+`Gold Bets v3`
+- `Trade 1`: `90-180s`
+- `Trade 2`: `295-300s`
+- `Trade 3`: `295-300s`
+- Explicit strategy file: `strategy_external_inflection_positive_iteration_goldbetsv3.js`
+- Strategy sizing profile key: `gold_bets_v3`

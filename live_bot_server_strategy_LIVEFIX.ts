@@ -173,6 +173,9 @@ function cpuWorkBucketForPathname(pathnameLike: any): CpuWorkBucket {
   if (/^\/api\/v2\/bots\/[^/]+\/continuity-history\b/i.test(pathname)) return "http_session_history";
   if (/^\/api\/v2\/bots\/[^/]+\/focused-live-session\b/i.test(pathname)) return "http_focused_live_session";
   if (/^\/api\/v2\/bots\/[^/]+\/live-markers\b/i.test(pathname)) return "http_live_markers";
+  if (/^\/api\/v2\/bots\/[^/]+\/run-index\b/i.test(pathname)) return "http_compare";
+  if (/^\/api\/compare\/run-artifact\b/i.test(pathname)) return "http_compare";
+  if (/^\/api\/session-card-image\b/i.test(pathname)) return "http_chart_history";
   if (/^\/api\/v2\/bots\/[^/]+\/rollover-ready\b/i.test(pathname)) return "http_other";
   if (/^\/api\/v2\/bots\b/i.test(pathname)) return "http_bots";
   return "http_other";
@@ -5557,6 +5560,7 @@ function shouldUseRealtimeQuoteTriggerForBotInstance(instance: Pick<BotInstance,
   if (!instance) return false;
   if (!BOT_REALTIME_QUOTE_TRIGGER_ENABLED) return false;
   if (!isBotActive(String(instance.status || ""))) return false;
+  if (String(instance.status || "").trim().toLowerCase() === "error") return false;
   return shouldUseRealtimeQuoteTriggerForStrategy(instance.strategyId);
 }
 
@@ -5718,6 +5722,20 @@ type BotStrategyRuntime = {
 const botStrategyRuntimes = new Map<string, BotStrategyRuntime>();
 const botRuntimeMismatchEventKeyByInstance = new Map<string, string>();
 
+function isStrategyIntegrityFailedBotInstance(instanceLike: any): boolean {
+  const lastError = String(instanceLike?.lastError || "").trim().toLowerCase();
+  return lastError.startsWith("strategy_integrity_failed:");
+}
+
+function shouldKeepErroredBotResident(instanceLike: any, rtLike?: any): boolean {
+  if (!isStrategyIntegrityFailedBotInstance(instanceLike)) return true;
+  try {
+    return hasValidOpenRuntimePosition(rtLike as BotRuntime);
+  } catch {
+    return false;
+  }
+}
+
 function getBotStrategyIntegrity(instance: BotInstance, srt?: BotStrategyRuntime | null): {
   ok: boolean;
   expectedStrategyId: StrategyId;
@@ -5764,6 +5782,41 @@ function getBotStrategyIntegrity(instance: BotInstance, srt?: BotStrategyRuntime
     loadedStrategyHash,
     reason,
   };
+}
+
+function shouldRestoreBotInstance(instanceLike: BotInstance, rtLike?: BotRuntime | null): {
+  ok: boolean;
+  reason: string | null;
+} {
+  const instance = instanceLike as BotInstance;
+  const rt = (rtLike as BotRuntime | null | undefined) || null;
+  const status = String(instance?.status || "").trim().toLowerCase();
+  const lastError = String(instance?.lastError || "").trim().toLowerCase();
+  if (
+    status === "error" &&
+    lastError.startsWith("strategy_integrity_failed:") &&
+    !shouldKeepErroredBotResident(instance, rt)
+  ) {
+    return { ok: false, reason: "restore_skip_strategy_integrity_failed" };
+  }
+  try {
+    const srt = ensureBotStrategyRuntime(instance);
+    const integrity = getBotStrategyIntegrity(instance, srt);
+    if (!integrity.ok && !shouldKeepErroredBotResident(instance, rt)) {
+      return {
+        ok: false,
+        reason: `restore_skip_${String(integrity.reason || "strategy_integrity_failed")}`,
+      };
+    }
+  } catch (err: any) {
+    if (!shouldKeepErroredBotResident(instance, rt)) {
+      return {
+        ok: false,
+        reason: `restore_skip_strategy_runtime_error:${String(err?.message || err || "unknown")}`,
+      };
+    }
+  }
+  return { ok: true, reason: null };
 }
 
 function makeId(prefix: string): string {
@@ -13368,6 +13421,10 @@ function purgeInactiveAndOrphanBotState(reason: string = "unknown"): number {
         lastAction === "tp_arm_failed_after_live_entry" ||
         lastAction === "entry_live_error"
       );
+    const isQuarantinableStrategyIntegrityError =
+      status === "error" &&
+      isStrategyIntegrityFailedBotInstance(inst) &&
+      !shouldKeepErroredBotResident(inst, rt);
     if (status === "stopped") {
       botInstances.delete(instanceId);
       botRuntimes.delete(instanceId);
@@ -13385,6 +13442,13 @@ function purgeInactiveAndOrphanBotState(reason: string = "unknown"): number {
       continue;
     }
     if (isKilledOrErroredLiveInstance) {
+      botInstances.delete(instanceId);
+      botRuntimes.delete(instanceId);
+      botStrategyRuntimes.delete(instanceId);
+      removed += 1;
+      continue;
+    }
+    if (isQuarantinableStrategyIntegrityError) {
       botInstances.delete(instanceId);
       botRuntimes.delete(instanceId);
       botStrategyRuntimes.delete(instanceId);
@@ -13655,6 +13719,16 @@ function loadMultiMarketState() {
           executionModel:
             ((b as any).executionModel as any) || executionModelForStrategy(restoredStrategyId),
         };
+        const restoreGate = shouldRestoreBotInstance(merged, restoredRt || null);
+        if (!restoreGate.ok) {
+          skippedByHostLock += 1;
+          botRuntimes.delete(instanceId);
+          botStrategyRuntimes.delete(instanceId);
+          console.warn(
+            `[MULTI STATE] skip restored instance=${instanceId} reason=${String(restoreGate.reason || "restore_gate")}`
+          );
+          continue;
+        }
         botInstances.set(instanceId, merged);
         if (merged.runNum > BOT_RUN_SEQ) BOT_RUN_SEQ = merged.runNum;
         if (!botRuntimes.has(instanceId)) ensureRuntime(merged);
@@ -13728,6 +13802,17 @@ function loadMultiMarketStateFromJsonFile(): boolean {
         executionModel:
           ((b as any).executionModel as any) || executionModelForStrategy(restoredStrategyId),
       };
+      const restoredRt = botRuntimes.get(instanceId) || null;
+      const restoreGate = shouldRestoreBotInstance(merged, restoredRt);
+      if (!restoreGate.ok) {
+        skippedByHostLock += 1;
+        botRuntimes.delete(instanceId);
+        botStrategyRuntimes.delete(instanceId);
+        console.warn(
+          `[MULTI STATE] skip restored json instance=${instanceId} reason=${String(restoreGate.reason || "restore_gate")}`
+        );
+        continue;
+      }
       botInstances.set(instanceId, merged);
       if (merged.runNum > BOT_RUN_SEQ) BOT_RUN_SEQ = merged.runNum;
       if (!botRuntimes.has(instanceId)) {
@@ -19830,6 +19915,10 @@ async function tickAllBotRuntimes(): Promise<void> {
     const now = nowMs();
     const active = Array.from(botInstances.values()).filter((b) => {
       if (!isBotActive(b.status) || b.status === "stopped") return false;
+      if (String(b.status || "").toLowerCase() === "error" && isStrategyIntegrityFailedBotInstance(b)) {
+        const rt = botRuntimes.get(String(b.instanceId || ""));
+        if (!shouldKeepErroredBotResident(b, rt)) return false;
+      }
       if (!shouldUseRealtimeQuoteTriggerForBotInstance(b)) return true;
       const last = Number(botMaintenancePollLastAtMsByInstance.get(String(b.instanceId || "")) || 0);
       return !Number.isFinite(last) || (now - last) >= BOT_REALTIME_MAINTENANCE_POLL_MS;
@@ -25049,6 +25138,10 @@ app.get(/^\/api\/worker-overlay(?:\/.*)?$/, (req, res) => {
       suffix.startsWith("/") || suffix.startsWith("?") ? suffix : `/${suffix}`,
       selectedReadOnlyOrigin.endsWith("/") ? selectedReadOnlyOrigin : `${selectedReadOnlyOrigin}/`
     );
+    if (!proxyUrl.searchParams.has("sourceHostPort")) {
+      const sourceHostPort = String(PORT || "").trim();
+      if (sourceHostPort) proxyUrl.searchParams.set("sourceHostPort", sourceHostPort);
+    }
     const client = proxyUrl.protocol === "https:" ? https : http;
     const proxyReq = client.request(proxyUrl, {
       method: "GET",
@@ -25065,7 +25158,11 @@ app.get(/^\/api\/worker-overlay(?:\/.*)?$/, (req, res) => {
       res.setHeader("X-MMX-Read-Only-Origin", selectedReadOnlyOrigin);
       proxyRes.pipe(res);
     });
-    proxyReq.setTimeout(15_000, () => {
+    const proxyTimeoutMs =
+      /^\/api\/v2\/bots\/[^/]+\/last-session-history\b/i.test(String(proxyUrl.pathname || "").trim())
+        ? HISTORY_UPSTREAM_TIMEOUT_MS
+        : 15_000;
+    proxyReq.setTimeout(proxyTimeoutMs, () => {
       proxyReq.destroy(new Error("worker overlay proxy timeout"));
     });
     proxyReq.on("error", (err: any) => {
@@ -25111,11 +25208,24 @@ function rejectHeavyReadOnHotHost(req: express.Request, res: express.Response, e
     !truthy(query.includeTrace) &&
     !truthy(query.includeRecentTrades);
   const focusedLiveSessionRead = endpointName === "focused-live-session";
-  if (lightweightBotListRead || lightweightBotDetailRead || focusedLiveSessionRead) {
+  const lightweightRunIndexRead = endpointName === "run-index";
+  const lightweightSessionHistoryRead =
+    endpointName === "session-history" &&
+    !truthy(query.includeTrace);
+  const lightweightContinuityHistoryRead =
+    endpointName === "continuity-history" &&
+    !truthy(query.includeTrace);
+  if (
+    lightweightBotListRead ||
+    lightweightBotDetailRead ||
+    lightweightRunIndexRead ||
+    focusedLiveSessionRead ||
+    lightweightSessionHistoryRead ||
+    lightweightContinuityHistoryRead
+  ) {
     return false;
   }
   const allowHot = String(req.query?.allowHot || "").trim() === "1";
-  const readonlyWorker = String(req.get(READ_ONLY_WORKER_HEADER) || "").trim() === "1";
   const allowHotEndpoint =
     endpointName === "bots-list" ||
     endpointName === "bot-detail" ||
@@ -25132,7 +25242,6 @@ function rejectHeavyReadOnHotHost(req: express.Request, res: express.Response, e
     endpointName === "portfolio-markets" ||
     endpointName === "drive-audit";
   if (allowHot && allowHotEndpoint) return false;
-  if (allowHot && readonlyWorker) return false;
   const readonlyProxyTimeoutMs =
     endpointName === "run-audits/review"
       ? 120_000
@@ -25149,6 +25258,10 @@ function rejectHeavyReadOnHotHost(req: express.Request, res: express.Response, e
         String(req.originalUrl || req.url || "/"),
         selectedReadOnlyOrigin.endsWith("/") ? selectedReadOnlyOrigin : `${selectedReadOnlyOrigin}/`
       );
+      if (!proxyUrl.searchParams.has("sourceHostPort")) {
+        const sourceHostPort = String(PORT || "").trim();
+        if (sourceHostPort) proxyUrl.searchParams.set("sourceHostPort", sourceHostPort);
+      }
       const client = proxyUrl.protocol === "https:" ? https : http;
       const proxyReq = client.request(proxyUrl, {
         method: "GET",
@@ -30307,6 +30420,7 @@ app.get("/api/session-tuner", (req, res) => {
         partialQtyPct: Number.isFinite(Number(strategyParams?.partialQtyPct)) ? Number(strategyParams.partialQtyPct) : 0.20,
         profitLockMinPeakPctBet: Number.isFinite(Number(strategyParams?.profitLockMinPeakPctBet)) ? Number(strategyParams.profitLockMinPeakPctBet) : 0.42,
         profitLockDrawdownPct: Number.isFinite(Number(strategyParams?.profitLockDrawdownPct)) ? Number(strategyParams.profitLockDrawdownPct) : 0.20,
+        profitLockConfirmTicks: Number.isFinite(Number(strategyParams?.profitLockConfirmTicks)) ? Number(strategyParams.profitLockConfirmTicks) : 5,
         kalmanQ: Number.isFinite(Number(strategyParams?.kalmanQ)) ? Number(strategyParams.kalmanQ) : 0.00005,
         kalmanR: Number.isFinite(Number(strategyParams?.kalmanR)) ? Number(strategyParams.kalmanR) : 0.0008,
         inflectEps: Number.isFinite(Number(strategyParams?.inflectEps)) ? Number(strategyParams.inflectEps) : 0.0035,
@@ -30528,6 +30642,23 @@ app.get("/api/session-audits/review", (req, res) => {
         runNum,
         slug,
       });
+    }
+    const responseFormat = String(req.query.format ?? "").trim().toLowerCase();
+    if (responseFormat === "compact" || responseFormat === "json") {
+      const compactForResponse = readSessionAuditCompact(resolvedRunNum, slug);
+      if (!compactLooksUsable(compactForResponse)) {
+        return res.status(404).json({
+          ok: false,
+          error: "Session audit compact not found for requested run",
+          runNum,
+          slug,
+          resolvedRunNum,
+        });
+      }
+      if (resolvedRunNum !== runNum) {
+        res.setHeader("X-Session-Audit-Resolved-Run", String(resolvedRunNum));
+      }
+      return res.json(compactForResponse);
     }
     if (resolvedRunNum !== runNum) {
       res.setHeader("X-Session-Audit-Resolved-Run", String(resolvedRunNum));
@@ -32280,7 +32411,7 @@ app.post("/api/v2/bots", async (req, res) => {
       strategyId,
       mode,
       watchOnly,
-      status: watchOnly ? "watching" : "running",
+      status: watchOnly ? "watching" : "starting",
       launchedAtMs: now,
       stoppedAtMs: null,
       latestPnlUsd: mode === "paper" ? 0 : (latest?.pnlUsd ?? null),
@@ -32301,13 +32432,15 @@ app.post("/api/v2/bots", async (req, res) => {
       expectedDeclaredStrategyId: strategyId,
       executionModel: executionModelForStrategy(strategyId),
     };
-    botInstances.set(instanceId, bot);
     const rt = ensureRuntime(bot);
     ensureBotStrategyRuntime(bot);
     writeBotRunSummary(bot, rt);
     appendBotRunEvent(bot, rt, { event: "launch", watchOnly: bot.watchOnly, strategyId: bot.strategyId });
-    persistMultiMarketState();
     await tickBotRuntime(bot);
+    bot.status = watchOnly ? "watching" : "running";
+    bot.lastError = null;
+    botInstances.set(instanceId, bot);
+    persistMultiMarketState();
     const rtAfter = botRuntimes.get(instanceId) || null;
     return res.json({ ok: true, ...bot, runtime: rtAfter, supersededPaperBots });
   } catch (err: any) {
@@ -32333,7 +32466,11 @@ app.get("/api/v2/bots", (req, res) => {
   const items = Array.from(botInstances.values()).map((b) => {
     const latest = snap ? latestSnapshotForBot(snap, b) : null;
     const rt = botRuntimes.get(b.instanceId);
-    const srt = ensureBotStrategyRuntime(b);
+    const isErrored = String(b.status || "").trim().toLowerCase() === "error";
+    const shouldKeepErrored = isErrored && shouldKeepErroredBotResident(b, rt || null);
+    const srt = (isErrored && !shouldKeepErrored)
+      ? (botStrategyRuntimes.get(b.instanceId) || null)
+      : ensureBotStrategyRuntime(b);
     const identity = rt ? recoverBotOpenEntryIdentity(b, rt, srt?.lastSnapshot ?? null) : null;
     const strategyIntegrity = getBotStrategyIntegrity(b, srt);
     const truth = includeTruth ? computeBotRunTruthFromEvents(b) : { realizedPnlUsd: null, balanceUsd: null, fills: null };
@@ -32787,6 +32924,7 @@ app.get("/api/v2/bots/:instanceId/rollover-ready", (req, res) => {
 
 app.get("/api/v2/bots/:instanceId/run-index", (req, res) => {
   try {
+    if (rejectHeavyReadOnHotHost(req, res, "run-index")) return;
     const instanceId = String(req.params.instanceId || "").trim();
     const inst = botInstances.get(instanceId);
     if (!inst) return res.status(404).json({ ok: false, error: "instance not found" });
@@ -34597,6 +34735,7 @@ function buildCompactSessionHistoryResponseFromRunIndex(
 
 app.get("/api/compare/run-artifact", (req, res) => {
   try {
+    if (rejectHeavyReadOnHotHost(req, res, "compare-run-artifact")) return;
     const hostPort = String(req.query.hostPort || "").trim();
     const runNum = Math.floor(Number(req.query.runNum || 0));
     const kind = String(req.query.kind || "index").trim().toLowerCase();
@@ -34710,6 +34849,25 @@ app.get("/api/compare/run-artifact", (req, res) => {
           }
           lines.push(line);
         }
+      }
+      res.type("text/plain; charset=utf-8");
+      return res.send(lines.join("\n"));
+    }
+    if (kind === "session-audit-compacts") {
+      const compactDir = path.join(runDir, "session_audits");
+      if (!fs.existsSync(compactDir)) {
+        return res.status(404).json({ ok: false, error: "session audit dir not found", path: compactDir });
+      }
+      const files = fs.readdirSync(compactDir)
+        .filter((name) => String(name || "").toLowerCase().endsWith(".compact.json"))
+        .sort();
+      const lines: string[] = [];
+      for (const name of files) {
+        try {
+          const fullPath = path.join(compactDir, name);
+          const payload = JSON.parse(fs.readFileSync(fullPath, "utf8"));
+          lines.push(JSON.stringify(payload));
+        } catch {}
       }
       res.type("text/plain; charset=utf-8");
       return res.send(lines.join("\n"));
@@ -35498,8 +35656,9 @@ app.get("/api/v2/bots/:instanceId/latest-session-card", (req, res) => {
 });
 
 app.get("/api/session-card-image", async (req, res) => {
-  res.setHeader("X-MMX-Read-Path", "artifact");
   try {
+    if (rejectHeavyReadOnHotHost(req, res, "session-card-image")) return;
+    res.setHeader("X-MMX-Read-Path", "artifact");
     const slug = String(req.query.slug || "").trim();
     const format = String(req.query.format || "svg").trim().toLowerCase();
     const canMaterializeLocally = !HOT_SERVICE_MODE;
