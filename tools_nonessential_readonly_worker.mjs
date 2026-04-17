@@ -7,11 +7,23 @@ import http from "node:http";
 import https from "node:https";
 import os from "node:os";
 
+let startLiveClaimWorker = null;
+try {
+  ({ startLiveClaimWorker } = await import("./tools_nonessential_live_claim_worker.mjs"));
+} catch (error) {
+  console.warn(`[READONLY WORKER] live claim worker unavailable: ${String(error?.message || error)}`);
+}
+
 const PORT = Math.max(1, Number(process.env.PORT || 9001));
 const HOST = String(process.env.HOST || "0.0.0.0").trim() || "0.0.0.0";
 const WORKER_LABEL = String(process.env.WORKER_LABEL || `worker:${PORT}`).trim() || `worker:${PORT}`;
+const RAW_BASE_PATH = String(process.env.BASE_PATH || "").trim();
+const BASE_PATH = RAW_BASE_PATH
+  ? `/${RAW_BASE_PATH.replace(/^\/+|\/+$/g, "")}`
+  : "";
 const UPSTREAM_ORIGIN = String(process.env.UPSTREAM_ORIGIN || "").trim().replace(/\/+$/, "");
 const UPSTREAM_ORIGIN_MAP_RAW = String(process.env.UPSTREAM_ORIGIN_MAP || "").trim();
+const WORKER_SCOPE = String(process.env.WORKER_SCOPE || "shared").trim().toLowerCase() || "shared";
 const CACHE_ROOT = path.resolve(String(process.env.CACHE_ROOT || `/tmp/nonessential_worker_${PORT}`));
 const DEFAULT_TTL_MS = Math.max(1000, Number(process.env.DEFAULT_TTL_MS || 15000));
 const ERROR_TTL_MS = Math.max(1000, Number(process.env.ERROR_TTL_MS || 5000));
@@ -19,6 +31,7 @@ const ALLOW_HOT_QUERY = String(process.env.ALLOW_HOT_QUERY || "1").trim() || "1"
 const READ_ONLY_WORKER_HEADER = "x-mmx-readonly-worker";
 const UPSTREAM_TIMEOUT_MS = Math.max(5000, Number(process.env.UPSTREAM_TIMEOUT_MS || 15000));
 const HISTORY_UPSTREAM_TIMEOUT_MS = Math.max(15000, Number(process.env.HISTORY_UPSTREAM_TIMEOUT_MS || 45000));
+const SESSION_AUDIT_UPSTREAM_TIMEOUT_MS = Math.max(15000, Number(process.env.SESSION_AUDIT_UPSTREAM_TIMEOUT_MS || 120000));
 const CACHEABLE_PATH_PATTERNS = [
   /^\/api\/operator-notices\b/i,
   /^\/api\/stats\/summary\b/i,
@@ -30,6 +43,8 @@ const CACHEABLE_PATH_PATTERNS = [
   /^\/api\/v2\/markets\/volume-5m-24h\b/i,
   /^\/api\/v2\/bots\b/i,
   /^\/api\/v2\/bots\/[^/]+\b/i,
+  /^\/api\/v2\/bots\/[^/]+\/focused-live-session\b/i,
+  /^\/api\/v2\/bots\/[^/]+\/live-markers\b/i,
   /^\/api\/v2\/bots\/[^/]+\/last-session-history\b/i,
   /^\/api\/v2\/bots\/[^/]+\/continuity-history\b/i,
   /^\/api\/v2\/bots\/[^/]+\/latest-session-artifact\b/i,
@@ -50,6 +65,8 @@ const CACHE_TTL_BY_PATH = [
   { pattern: /^\/api\/v2\/strategies\b/i, ttlMs: Math.max(5000, Number(process.env.STRATEGIES_CACHE_TTL_MS || 60000)) },
   { pattern: /^\/api\/v2\/markets\/hot\b/i, ttlMs: Math.max(1000, Number(process.env.MARKETS_HOT_CACHE_TTL_MS || 5000)) },
   { pattern: /^\/api\/v2\/markets\/volume-5m-24h\b/i, ttlMs: Math.max(1000, Number(process.env.MARKETS_VOLUME_24H_CACHE_TTL_MS || 15000)) },
+  { pattern: /^\/api\/v2\/bots\/[^/]+\/focused-live-session\b/i, ttlMs: Math.max(100, Number(process.env.FOCUSED_LIVE_SESSION_CACHE_TTL_MS || 250)) },
+  { pattern: /^\/api\/v2\/bots\/[^/]+\/live-markers\b/i, ttlMs: Math.max(50, Number(process.env.LIVE_MARKERS_CACHE_TTL_MS || 150)) },
   { pattern: /^\/api\/v2\/bots\b/i, ttlMs: Math.max(500, Number(process.env.BOTS_CACHE_TTL_MS || 1000)) },
   { pattern: /^\/api\/v2\/bots\/[^/]+\b/i, ttlMs: Math.max(500, Number(process.env.BOT_DETAIL_CACHE_TTL_MS || 1000)) },
   { pattern: /^\/api\/v2\/bots\/[^/]+\/last-session-history\b/i, ttlMs: Math.max(1000, Number(process.env.LAST_SESSION_HISTORY_CACHE_TTL_MS || 5000)) },
@@ -77,27 +94,30 @@ const RUN_AUDIT_SCRIPT_PATH = path.resolve(String(process.env.RUN_AUDIT_SCRIPT_P
 const RUN_AUDIT_REMOTE_HOST = String(process.env.RUN_AUDIT_REMOTE_HOST || "").trim();
 const RUN_AUDIT_REMOTE_KEY = String(process.env.RUN_AUDIT_REMOTE_KEY || "").trim();
 const RUN_AUDIT_REMOTE_ROOT = String(process.env.RUN_AUDIT_REMOTE_ROOT || "").trim().replace(/\/+$/, "");
+const RUN_AUDIT_LOCAL_FS_ENABLED = !!RUN_AUDIT_REMOTE_ROOT && !(RUN_AUDIT_REMOTE_HOST && RUN_AUDIT_REMOTE_KEY);
 const RUN_AUDIT_HOST_PORT = String(process.env.RUN_AUDIT_HOST_PORT || "8788").trim() || "8788";
 const RUN_AUDIT_PUBLIC_BASE = String(process.env.RUN_AUDIT_PUBLIC_BASE || UPSTREAM_ORIGIN || "").trim().replace(/\/+$/, "");
 const RUN_AUDIT_MAX_AGE_MS = Math.max(1000, Number(process.env.RUN_AUDIT_MAX_AGE_MS || 30000));
 const RUN_AUDIT_TOLERATED_MISSING_SESSIONS = Math.max(0, Number(process.env.RUN_AUDIT_TOLERATED_MISSING_SESSIONS || 3));
-const RUN_AUDIT_EXPECTED_CODE_VERSION = String(process.env.RUN_AUDIT_EXPECTED_CODE_VERSION || "run_audit_mv_v37").trim() || "run_audit_mv_v37";
-const RUN_AUDIT_SYNC_BUILD_TIMEOUT_MS = Math.max(1000, Number(process.env.RUN_AUDIT_SYNC_BUILD_TIMEOUT_MS || 60000));
+const RUN_AUDIT_EXPECTED_CODE_VERSION = String(process.env.RUN_AUDIT_EXPECTED_CODE_VERSION || "run_audit_mv_v41").trim() || "run_audit_mv_v41";
+const RUN_AUDIT_SYNC_BUILD_TIMEOUT_MS = Math.max(1000, Number(process.env.RUN_AUDIT_SYNC_BUILD_TIMEOUT_MS || 300000));
 const RUN_AUDIT_MIRROR_DETAILED_SESSION_LIMIT = Math.max(0, Number(process.env.RUN_AUDIT_MIRROR_DETAILED_SESSION_LIMIT || 40));
 const RUN_AUDIT_MIRROR_COLD_COMPACT_SESSION_LIMIT = Math.max(0, Number(process.env.RUN_AUDIT_MIRROR_COLD_COMPACT_SESSION_LIMIT || 60));
 const RUN_AUDIT_BACKGROUND_WARM_ENABLED = String(process.env.RUN_AUDIT_BACKGROUND_WARM_ENABLED || "1").trim() !== "0";
 const RUN_AUDIT_BACKGROUND_WARM_INTERVAL_MS = Math.max(5000, Number(process.env.RUN_AUDIT_BACKGROUND_WARM_INTERVAL_MS || 15000));
 const RUN_AUDIT_BACKGROUND_MAX_BOTS = Math.max(1, Number(process.env.RUN_AUDIT_BACKGROUND_MAX_BOTS || 4));
+// Run audits can build from live bot endpoints and local mirrors; the SSH-backed
+// remote canonical source is only needed as a fallback when those are unavailable.
 const RUN_AUDIT_ENABLED = String(process.env.RUN_AUDIT_ENABLED || "1").trim() !== "0"
-  && !!RUN_AUDIT_REMOTE_HOST
-  && !!RUN_AUDIT_REMOTE_KEY
-  && !!RUN_AUDIT_REMOTE_ROOT
   && fs.existsSync(RUN_AUDIT_SCRIPT_PATH);
 const RUN_AUDIT_CACHE_ROOT = path.resolve(String(process.env.RUN_AUDIT_CACHE_ROOT || path.join(CACHE_ROOT, "run_audits")));
 const GAMMA_BASE = String(process.env.GAMMA_BASE || "https://gamma-api.polymarket.com").trim().replace(/\/+$/, "");
 const CPU_SAMPLE_MIN_INTERVAL_NS = 250_000_000;
 const CPU_SAMPLE_EMA_ALPHA = 0.35;
 const SESSION_CARD_IMAGE_CACHE_ROOT = path.resolve(String(process.env.SESSION_CARD_IMAGE_CACHE_ROOT || path.join(CACHE_ROOT, "session_card_images")));
+const LIVE_BALANCE_SNAPSHOT_ROOT = path.resolve(String(process.env.LIVE_BALANCE_SNAPSHOT_ROOT || path.join(CACHE_ROOT, "live_balance_snapshots")));
+const SESSION_CARD_BACKGROUND_WARM_ENABLED = String(process.env.SESSION_CARD_BACKGROUND_WARM_ENABLED || "0").trim() === "1";
+const SESSION_CARD_WARM_HISTORY_LIMIT = Math.max(3, Number(process.env.SESSION_CARD_WARM_HISTORY_LIMIT || 12));
 const SIPS_BIN = String(process.env.SIPS_BIN || "/usr/bin/sips").trim() || "/usr/bin/sips";
 const MAGICK_BIN = String(process.env.MAGICK_BIN || "/usr/bin/magick").trim() || "/usr/bin/magick";
 const CONVERT_BIN = String(process.env.CONVERT_BIN || "/usr/bin/convert").trim() || "/usr/bin/convert";
@@ -105,8 +125,15 @@ const SESSION_CARD_REMOTE_CANONICAL_READ_ENABLED = String(process.env.SESSION_CA
 const SESSION_CARD_REMOTE_CANONICAL_WRITE_ENABLED = String(process.env.SESSION_CARD_REMOTE_CANONICAL_WRITE_ENABLED || "1").trim() !== "0";
 const ACTIVITY_LOG_LIMIT = Math.max(50, Number(process.env.ACTIVITY_LOG_LIMIT || 400));
 const ACTIVITY_LOG_FILE = path.join(CACHE_ROOT, "activity_log.json");
+const LIVE_CLAIM_ENABLED = String(process.env.LIVE_CLAIM_ENABLED || "0").trim() === "1";
+const LIVE_ONLY_SOURCE_HOST_PORT = String(process.env.LIVE_ONLY_SOURCE_HOST_PORT || "").trim();
+const LIVE_ONLY_WORKER = WORKER_SCOPE === "live" || LIVE_ONLY_SOURCE_HOST_PORT === "8791";
+const LIVE_ONLY_DEFAULT_ENGINE = LIVE_ONLY_SOURCE_HOST_PORT === "8791" ? "live" : "paper";
+const UPSTREAM_HEALTH_STALE_MS = Math.max(5000, Number(process.env.UPSTREAM_HEALTH_STALE_MS || 30000));
 
 const cacheMem = new Map();
+const workerBotMetaCache = new Map();
+const WORKER_BOT_META_CACHE_TTL_MS = 30000;
 const inflight = new Map();
 let parityInflight = null;
 const runAuditInflight = new Map();
@@ -118,6 +145,29 @@ let cpuSampleLastPct = 0;
 let activitySeq = 0;
 const activityLog = [];
 const activityClients = new Set();
+const storageHealthState = {
+  degraded: false,
+  lastWriteTarget: "",
+  lastWriteCode: "",
+  lastWriteError: "",
+  lastWriteFailedAtMs: 0,
+  lastNoSpaceAtMs: 0,
+  stdoutWriteError: "",
+  stdoutWriteFailedAtMs: 0,
+  activityLogWriteError: "",
+  activityLogWriteFailedAtMs: 0,
+};
+const upstreamHealthState = {
+  lastFetchOkAtMs: 0,
+  lastFetchErrAtMs: 0,
+  lastFetchStatusCode: null,
+  lastFetchUrl: "",
+  lastFetchError: "",
+  lastProbeAtMs: 0,
+  lastProbeOkAtMs: 0,
+  lastProbeErrAtMs: 0,
+  lastProbeError: "",
+};
 
 function parseUpstreamOriginMap(raw) {
   const out = new Map();
@@ -142,6 +192,7 @@ fs.mkdirSync(CACHE_ROOT, { recursive: true });
 fs.mkdirSync(PARITY_OUT_DIR, { recursive: true });
 fs.mkdirSync(RUN_AUDIT_CACHE_ROOT, { recursive: true });
 fs.mkdirSync(SESSION_CARD_IMAGE_CACHE_ROOT, { recursive: true });
+fs.mkdirSync(LIVE_BALANCE_SNAPSHOT_ROOT, { recursive: true });
 
 try {
   if (fs.existsSync(ACTIVITY_LOG_FILE)) {
@@ -153,8 +204,46 @@ try {
   }
 } catch {}
 
+function isNoSpaceError(error) {
+  return String(error?.code || "").trim().toUpperCase() === "ENOSPC"
+    || /no space left on device/i.test(String(error?.message || error || ""));
+}
+
+function recordStorageWriteFailure(target, error) {
+  const now = Date.now();
+  const code = String(error?.code || "").trim();
+  const message = String(error?.message || error || "unknown storage write failure");
+  storageHealthState.degraded = true;
+  storageHealthState.lastWriteTarget = String(target || "").trim() || "unknown";
+  storageHealthState.lastWriteCode = code;
+  storageHealthState.lastWriteError = message;
+  storageHealthState.lastWriteFailedAtMs = now;
+  if (isNoSpaceError(error)) storageHealthState.lastNoSpaceAtMs = now;
+  if (target === "stdout") {
+    storageHealthState.stdoutWriteError = message;
+    storageHealthState.stdoutWriteFailedAtMs = now;
+  }
+  if (target === "activity_log") {
+    storageHealthState.activityLogWriteError = message;
+    storageHealthState.activityLogWriteFailedAtMs = now;
+  }
+  try {
+    process.stderr.write(
+      `[readonly-worker ${new Date(now).toISOString()} ${WORKER_LABEL}] STORAGE WRITE FAILURE target=${storageHealthState.lastWriteTarget} code=${code || "-"} error=${message}\n`
+    );
+  } catch {}
+}
+
+process.stdout.on("error", (error) => {
+  recordStorageWriteFailure("stdout", error);
+});
+
 function log(line) {
-  process.stdout.write(`[readonly-worker ${new Date().toISOString()} ${WORKER_LABEL}] ${line}\n`);
+  try {
+    process.stdout.write(`[readonly-worker ${new Date().toISOString()} ${WORKER_LABEL}] ${line}\n`);
+  } catch (error) {
+    recordStorageWriteFailure("stdout", error);
+  }
 }
 
 function summarizeUrl(urlLike) {
@@ -179,6 +268,28 @@ function normalizeRunAuditHostPort(raw) {
   }
   const fallback = String(RUN_AUDIT_HOST_PORT || "8788").trim() || "8788";
   return fallback;
+}
+
+function resolveScopedSourceHostPort(raw) {
+  const normalized = normalizeRunAuditHostPort(raw || RUN_AUDIT_HOST_PORT);
+  if (LIVE_ONLY_SOURCE_HOST_PORT && normalized !== LIVE_ONLY_SOURCE_HOST_PORT) {
+    throw new Error(`worker scoped to sourceHostPort=${LIVE_ONLY_SOURCE_HOST_PORT}; requested=${normalized}`);
+  }
+  return normalized;
+}
+
+function isLiveOnlyWorkerRequest(reqUrl) {
+  const pathName = String(reqUrl?.pathname || "").trim();
+  if (!LIVE_ONLY_WORKER || !pathName) return false;
+  return (
+    /^\/api\/session-history\b/i.test(pathName) ||
+    /^\/api\/chart-history\b/i.test(pathName) ||
+    /^\/api\/v2\/bots\b/i.test(pathName)
+  );
+}
+
+function requestTargetsPaperMode(reqUrl) {
+  return String(reqUrl?.searchParams?.get("engine") || "").trim().toLowerCase() === "paper";
 }
 
 function slugStartMs(slugLike) {
@@ -243,6 +354,7 @@ function activityCategoryForType(typeLike) {
   if (type === "volume-series-build") return "Market Volume Series";
   if (type.startsWith("parity-build")) return "Session Parity";
   if (type.startsWith("run-audit")) return "Run Audit";
+  if (type.startsWith("live-claim")) return "Live Ticket Claim";
   return "Other";
 }
 
@@ -296,11 +408,33 @@ function workerTaskCatalog() {
         "Serve cached run audits when still fresh",
       ],
     },
+    {
+      category: "Live Ticket Claim",
+      tasks: [
+        "Check Polymarket wallet balance claimables around +15s in each live session",
+        "Redeem claimable tickets for live-enabled trading only",
+      ],
+    },
   ];
 }
 
+function withBasePath(pathname) {
+  const path = String(pathname || "").trim();
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  if (!BASE_PATH) return normalized;
+  return normalized === "/" ? BASE_PATH : `${BASE_PATH}${normalized}`;
+}
+
+function matchesPath(reqPath, routePath) {
+  const requestPath = String(reqPath || "").trim();
+  const route = String(routePath || "").trim();
+  if (requestPath === route) return true;
+  if (BASE_PATH && requestPath === withBasePath(route)) return true;
+  return false;
+}
+
 function workerCategoryList() {
-  return ["Worker Lifecycle", "Proxy And Cache", "Latest Session Card", "Session Artifact Summary", "Market Volume Series", "Session Parity", "Run Audit"];
+  return ["Worker Lifecycle", "Proxy And Cache", "Latest Session Card", "Session Artifact Summary", "Market Volume Series", "Session Parity", "Run Audit", "Live Ticket Claim"];
 }
 
 function pushActivity(message, details = {}) {
@@ -321,7 +455,9 @@ function pushActivity(message, details = {}) {
       worker: WORKER_LABEL,
       items: activityLog,
     }, null, 2) + "\n");
-  } catch {}
+  } catch (error) {
+    recordStorageWriteFailure("activity_log", error);
+  }
   const payload = `data: ${JSON.stringify(item)}\n\n`;
   for (const client of activityClients) {
     try {
@@ -610,6 +746,11 @@ function renderActivityDashboard() {
       });
     }
 
+    const activityPage = ${JSON.stringify(withBasePath("/activity"))};
+    const activityApiUrl = ${JSON.stringify(withBasePath("/api/activity"))};
+    const activityStreamUrl = ${JSON.stringify(withBasePath("/api/activity/stream"))};
+    const healthApiUrl = ${JSON.stringify(withBasePath("/api/health"))};
+
     async function fetchJsonWithTimeout(url, timeoutMs) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -648,7 +789,7 @@ function renderActivityDashboard() {
 
     async function pollHealth() {
       try {
-        const payload = await fetchJsonWithTimeout('/api/health', 4000);
+        const payload = await fetchJsonWithTimeout(healthApiUrl, 4000);
         const line = formatHealthLine(payload);
         healthStatusEl.textContent = 'LIVE';
         if (line !== lastHealthLine) {
@@ -725,7 +866,7 @@ function renderActivityDashboard() {
 
     async function loadInitial() {
       try {
-        const payload = await fetchJsonWithTimeout("/api/activity", 4000);
+        const payload = await fetchJsonWithTimeout(activityApiUrl, 4000);
         const items = Array.isArray(payload && payload.items) ? payload.items : [];
         resetFeed();
         const allGroup = ensureGroup("All Activity");
@@ -740,7 +881,7 @@ function renderActivityDashboard() {
 
     async function refreshActivity() {
       try {
-        const payload = await fetchJsonWithTimeout("/api/activity", 4000);
+        const payload = await fetchJsonWithTimeout(activityApiUrl, 4000);
         const items = Array.isArray(payload && payload.items) ? payload.items : [];
         items.forEach(addRow);
       } catch {}
@@ -752,9 +893,12 @@ function renderActivityDashboard() {
       allGroup.empty.hidden = false;
       allGroup.count.textContent = "0 items";
       renderEmptyGroups();
+      if (activityPage && window.location.pathname !== activityPage && window.location.pathname !== "/") {
+        statusEl.textContent = "LIVE STREAM CONNECTED";
+      }
       void pollHealth();
       void loadInitial();
-      const source = new EventSource("/api/activity/stream");
+      const source = new EventSource(activityStreamUrl);
       source.onopen = () => { statusEl.textContent = "LIVE STREAM CONNECTED"; };
       source.onmessage = (event) => {
         try {
@@ -847,7 +991,7 @@ function ttlForPath(pathname) {
 function timeoutForPath(pathname) {
   if (/^\/api\/session-history\b/i.test(pathname)) return HISTORY_UPSTREAM_TIMEOUT_MS;
   if (/^\/api\/run-audits\/review\b/i.test(pathname)) return HISTORY_UPSTREAM_TIMEOUT_MS;
-  if (/^\/api\/session-audits\/review\b/i.test(pathname)) return HISTORY_UPSTREAM_TIMEOUT_MS;
+  if (/^\/api\/session-audits\/review\b/i.test(pathname)) return SESSION_AUDIT_UPSTREAM_TIMEOUT_MS;
   if (/^\/api\/v2\/bots\/[^/]+\/run-index\b/i.test(pathname)) return HISTORY_UPSTREAM_TIMEOUT_MS;
   if (/^\/api\/v2\/bots\/[^/]+\/continuity-history\b/i.test(pathname)) return HISTORY_UPSTREAM_TIMEOUT_MS;
   if (/^\/api\/v2\/bots\/[^/]+\/latest-session-card\b/i.test(pathname)) return HISTORY_UPSTREAM_TIMEOUT_MS;
@@ -919,6 +1063,345 @@ function writeLastSessionHistoryCache(instanceIdLike, marketPrefixLike, payload)
   } catch {}
 }
 
+function findCachedLastSessionHistoryInstanceForSlug(slugLike) {
+  const slug = String(slugLike || "").trim();
+  if (!slug) return "";
+  let entries = [];
+  try {
+    entries = fs.readdirSync(CACHE_ROOT, { withFileTypes: true });
+  } catch {
+    return "";
+  }
+  for (const entry of entries) {
+    if (!entry?.isFile?.()) continue;
+    const name = String(entry.name || "");
+    if (!/^last_session_history_.*\.json$/i.test(name)) continue;
+    try {
+      const payload = JSON.parse(fs.readFileSync(path.join(CACHE_ROOT, name), "utf8"));
+      const instanceId = String(payload?.instanceId || "").trim();
+      if (!instanceId) continue;
+      const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+      if (sessions.some((row) => String(row?.slug || "").trim() === slug)) return instanceId;
+    } catch {}
+  }
+  return "";
+}
+
+function liveBalanceSnapshotPath(instanceIdLike) {
+  const safeInstance = String(instanceIdLike || "").trim().replace(/[^a-zA-Z0-9_-]+/g, "_") || "unknown";
+  return path.join(LIVE_BALANCE_SNAPSHOT_ROOT, `${safeInstance}.json`);
+}
+
+function readLiveBalanceSnapshotCache(instanceIdLike) {
+  try {
+    const p = liveBalanceSnapshotPath(instanceIdLike);
+    if (!fs.existsSync(p)) return null;
+    const parsed = JSON.parse(fs.readFileSync(p, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLiveBalanceSnapshotCache(instanceIdLike, payload) {
+  try {
+    fs.writeFileSync(liveBalanceSnapshotPath(instanceIdLike), JSON.stringify(payload, null, 2) + "\n");
+  } catch {}
+}
+
+function deleteLiveBalanceSnapshotCache(instanceIdLike) {
+  try {
+    const p = liveBalanceSnapshotPath(instanceIdLike);
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+  } catch {}
+}
+
+function normalizeLiveBalanceSnapshotRow(rowLike) {
+  const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+  if (!row) return null;
+  const slug = String(row?.balanceSessionSlug || row?.slug || row?.marketSlug || "").trim();
+  const portfolioBalanceUsd = Number(row?.portfolioBalanceUsd ?? row?.balanceUsd);
+  const cashBalanceUsd = Number(row?.cashBalanceUsd ?? row?.collateralBalanceUsd);
+  const openPositionsValueUsd = Number(row?.openPositionsValueUsd);
+  const tsMs = Number(row?.t ?? row?.completedAtMs ?? row?.tsMs);
+  if (!slug || !(Number.isFinite(portfolioBalanceUsd) && portfolioBalanceUsd >= 0) || !(Number.isFinite(tsMs) && tsMs > 0)) return null;
+  return {
+    t: Math.floor(tsMs),
+    balanceUsd: Number(portfolioBalanceUsd.toFixed(6)),
+    portfolioBalanceUsd: Number(portfolioBalanceUsd.toFixed(6)),
+    cashBalanceUsd: Number.isFinite(cashBalanceUsd) ? Number(cashBalanceUsd.toFixed(6)) : null,
+    openPositionsValueUsd: Number.isFinite(openPositionsValueUsd) ? Number(openPositionsValueUsd.toFixed(6)) : null,
+    balanceSessionSlug: slug,
+    snapshotReason: String(row?.snapshotReason || row?.reason || "live_claim").trim() || "live_claim",
+    redeemedValueUsd: Number.isFinite(Number(row?.redeemedValueUsd)) ? Number(row.redeemedValueUsd) : null,
+    claimed: Number.isFinite(Number(row?.claimed)) ? Number(row.claimed) : null,
+  };
+}
+
+function normalizeWorkerBotMeta(itemLike) {
+  const item = itemLike && typeof itemLike === "object" ? itemLike : null;
+  const instanceId = String(item?.instanceId || "").trim();
+  if (!instanceId) return null;
+  return {
+    instanceId,
+    mode: String(item?.mode || "").trim().toLowerCase() || null,
+    watchOnly: item?.watchOnly === true,
+    runNum: Number.isFinite(Number(item?.runNum)) ? Math.floor(Number(item.runNum)) : null,
+    runId: String(item?.runId || "").trim() || null,
+    startBalanceUsd: Number.isFinite(Number(item?.startBalanceUsd)) ? Number(item.startBalanceUsd) : null,
+  };
+}
+
+async function readWorkerBotMeta(instanceIdLike, opts = {}) {
+  const instanceId = String(instanceIdLike || "").trim();
+  if (!instanceId) return null;
+  const sourceHostPort = String(opts?.sourceHostPort || "").trim();
+  const cacheKey = `${sourceHostPort || "default"}:${instanceId}`;
+  const now = Date.now();
+  const cached = workerBotMetaCache.get(cacheKey) || null;
+  if (cached && Number.isFinite(Number(cached.expiresAtMs)) && Number(cached.expiresAtMs) > now) {
+    return cached.meta || null;
+  }
+  const botsReq = new URL("/api/v2/bots", "http://worker.local");
+  if (sourceHostPort) botsReq.searchParams.set("sourceHostPort", sourceHostPort);
+  botsReq.searchParams.set("includeTrace", "0");
+  botsReq.searchParams.set("includeRecentTrades", "0");
+  botsReq.searchParams.set("includeTruth", "0");
+  const botsPayload = await fetchJsonDirect(buildUpstreamUrl(botsReq).toString());
+  const items = Array.isArray(botsPayload?.items) ? botsPayload.items : [];
+  const meta = normalizeWorkerBotMeta(items.find((item) => String(item?.instanceId || "").trim() === instanceId) || null);
+  workerBotMetaCache.set(cacheKey, {
+    expiresAtMs: now + WORKER_BOT_META_CACHE_TTL_MS,
+    meta,
+  });
+  return meta;
+}
+
+function recordLiveBalanceSnapshotForInstance(instanceMetaLike, snapshotLike) {
+  const instanceMeta = instanceMetaLike && typeof instanceMetaLike === "object" ? instanceMetaLike : {};
+  const instanceId = String(instanceMeta?.instanceId || "").trim();
+  const snapshot = normalizeLiveBalanceSnapshotRow(snapshotLike);
+  if (!(instanceId && snapshot)) return false;
+  const existing = readLiveBalanceSnapshotCache(instanceId) || {};
+  const priorRows = Array.isArray(existing?.snapshots) ? existing.snapshots : [];
+  const bySlug = new Map();
+  for (const row of priorRows) {
+    const normalized = normalizeLiveBalanceSnapshotRow(row);
+    if (!normalized) continue;
+    bySlug.set(normalized.balanceSessionSlug, normalized);
+  }
+  const prior = bySlug.get(snapshot.balanceSessionSlug) || null;
+  if (!prior || Number(snapshot.t) >= Number(prior.t || 0)) {
+    bySlug.set(snapshot.balanceSessionSlug, snapshot);
+  }
+  const nextPayload = {
+    instanceId,
+    mode: String(instanceMeta?.mode || existing?.mode || "").trim().toLowerCase() || null,
+    watchOnly: instanceMeta?.watchOnly === true ? true : (existing?.watchOnly === true),
+    runNum: Number.isFinite(Number(instanceMeta?.runNum)) ? Math.floor(Number(instanceMeta.runNum)) : (Number(existing?.runNum) || null),
+    runId: String(instanceMeta?.runId || existing?.runId || "").trim() || null,
+    startBalanceUsd: Number.isFinite(Number(instanceMeta?.startBalanceUsd))
+      ? Number(instanceMeta.startBalanceUsd)
+      : (Number.isFinite(Number(existing?.startBalanceUsd)) ? Number(existing.startBalanceUsd) : null),
+    updatedAtMs: Date.now(),
+    snapshots: Array.from(bySlug.values()).sort((a, b) => Number(a?.t || 0) - Number(b?.t || 0)),
+  };
+  writeLiveBalanceSnapshotCache(instanceId, nextPayload);
+  return true;
+}
+
+function inferSessionBalanceSeed(sessionsAsc, fallbackLike = null) {
+  const fallback = Number(fallbackLike);
+  if (Number.isFinite(fallback)) return Number(fallback);
+  for (const row of sessionsAsc) {
+    const balanceUsd = Number(row?.continuityBalanceUsd ?? row?.balanceUsd);
+    const pnlUsd = Number(row?.actualPnlUsd ?? row?.correctedPnlUsd ?? row?.pnlUsd);
+    if (Number.isFinite(balanceUsd) && Number.isFinite(pnlUsd)) {
+      return Number((balanceUsd - pnlUsd).toFixed(6));
+    }
+  }
+  return null;
+}
+
+function shouldApplyWorkerBalanceSnapshots(opts = {}, cache = {}) {
+  const watchOnly = opts?.watchOnly === true || cache?.watchOnly === true;
+  if (watchOnly) return false;
+  const mode = String(opts?.mode || cache?.mode || "").trim().toLowerCase();
+  if (!mode) return false;
+  return mode === "live";
+}
+
+function applyWorkerBalanceSnapshotsToSessions(instanceIdLike, sessionsLike, opts = {}) {
+  const instanceId = String(instanceIdLike || "").trim();
+  const sessions = Array.isArray(sessionsLike) ? sessionsLike : [];
+  if (!(instanceId && sessions.length)) return sessions;
+  const cache = readLiveBalanceSnapshotCache(instanceId);
+  if (!shouldApplyWorkerBalanceSnapshots(opts, cache)) {
+    if (opts?.watchOnly === true || cache?.watchOnly === true) {
+      deleteLiveBalanceSnapshotCache(instanceId);
+    }
+    return sessions;
+  }
+  const snapshotRows = Array.isArray(cache?.snapshots)
+    ? cache.snapshots.map((row) => normalizeLiveBalanceSnapshotRow(row)).filter(Boolean)
+    : [];
+  if (!snapshotRows.length) return sessions;
+  const expectedRunNum = Number(opts?.runNum ?? cache?.runNum);
+  const expectedRunId = String(opts?.runId || cache?.runId || "").trim();
+  const lastSnapshotBySlug = new Map();
+  for (const row of snapshotRows) {
+    if (!row) continue;
+    const prior = lastSnapshotBySlug.get(row.balanceSessionSlug) || null;
+    if (!prior || Number(row.t) >= Number(prior.t || 0)) lastSnapshotBySlug.set(row.balanceSessionSlug, row);
+  }
+  if (!lastSnapshotBySlug.size) return sessions;
+  const sessionsAsc = sessions
+    .filter((row) => {
+      if (!(Number.isFinite(expectedRunNum) && expectedRunNum > 0) && !expectedRunId) return true;
+      const rowRunNum = Number(row?.runNum);
+      const rowRunId = String(row?.runIdText || row?.runId || "").trim();
+      if (Number.isFinite(expectedRunNum) && expectedRunNum > 0 && Number.isFinite(rowRunNum) && Math.floor(rowRunNum) !== Math.floor(expectedRunNum)) return false;
+      if (expectedRunId && rowRunId && rowRunId !== expectedRunId) return false;
+      return true;
+    })
+    .slice()
+    .sort((a, b) => Number(a?.startMs ?? slugStartMs(a?.slug) ?? 0) - Number(b?.startMs ?? slugStartMs(b?.slug) ?? 0));
+  if (!sessionsAsc.length) return sessions;
+  let runningBalanceUsd = inferSessionBalanceSeed(sessionsAsc, opts?.startBalanceUsd ?? cache?.startBalanceUsd);
+  for (const sess of sessionsAsc) {
+    const slug = String(sess?.slug || "").trim();
+    const snapshot = slug ? (lastSnapshotBySlug.get(slug) || null) : null;
+    const snapshotPortfolioBalanceUsd = Number(snapshot?.portfolioBalanceUsd ?? snapshot?.balanceUsd);
+    if (snapshot && Number.isFinite(snapshotPortfolioBalanceUsd)) {
+      const actualBalanceUsd = Number(snapshotPortfolioBalanceUsd.toFixed(6));
+      if (Number.isFinite(runningBalanceUsd)) {
+        const actualPnlUsd = Number((actualBalanceUsd - runningBalanceUsd).toFixed(6));
+        sess.actualPnlUsd = actualPnlUsd;
+        sess.correctedPnlUsd = actualPnlUsd;
+        sess.pnlUsd = actualPnlUsd;
+      }
+      sess.balanceUsd = actualBalanceUsd;
+      sess.continuityBalanceUsd = actualBalanceUsd;
+      sess.portfolioBalanceUsd = actualBalanceUsd;
+      if (Number.isFinite(Number(snapshot?.cashBalanceUsd))) {
+        sess.cashBalanceUsd = Number(Number(snapshot.cashBalanceUsd).toFixed(6));
+      }
+      if (Number.isFinite(Number(snapshot?.openPositionsValueUsd))) {
+        sess.openPositionsValueUsd = Number(Number(snapshot.openPositionsValueUsd).toFixed(6));
+      }
+      sess.balanceTruthSource = "worker_portfolio_balance_snapshot";
+      if (!Number.isFinite(Number(sess?.exitTsMs)) && Number.isFinite(Number(snapshot?.t))) {
+        sess.exitTsMs = Number(snapshot.t);
+      }
+      runningBalanceUsd = actualBalanceUsd;
+      continue;
+    }
+    const existingBalanceUsd = Number(sess?.continuityBalanceUsd ?? sess?.balanceUsd);
+    if (Number.isFinite(existingBalanceUsd)) {
+      runningBalanceUsd = existingBalanceUsd;
+      continue;
+    }
+    if (!sess?.excludeFromPnl) {
+      const existingPnlUsd = Number(sess?.actualPnlUsd ?? sess?.correctedPnlUsd ?? sess?.pnlUsd);
+      if (Number.isFinite(existingPnlUsd) && Number.isFinite(runningBalanceUsd)) {
+        runningBalanceUsd = Number((runningBalanceUsd + existingPnlUsd).toFixed(6));
+      }
+    }
+  }
+  return sessions;
+}
+
+async function recordAuthoritativeLiveBalanceAfterClaim(detailsLike) {
+  const details = detailsLike && typeof detailsLike === "object" ? detailsLike : {};
+  const portfolioBalanceUsd = Number(details?.portfolioBalanceUsd ?? details?.balanceUsd);
+  const cashBalanceUsd = Number(details?.cashBalanceUsd ?? details?.collateralBalanceUsd);
+  const openPositionsValueUsd = Number(details?.openPositionsValueUsd);
+  const slug = String(details?.slug || "").trim();
+  if (!(Number.isFinite(portfolioBalanceUsd) && portfolioBalanceUsd >= 0) || !slug) return { recorded: 0 };
+  const liveClaimBase =
+    String(UPSTREAM_ORIGIN_MAP.get("8791") || "").trim()
+    || String(UPSTREAM_ORIGIN || "").trim();
+  if (!liveClaimBase) return { recorded: 0, reason: "no_upstream_origin" };
+  const upstreamUrl = new URL("/api/v2/bots", `${liveClaimBase}/`);
+  upstreamUrl.searchParams.set("engine", "live");
+  upstreamUrl.searchParams.set("includeTrace", "0");
+  const payload = await fetchJsonDirect(upstreamUrl.toString());
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  const liveItems = items.filter((item) => {
+    const instanceId = String(item?.instanceId || "").trim();
+    const mode = String(item?.mode || "").trim().toLowerCase();
+    return !!instanceId && mode === "live" && item?.watchOnly !== true;
+  });
+  const claimedBase = slugBase(slug);
+  const shadowItems = items.filter((item) => {
+    const instanceId = String(item?.instanceId || "").trim();
+    const mode = String(item?.mode || "").trim().toLowerCase();
+    if (!(instanceId && mode === "live" && item?.watchOnly === true)) return false;
+    const candidateSlugs = [
+      String(item?.runtime?.marketSlug || "").trim(),
+      String(item?.marketSlug || "").trim(),
+      String(item?.marketId || "").trim(),
+    ].filter(Boolean);
+    return candidateSlugs.some((candidate) => slugBase(candidate) === claimedBase);
+  });
+  for (const item of shadowItems) {
+    deleteLiveBalanceSnapshotCache(String(item?.instanceId || "").trim());
+  }
+  const matchingLiveItems = liveItems.filter((item) => {
+    const rt = item?.runtime && typeof item.runtime === "object" ? item.runtime : null;
+    const candidateSlugs = [
+      String(rt?.marketSlug || "").trim(),
+      String(item?.marketSlug || "").trim(),
+      String(item?.marketId || "").trim(),
+    ].filter(Boolean);
+    return candidateSlugs.some((candidate) => slugBase(candidate) === claimedBase);
+  });
+  const targetItems = matchingLiveItems.length
+    ? matchingLiveItems
+    : (liveItems.length === 1 ? liveItems : []);
+  let recorded = 0;
+  for (const item of targetItems) {
+    const instanceId = String(item?.instanceId || "").trim();
+    if (!instanceId) continue;
+    if (recordLiveBalanceSnapshotForInstance({
+      instanceId,
+      mode: item?.mode,
+      watchOnly: item?.watchOnly === true,
+      runNum: item?.runNum,
+      runId: item?.runId,
+      startBalanceUsd: item?.startBalanceUsd,
+    }, {
+      t: details?.completedAtMs || Date.now(),
+      balanceUsd: portfolioBalanceUsd,
+      portfolioBalanceUsd,
+      cashBalanceUsd,
+      openPositionsValueUsd,
+      balanceSessionSlug: slug,
+      snapshotReason: "live_claim",
+      redeemedValueUsd: details?.redeemedValueUsd,
+      claimed: details?.claimed,
+    })) {
+      recorded += 1;
+    }
+  }
+  if (recorded > 0) {
+    pushActivity(`RECORDED ${recorded} LIVE BALANCE SNAPSHOT${recorded === 1 ? "" : "S"} FOR ${slug.toUpperCase()}`, {
+      type: "live-balance-snapshot",
+      slug,
+      recorded,
+      balanceUsd: portfolioBalanceUsd,
+    });
+  }
+  return {
+    recorded,
+    balanceUsd: portfolioBalanceUsd,
+    portfolioBalanceUsd,
+    cashBalanceUsd: Number.isFinite(cashBalanceUsd) ? Number(cashBalanceUsd.toFixed(6)) : null,
+    openPositionsValueUsd: Number.isFinite(openPositionsValueUsd) ? Number(openPositionsValueUsd.toFixed(6)) : null,
+    matchedInstances: targetItems.map((item) => String(item?.instanceId || "").trim()).filter(Boolean),
+  };
+}
+
 function limitLastSessionHistoryPayload(payloadLike, limitLike) {
   const payload = payloadLike && typeof payloadLike === "object" ? payloadLike : {};
   const allSessions = Array.isArray(payload?.sessions) ? payload.sessions.filter((row) => row && typeof row === "object") : [];
@@ -967,10 +1450,11 @@ function runStartMsFromPayload(payloadLike) {
   return Number.isFinite(startMs) && startMs > 0 ? startMs : null;
 }
 
-async function listActivePaperBotsForRunAuditWarm() {
+async function listActiveRunAuditBotsForWarm() {
   if (!UPSTREAM_ORIGIN) return [];
   const reqUrl = new URL("/api/v2/bots", "http://worker.local");
-  reqUrl.searchParams.set("engine", "paper");
+  reqUrl.searchParams.set("engine", LIVE_ONLY_DEFAULT_ENGINE);
+  if (LIVE_ONLY_SOURCE_HOST_PORT) reqUrl.searchParams.set("sourceHostPort", LIVE_ONLY_SOURCE_HOST_PORT);
   const upstreamUrl = buildUpstreamUrl(reqUrl);
   const payload = await fetchJsonDirect(upstreamUrl.toString());
   const items = Array.isArray(payload?.items) ? payload.items : [];
@@ -998,6 +1482,42 @@ async function listActivePaperBotsForRunAuditWarm() {
     .slice(0, RUN_AUDIT_BACKGROUND_MAX_BOTS);
 }
 
+async function fetchLiveClaimSessionContext() {
+  const liveClaimBase =
+    String(UPSTREAM_ORIGIN_MAP.get("8791") || "").trim()
+    || String(UPSTREAM_ORIGIN || "").trim();
+  if (!liveClaimBase) {
+    return {
+      liveEnabled: false,
+      currentSlug: null,
+      sessionStartMs: null,
+      sessionEndMs: null,
+      marketIntervalMs: null,
+      nowMs: Date.now(),
+      reason: "no_upstream_origin",
+    };
+  }
+  const reqUrl = new URL("/api/state", "http://worker.local");
+  reqUrl.searchParams.set("includeBots", "0");
+  reqUrl.searchParams.set("lite", "1");
+  const upstreamUrl = new URL(`${reqUrl.pathname}${reqUrl.search}`, liveClaimBase);
+  const payload = await fetchJsonDirect(upstreamUrl.toString());
+  const currentSlug = String(payload?.current?.slug || "").trim() || null;
+  const sessionStartMs = Number(payload?.current?.startMs || slugStartMs(currentSlug) || 0);
+  const sessionEndMs = Number(payload?.current?.endMs || 0);
+  return {
+    liveEnabled:
+      payload?.health?.liveEnabled === true ||
+      payload?.live?.ui?.enabled === true,
+    currentSlug,
+    sessionStartMs: Number.isFinite(sessionStartMs) && sessionStartMs > 0 ? Math.floor(sessionStartMs) : null,
+    sessionEndMs: Number.isFinite(sessionEndMs) && sessionEndMs > 0 ? Math.floor(sessionEndMs) : null,
+    marketIntervalMs: inferSessionIntervalMsFromSlugLocal(currentSlug),
+    nowMs: Number(payload?.t || Date.now()),
+    reason: "ok",
+  };
+}
+
 function buildRunAuditWarmUrl(botLike) {
   const bot = botLike && typeof botLike === "object" ? botLike : {};
   const reqUrl = new URL("/api/run-audits/review", "http://worker.local");
@@ -1008,6 +1528,35 @@ function buildRunAuditWarmUrl(botLike) {
   }
   reqUrl.searchParams.set("hostPort", normalizeRunAuditHostPort(RUN_AUDIT_HOST_PORT));
   reqUrl.searchParams.set("format", "json");
+  reqUrl.searchParams.set("backgroundWarm", "1");
+  return reqUrl;
+}
+
+function buildAdjacentSessionSlug(slugLike, deltaSessionsLike = 0) {
+  const slug = String(slugLike || "").trim().toLowerCase();
+  const deltaSessions = Math.trunc(Number(deltaSessionsLike) || 0);
+  if (!slug || !deltaSessions) return slug || null;
+  const base = slugBase(slug);
+  const startMs = slugStartMs(slug);
+  const intervalMs = inferSessionIntervalMsFromSlugLocal(slug);
+  if (!(base && Number.isFinite(startMs) && startMs > 0 && Number.isFinite(intervalMs) && intervalMs > 0)) return null;
+  const nextStartMs = Number(startMs) + (deltaSessions * Number(intervalMs));
+  if (!(Number.isFinite(nextStartMs) && nextStartMs > 0)) return null;
+  return `${base}-${Math.floor(nextStartMs / 1000)}`;
+}
+
+function buildSessionAuditWarmUrl(botLike, slugLike) {
+  const bot = botLike && typeof botLike === "object" ? botLike : {};
+  const slug = String(slugLike || "").trim();
+  const reqUrl = new URL("/api/session-audits/review", "http://worker.local");
+  reqUrl.searchParams.set("runNum", String(Math.floor(Number(bot.runNum || 0) || 0)));
+  if (String(bot.runId || "").trim()) reqUrl.searchParams.set("runId", String(bot.runId).trim());
+  if (Number.isFinite(Number(bot.startedAtMs || 0)) && Number(bot.startedAtMs) > 0) {
+    reqUrl.searchParams.set("startedAtMs", String(Math.floor(Number(bot.startedAtMs))));
+  }
+  reqUrl.searchParams.set("slug", slug);
+  reqUrl.searchParams.set("sourceHostPort", normalizeRunAuditHostPort(RUN_AUDIT_HOST_PORT));
+  reqUrl.searchParams.set("format", "compact");
   reqUrl.searchParams.set("backgroundWarm", "1");
   return reqUrl;
 }
@@ -1024,6 +1573,114 @@ function rowWithinRunStart(rowLike, runStartMsLike) {
   return startMs >= runStartMs;
 }
 
+async function fetchUpstreamSessionAuditCompact(reqUrl, runNumLike, slugLike, hostPortLike = "") {
+  const runNum = Math.floor(Number(runNumLike));
+  const slug = String(slugLike || "").trim();
+  const sourceHostPort = normalizeRunAuditHostPort(
+    hostPortLike || reqUrl?.searchParams?.get("sourceHostPort") || reqUrl?.searchParams?.get("hostPort") || RUN_AUDIT_HOST_PORT
+  );
+  if (!(Number.isFinite(runNum) && runNum > 0) || !slug) return null;
+  const upstreamUrl = new URL("/api/session-audits/review", runAuditSourceBaseUrl(sourceHostPort));
+  upstreamUrl.searchParams.set("runNum", String(runNum));
+  upstreamUrl.searchParams.set("slug", slug);
+  upstreamUrl.searchParams.set("format", "json");
+  if (String(reqUrl?.searchParams?.get("runId") || "").trim()) {
+    upstreamUrl.searchParams.set("runId", String(reqUrl.searchParams.get("runId")).trim());
+  }
+  const startedAtMs = Number(reqUrl?.searchParams?.get("startedAtMs") || 0);
+  if (Number.isFinite(startedAtMs) && startedAtMs > 0) {
+    upstreamUrl.searchParams.set("startedAtMs", String(Math.floor(startedAtMs)));
+  }
+  if (sourceHostPort) upstreamUrl.searchParams.set("sourceHostPort", sourceHostPort);
+  upstreamUrl.searchParams.set("allowHot", "1");
+  const payload = await fetchJsonDirect(upstreamUrl.toString());
+  return payload && typeof payload === "object" ? payload : null;
+}
+
+async function ensureSessionAuditArtifact(reqUrl) {
+  const runNumRaw = Number(reqUrl?.searchParams?.get("runNum") || 0);
+  const runNum = Number.isFinite(runNumRaw) && runNumRaw > 0 ? Math.floor(runNumRaw) : 0;
+  const runId = String(reqUrl?.searchParams?.get("runId") || "").trim();
+  const startedAtMsRaw = Number(reqUrl?.searchParams?.get("startedAtMs") || 0);
+  const startedAtMs = Number.isFinite(startedAtMsRaw) && startedAtMsRaw > 0 ? Math.floor(startedAtMsRaw) : 0;
+  const slug = String(reqUrl?.searchParams?.get("slug") || "").trim().toLowerCase();
+  const sourceHostPort = normalizeRunAuditHostPort(
+    reqUrl?.searchParams?.get("sourceHostPort") || reqUrl?.searchParams?.get("hostPort") || RUN_AUDIT_HOST_PORT
+  );
+  if (!runNum || !slug) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: "missing_run_num_or_slug",
+      runNum,
+      slug,
+      sourceHostPort,
+    };
+  }
+  const compactPath = runAuditSessionCompactPath(runNum, slug, sourceHostPort);
+  let canonicalStatusCode = 0;
+  let localCompactBuilt = false;
+  const preferLocalCompactFirst = normalizeRunAuditHostPort(sourceHostPort) === "8791";
+  if (preferLocalCompactFirst) {
+    try {
+      const compact = await buildSessionAuditCompactFromRunArtifacts(runNum, slug, reqUrl, sourceHostPort)
+        || await buildSessionAuditCompactFromCachedContinuity(runNum, slug, reqUrl, sourceHostPort)
+        || await buildSessionAuditCompactFromSessionHistory(runNum, slug, reqUrl, sourceHostPort)
+        || await fetchUpstreamSessionAuditCompact(reqUrl, runNum, slug, sourceHostPort)
+        || await buildSessionAuditCompactFromContinuity(runNum, slug, reqUrl, sourceHostPort);
+      if (compact && typeof compact === "object" && !sessionAuditCompactLooksStale(compact) && compactPath) {
+        fs.mkdirSync(path.dirname(compactPath), { recursive: true });
+        fs.writeFileSync(compactPath, `${JSON.stringify(compact, null, 2)}\n`, "utf8");
+        localCompactBuilt = true;
+      }
+    } catch {}
+  }
+  if (!localCompactBuilt) {
+  try {
+    const upstreamUrl = new URL("/api/session-audits/review", runAuditSourceBaseUrl(sourceHostPort));
+    upstreamUrl.searchParams.set("runNum", String(runNum));
+    if (runId) upstreamUrl.searchParams.set("runId", runId);
+    if (startedAtMs > 0) upstreamUrl.searchParams.set("startedAtMs", String(startedAtMs));
+    upstreamUrl.searchParams.set("slug", slug);
+    const result = await fetchUrl(upstreamUrl);
+    canonicalStatusCode = Number(result?.statusCode || 0);
+    if (!(canonicalStatusCode >= 200 && canonicalStatusCode < 300)) {
+      throw new Error(`canonical_fetch_status_${canonicalStatusCode || 500}`);
+    }
+  } catch (error) {
+    canonicalStatusCode = canonicalStatusCode || 500;
+    return {
+      ok: false,
+      statusCode: canonicalStatusCode,
+      error: String(error?.message || error || "session_audit_warm_failed"),
+      runNum,
+      slug,
+      sourceHostPort,
+      compactPath,
+    };
+  }
+  }
+  try {
+    const compact = await buildSessionAuditCompactFromCachedContinuity(runNum, slug, reqUrl, sourceHostPort)
+      || await buildSessionAuditCompactFromSessionHistory(runNum, slug, reqUrl, sourceHostPort)
+      || await buildSessionAuditCompactFromContinuity(runNum, slug, reqUrl, sourceHostPort);
+    if (compact && typeof compact === "object" && !sessionAuditCompactLooksStale(compact) && compactPath) {
+      fs.mkdirSync(path.dirname(compactPath), { recursive: true });
+      fs.writeFileSync(compactPath, `${JSON.stringify(compact, null, 2)}\n`, "utf8");
+      localCompactBuilt = true;
+    }
+  } catch {}
+  return {
+    ok: true,
+    statusCode: canonicalStatusCode,
+    runNum,
+    slug,
+    sourceHostPort,
+    compactPath,
+    localCompactBuilt,
+  };
+}
+
 function compactSessionSortTs(row) {
   const v = Number(row?.exitTsMs ?? row?.endMs ?? row?.entryTsMs ?? row?.attemptTsMs ?? row?.startMs ?? 0);
   return Number.isFinite(v) ? v : 0;
@@ -1034,9 +1691,11 @@ function compactSessionDisplayPnlUsd(rowLike) {
   if (!row) return null;
   const actual = Number(row?.actualPnlUsd);
   const corrected = Number(row?.correctedPnlUsd);
+  const rawPnl = Number(row?.pnlUsd);
   const preferredAudit = preferNonZeroAuditNumber(row?.auditNetPnlUsd, actual);
   const preferredCorrected = preferNonZeroAuditNumber(corrected, actual);
-  return preferNonZeroAuditNumber(preferredAudit, preferredCorrected);
+  const preferredRaw = preferNonZeroAuditNumber(preferredCorrected, rawPnl);
+  return preferNonZeroAuditNumber(preferredAudit, preferredRaw);
 }
 
 function preferNonZeroAuditNumber(preferredLike, fallbackLike) {
@@ -1109,13 +1768,19 @@ function preferSessionRowForHistory(aLike, bLike) {
   const b = bLike && typeof bLike === "object" ? bLike : null;
   if (!a) return b;
   if (!b) return a;
+  const truthWeight = (valueLike, strongWeight, weakWeight) => {
+    const value = Number(valueLike);
+    if (!Number.isFinite(value)) return 0;
+    return Math.abs(value) > 1e-9 ? strongWeight : weakWeight;
+  };
   const score = (row) => {
     let out = 0;
-    if (Number.isFinite(Number(row?.auditNetPnlUsd))) out += 16;
-    if (Number.isFinite(Number(row?.correctedPnlUsd))) out += 12;
-    if (Number.isFinite(Number(row?.actualPnlUsd))) out += 8;
+    out += truthWeight(row?.auditNetPnlUsd, 16, 2);
+    out += truthWeight(row?.correctedPnlUsd, 12, 2);
+    out += truthWeight(row?.actualPnlUsd, 8, 1);
     if (Number.isFinite(Number(row?.grossPnlUsd ?? row?.actualGrossPnlUsd))) out += 2;
     if (Number.isFinite(Number(row?.feesUsd ?? row?.actualFeesUsd))) out += 2;
+    if (String(row?.sessionTruthSource || row?.via || "").trim().toLowerCase().includes("session_audit")) out += 20;
     if (Number.isFinite(Number(row?.runNum))) out += 1;
     return out;
   };
@@ -1174,8 +1839,11 @@ function normalizeLastSessionHistoryRow(rowLike) {
   if (!slug) return null;
   const via = String(row.via || "").trim().toLowerCase();
   if (via === "trace_only") return null;
-  if (row.excludeFromPnl === true) return null;
-  const closed = row.closed === true || (Number.isFinite(Number(row.endMs)) && Number(row.endMs) < Date.now());
+  const closed = row.closed === true || (
+    row.closed !== false &&
+    Number.isFinite(Number(row.endMs)) &&
+    Number(row.endMs) < Date.now()
+  );
   if (!closed) return null;
   const displayPnlUsd = compactSessionDisplayPnlUsd(row);
   const auditNetPnlCandidate = Number(row?.auditNetPnlUsd);
@@ -1193,11 +1861,13 @@ function normalizeLastSessionHistoryRow(rowLike) {
         ? actualPnlCandidate
         : rawPnlCandidate
     : null;
+  const runIdText = String(row.runIdText ?? row.runId ?? "").trim() || null;
+  const runIdNumeric = Number(row.runId);
   const out = {
     slug,
     instanceId: String(row.instanceId || "").trim() || null,
-    runIdText: String(row.runId || "").trim() || null,
-    runId: Number.isFinite(Number(row.runId)) ? Number(row.runId) : null,
+    runIdText,
+    runId: Number.isFinite(runIdNumeric) ? runIdNumeric : null,
     runNum: Number.isFinite(Number(row.runNum)) ? Number(row.runNum) : null,
     pnlUsd: Number.isFinite(Number(displayPnlUsd)) ? Number(displayPnlUsd) : null,
     auditNetPnlUsd: Number.isFinite(Number(auditNetPnlCandidate)) ? Number(auditNetPnlCandidate) : null,
@@ -1217,6 +1887,7 @@ function normalizeLastSessionHistoryRow(rowLike) {
     exitTsMs: Number.isFinite(Number(row.exitTsMs)) ? Number(row.exitTsMs) : null,
     attempted: row.attempted === true,
     closed: true,
+    excludeFromPnl: row.excludeFromPnl === true,
     noTrade: row.noTrade === true || Number(row.laneCount || 0) <= 0,
     laneCount: Number.isFinite(Number(row.laneCount)) ? Number(row.laneCount) : 0,
     via: String(row.via || "").trim() || null,
@@ -1245,15 +1916,46 @@ async function fetchRunIndexPayloadForInstance(instanceId, opts = {}) {
 async function fetchContinuityHistoryPayloadForInstance(instanceId, opts = {}) {
   const includeTrace = opts.includeTrace === true;
   const sourceHostPort = String(opts.sourceHostPort || "").trim();
+  const normalizedSourceHostPort = normalizeRunAuditHostPort(sourceHostPort);
   const maxSessionsRaw = Number(opts.maxSessions || 0);
   const maxSessions = Number.isFinite(maxSessionsRaw) && maxSessionsRaw > 0 ? Math.max(1, Math.floor(maxSessionsRaw)) : 200;
+  if (!includeTrace) {
+    const runIndex = await fetchRunIndexPayloadForInstance(instanceId, {
+      sourceHostPort: normalizedSourceHostPort,
+      maxSessions,
+    });
+    const rows = compactRowsFromRunIndexPayload(runIndex.payload, {
+      instanceId,
+      maxSessions,
+      offset: 0,
+    });
+    return {
+      upstreamUrl: runIndex.upstreamUrl,
+      payload: {
+        ok: true,
+        instanceId: String(instanceId || "").trim(),
+        sessions: rows,
+        count: rows.length,
+        totalCount: rows.length,
+        offset: 0,
+        truncated: false,
+        source: normalizedSourceHostPort === "8791" ? "run_index_live_fallback" : "run_index_worker_fallback",
+        runIndexUrl: runIndex.upstreamUrl.toString(),
+        continuityRuns: [],
+      },
+    };
+  }
   const upstreamReq = new URL(`/api/v2/bots/${encodeURIComponent(String(instanceId || "").trim())}/continuity-history`, "http://worker.local");
   upstreamReq.searchParams.set("includeTrace", includeTrace ? "1" : "0");
   upstreamReq.searchParams.set("maxSessions", String(maxSessions));
-  if (sourceHostPort) upstreamReq.searchParams.set("sourceHostPort", normalizeRunAuditHostPort(sourceHostPort));
+  if (sourceHostPort) upstreamReq.searchParams.set("sourceHostPort", normalizedSourceHostPort);
   const upstreamUrl = buildUpstreamUrl(upstreamReq);
-  const payload = await fetchJsonDirect(upstreamUrl.toString());
-  return { upstreamUrl, payload };
+  try {
+    const payload = await fetchJsonDirect(upstreamUrl.toString());
+    return { upstreamUrl, payload };
+  } catch (err) {
+    throw err;
+  }
 }
 
 function compactRowsFromRunIndexPayload(payload, opts = {}) {
@@ -1265,16 +1967,23 @@ function compactRowsFromRunIndexPayload(payload, opts = {}) {
   const offset = Number.isFinite(offsetRaw) && offsetRaw > 0 ? Math.max(0, Math.floor(offsetRaw)) : 0;
   const maxSessions = Number.isFinite(maxSessionsRaw) && maxSessionsRaw > 0 ? Math.max(1, Math.floor(maxSessionsRaw)) : null;
   const rows = Array.isArray(payload?.sessions) ? payload.sessions : [];
+  const currentMarketSlug = String(payload?.run?.marketSlug || payload?.summary?.marketSlug || "").trim().toLowerCase();
+  const payloadRunNum = Number(payload?.run?.runNum ?? payload?.summary?.runNum ?? 0) || null;
+  const payloadRunId = String(payload?.run?.runId ?? payload?.summary?.runId ?? "").trim() || null;
   const normalized = rows
     .map((row) => normalizeLastSessionHistoryRow({
       ...row,
+      closed: row?.closed === true || (!currentMarketSlug || String(row?.slug || "").trim().toLowerCase() !== currentMarketSlug
+        ? row?.closed
+        : false),
       noTrade: row?.noTrade === true && !(
         Number.isFinite(Number(row?.actualPnlUsd ?? row?.pnlUsd)) &&
         Math.abs(Number(row?.actualPnlUsd ?? row?.pnlUsd)) > 1e-9
       ),
       instanceId: String(row?.instanceId || instanceId || "").trim() || null,
-      runNum: Number(payload?.run?.runNum ?? payload?.summary?.runNum ?? row?.runNum ?? 0) || null,
-      runId: Number(payload?.run?.runNum ?? payload?.summary?.runNum ?? row?.runId ?? 0) || null,
+      runNum: payloadRunNum || Number(row?.runNum ?? 0) || null,
+      runIdText: String(row?.runIdText || payloadRunId || row?.runId || "").trim() || null,
+      runId: payloadRunId || row?.runId || null,
       continuityBalanceUsd: Number.isFinite(Number(row?.continuityBalanceUsd))
         ? Number(row.continuityBalanceUsd)
         : (Number.isFinite(Number(row?.balanceUsd)) ? Number(row.balanceUsd) : null),
@@ -1383,6 +2092,13 @@ async function buildCompactSessionHistoryPayload(reqUrl) {
   }
   const runStartMs = Number(payload?.runStartMs ?? payload?.summary?.startedAtMs ?? payload?.run?.runAuditIdentity?.startedAtMs ?? payload?.run?.launchedAtMs ?? 0) || null;
   const runNum = Number((payload?.runNum ?? payload?.run?.runNum ?? payload?.summary?.runNum ?? reqUrl.searchParams.get("runNum")) || 0) || null;
+  applyWorkerBalanceSnapshotsToSessions(instanceId, sessionsAll, {
+    mode: "paper",
+    watchOnly: false,
+    runNum,
+    runId: payload?.runId ?? payload?.run?.runId ?? payload?.summary?.runId ?? null,
+    startBalanceUsd: payload?.summary?.startBalanceUsd ?? payload?.run?.startBalanceUsd ?? null,
+  });
   return {
     statusCode: 200,
     payload: {
@@ -1405,6 +2121,70 @@ async function buildCompactSessionHistoryPayload(reqUrl) {
   };
 }
 
+async function buildContinuityHistoryPayload(reqUrl) {
+  const parts = String(reqUrl.pathname || "").split("/").filter(Boolean);
+  const instanceId = (
+    parts.length >= 5 &&
+    String(parts[0] || "").toLowerCase() === "api" &&
+    String(parts[1] || "").toLowerCase() === "v2" &&
+    String(parts[2] || "").toLowerCase() === "bots" &&
+    String(parts[4] || "").toLowerCase() === "continuity-history"
+  )
+    ? decodeURIComponent(String(parts[3] || "").trim())
+    : "";
+  if (!instanceId) {
+    return { statusCode: 400, payload: { ok: false, error: "missing instanceId" } };
+  }
+  const includeTrace = String(reqUrl.searchParams.get("includeTrace") || "0").trim() === "1";
+  const marketPrefix = String(reqUrl.searchParams.get("marketPrefix") || "").trim().toLowerCase();
+  const marketSlug = String(reqUrl.searchParams.get("marketSlug") || reqUrl.searchParams.get("slug") || "").trim().toLowerCase();
+  const sourceHostPort = String(reqUrl.searchParams.get("sourceHostPort") || "").trim();
+  const maxSessionsRaw = Number(reqUrl.searchParams.get("maxSessions") || 0);
+  const maxSessions = Number.isFinite(maxSessionsRaw) && maxSessionsRaw > 0 ? Math.max(1, Math.min(5000, Math.floor(maxSessionsRaw))) : 200;
+  const offsetRaw = Number(reqUrl.searchParams.get("offset") || 0);
+  const offset = Number.isFinite(offsetRaw) && offsetRaw > 0 ? Math.max(0, Math.floor(offsetRaw)) : 0;
+
+  const continuity = await fetchContinuityHistoryPayloadForInstance(instanceId, {
+    includeTrace,
+    maxSessions: Math.max(maxSessions + offset, maxSessions),
+    sourceHostPort,
+  });
+  const payload = continuity.payload && typeof continuity.payload === "object" ? continuity.payload : {};
+  let instanceMeta = null;
+  try { instanceMeta = await readWorkerBotMeta(instanceId, { sourceHostPort }); } catch {}
+  const sessionsAll = compactRowsFromContinuityPayload(payload, {
+    instanceId,
+    marketPrefix,
+    marketSlug,
+    maxSessions: null,
+    offset: 0,
+  });
+  applyWorkerBalanceSnapshotsToSessions(instanceId, sessionsAll, {
+    mode: instanceMeta?.mode ?? payload?.mode ?? payload?.run?.mode ?? payload?.summary?.mode ?? null,
+    watchOnly: instanceMeta?.watchOnly === true || payload?.watchOnly === true || payload?.run?.watchOnly === true || payload?.summary?.watchOnly === true,
+    runNum: payload?.runNum,
+    runId: payload?.runId ?? payload?.run?.runId ?? payload?.summary?.runId ?? null,
+    startBalanceUsd: payload?.startBalanceUsd ?? payload?.run?.startBalanceUsd ?? payload?.summary?.startBalanceUsd ?? null,
+  });
+  const sessionsWindow = offset > 0 ? sessionsAll.slice(offset) : sessionsAll;
+  const sessions = sessionsWindow.slice(0, maxSessions);
+  return {
+    statusCode: 200,
+    payload: {
+      ...(payload && typeof payload === "object" ? payload : {}),
+      ok: true,
+      instanceId,
+      sessions,
+      count: sessions.length,
+      totalCount: sessionsAll.length,
+      offset,
+      truncated: sessions.length < sessionsAll.length,
+      worker: WORKER_LABEL,
+      upstreamUrl: continuity.upstreamUrl ? continuity.upstreamUrl.toString() : null,
+    },
+  };
+}
+
 async function buildLastSessionHistoryPayload(reqUrl) {
   const parts = String(reqUrl.pathname || "").split("/").filter(Boolean);
   const instanceId = (
@@ -1420,6 +2200,7 @@ async function buildLastSessionHistoryPayload(reqUrl) {
     return { statusCode: 400, payload: { ok: false, error: "missing instanceId" } };
   }
   const marketPrefix = String(reqUrl.searchParams.get("marketPrefix") || "").trim().toLowerCase();
+  const sourceHostPort = String(reqUrl.searchParams.get("sourceHostPort") || "").trim();
   const limitRaw = Number(reqUrl.searchParams.get("limit") || 100);
   const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(5000, Math.floor(limitRaw))) : 100;
   const cached = readLastSessionHistoryCache(instanceId, marketPrefix) || {};
@@ -1430,9 +2211,12 @@ async function buildLastSessionHistoryPayload(reqUrl) {
   let currentRunNum = null;
   let currentRunIdText = null;
   let currentRunStartMs = null;
+  let instanceMeta = null;
+  try { instanceMeta = await readWorkerBotMeta(instanceId, { sourceHostPort }); } catch {}
   try {
     const runIndex = await fetchRunIndexPayloadForInstance(instanceId, {
       marketPrefix,
+      sourceHostPort,
       limit: 5000,
     });
     upstreamUrl = runIndex.upstreamUrl;
@@ -1451,6 +2235,7 @@ async function buildLastSessionHistoryPayload(reqUrl) {
     const continuity = await fetchContinuityHistoryPayloadForInstance(instanceId, {
       includeTrace: false,
       maxSessions: 5000,
+      sourceHostPort,
     });
     if (!upstreamUrl) upstreamUrl = continuity.upstreamUrl;
     if (!(Number.isFinite(Number(currentRunNum)) && currentRunNum > 0) || !currentRunIdText || !currentRunStartMs) {
@@ -1536,7 +2321,7 @@ async function buildLastSessionHistoryPayload(reqUrl) {
   const enrichedRows = await Promise.all(rows.map(async (raw) => {
     let enrichedRaw = raw;
     try {
-      const compactAudit = await readRemoteSessionAuditCompact(raw?.runNum ?? currentRunNum, raw?.slug, RUN_AUDIT_HOST_PORT);
+      const compactAudit = await readRemoteSessionAuditCompact(raw?.runNum ?? currentRunNum, raw?.slug, sourceHostPort || RUN_AUDIT_HOST_PORT);
       if (compactAudit) {
         const correctedAccounting = correctedAccountingFromCompactAuditSummaryWorker(compactAudit);
         const actualAccounting = actualAccountingFromCompactAuditSummaryWorker(compactAudit);
@@ -1555,6 +2340,8 @@ async function buildLastSessionHistoryPayload(reqUrl) {
           feesUsd: Number.isFinite(Number(actualAccounting?.actualFeesUsd))
             ? Number(actualAccounting.actualFeesUsd)
             : raw?.feesUsd,
+          via: "session_audit_compact_worker",
+          sessionTruthSource: "session_audit_compact",
         };
       }
     } catch {}
@@ -1587,7 +2374,7 @@ async function buildLastSessionHistoryPayload(reqUrl) {
     if (!slug || continuityBySlug.has(slug)) continue;
     continuityBySlug.set(slug, row);
   }
-  const allRunSessions = applyAuditLedgerDisplayBalances(
+  let allRunSessions = applyAuditLedgerDisplayBalances(
     Array.from(bySlug.values())
       .sort((a, b) => compactSessionSortTs(b) - compactSessionSortTs(a))
       .map((row) => {
@@ -1595,30 +2382,51 @@ async function buildLastSessionHistoryPayload(reqUrl) {
         const continuityRow = slug ? continuityBySlug.get(slug) : null;
         if (!continuityRow || typeof continuityRow !== "object") return row;
         const continuityDisplayPnlUsd = compactSessionDisplayPnlUsd(continuityRow);
+        const authoritativeAuditNetPnlUsd = Number(row?.auditNetPnlUsd);
+        const authoritativeActualPnlUsd = Number(row?.actualPnlUsd);
+        const authoritativeCorrectedPnlUsd = Number(row?.correctedPnlUsd);
+        const authoritativeRawPnlUsd = Number(row?.pnlUsd);
         return {
           ...row,
-          auditNetPnlUsd: Number.isFinite(Number(continuityDisplayPnlUsd))
-            ? Number(continuityDisplayPnlUsd)
-            : row?.auditNetPnlUsd,
-          actualPnlUsd: Number.isFinite(Number(continuityRow?.actualPnlUsd))
-            ? Number(continuityRow.actualPnlUsd)
-            : row?.actualPnlUsd,
-          correctedPnlUsd: Number.isFinite(Number(continuityRow?.correctedPnlUsd))
-            ? Number(continuityRow.correctedPnlUsd)
-            : row?.correctedPnlUsd,
-          pnlUsd: Number.isFinite(Number(continuityDisplayPnlUsd))
-            ? Number(continuityDisplayPnlUsd)
-            : row?.pnlUsd,
+          auditNetPnlUsd: Number.isFinite(authoritativeAuditNetPnlUsd)
+            ? authoritativeAuditNetPnlUsd
+            : (Number.isFinite(Number(continuityDisplayPnlUsd))
+              ? Number(continuityDisplayPnlUsd)
+              : row?.auditNetPnlUsd),
+          actualPnlUsd: Number.isFinite(authoritativeActualPnlUsd)
+            ? authoritativeActualPnlUsd
+            : (Number.isFinite(Number(continuityRow?.actualPnlUsd))
+              ? Number(continuityRow.actualPnlUsd)
+              : row?.actualPnlUsd),
+          correctedPnlUsd: Number.isFinite(authoritativeCorrectedPnlUsd)
+            ? authoritativeCorrectedPnlUsd
+            : (Number.isFinite(Number(continuityRow?.correctedPnlUsd))
+              ? Number(continuityRow.correctedPnlUsd)
+              : row?.correctedPnlUsd),
+          pnlUsd: Number.isFinite(authoritativeRawPnlUsd)
+            ? authoritativeRawPnlUsd
+            : (Number.isFinite(Number(continuityDisplayPnlUsd))
+              ? Number(continuityDisplayPnlUsd)
+              : row?.pnlUsd),
           balanceUsd: Number.isFinite(Number(continuityRow?.balanceUsd))
             ? Number(continuityRow.balanceUsd)
             : row?.balanceUsd,
           continuityBalanceUsd: Number.isFinite(Number(continuityRow?.continuityBalanceUsd))
             ? Number(continuityRow.continuityBalanceUsd)
             : row?.continuityBalanceUsd,
+          via: String(row?.via || continuityRow?.via || "").trim() || null,
+          sessionTruthSource: String(row?.sessionTruthSource || continuityRow?.sessionTruthSource || "").trim() || null,
           excludeFromPnl: continuityRow?.excludeFromPnl === true ? true : row?.excludeFromPnl,
         };
       })
   );
+  allRunSessions = applyAuditLedgerDisplayBalances(applyWorkerBalanceSnapshotsToSessions(instanceId, allRunSessions, {
+    mode: instanceMeta?.mode || null,
+    watchOnly: instanceMeta?.watchOnly === true,
+    runNum: currentRunNum,
+    runId: currentRunIdText,
+    startBalanceUsd: instanceMeta?.startBalanceUsd ?? null,
+  }));
   const sessions = allRunSessions
     .sort((a, b) => compactSessionSortTs(b) - compactSessionSortTs(a))
     .slice(0, limit);
@@ -1636,6 +2444,7 @@ async function buildLastSessionHistoryPayload(reqUrl) {
     runNum: currentRunNum,
     runIdText: currentRunIdText,
     runStartMs: currentRunStartMs,
+    sourceHostPort: sourceHostPort || null,
     count: allRunSessions.length,
     totalCount: allRunSessions.length,
     sessions: allRunSessions,
@@ -1669,11 +2478,21 @@ async function buildLastSessionHistoryPayload(reqUrl) {
 function renderLastSessionHistoryHtml(payloadLike) {
   const payload = payloadLike && typeof payloadLike === "object" ? payloadLike : {};
   const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+  const sourceHostPort = String(payload?.sourceHostPort || "").trim();
   const buildSessionAuditPath = (rowLike) => {
     const row = rowLike && typeof rowLike === "object" ? rowLike : null;
     const slug = String(row?.slug || "").trim();
     const runNum = Number(row?.runNum ?? payload?.runNum);
-    const runId = String(row?.runIdText || row?.runId || payload?.runIdText || "").trim();
+    const rowRunId = String(row?.runIdText || row?.runId || "").trim();
+    const payloadRunId = String(payload?.runIdText || "").trim();
+    const runId = (
+      rowRunId &&
+      payloadRunId &&
+      /^\d+$/.test(rowRunId) &&
+      !/^\d+$/.test(payloadRunId)
+    )
+      ? payloadRunId
+      : (rowRunId || payloadRunId);
     const startedAtMs = Number(payload?.runStartMs);
     if (!(Number.isFinite(runNum) && runNum > 0) || !slug) return "";
     const params = new URLSearchParams();
@@ -1681,6 +2500,8 @@ function renderLastSessionHistoryHtml(payloadLike) {
     if (runId) params.set("runId", runId);
     if (Number.isFinite(startedAtMs) && startedAtMs > 0) params.set("startedAtMs", String(Math.floor(startedAtMs)));
     params.set("slug", slug);
+    params.set("allowRunFallback", "1");
+    if (sourceHostPort) params.set("sourceHostPort", sourceHostPort);
     return `/api/session-audits/review?${params.toString()}`;
   };
   const fmtMoney = (valueLike) => {
@@ -1943,7 +2764,8 @@ function shouldBypassCache(reqUrl) {
 
 function buildUpstreamUrl(reqUrl) {
   const upstreamReq = new URL(reqUrl.pathname + reqUrl.search, "http://worker.local");
-  const sourceHostPort = String(upstreamReq.searchParams.get("sourceHostPort") || "").trim();
+  const sourceHostPortRaw = String(upstreamReq.searchParams.get("sourceHostPort") || "").trim();
+  const sourceHostPort = sourceHostPortRaw ? resolveScopedSourceHostPort(sourceHostPortRaw) : "";
   if (sourceHostPort) upstreamReq.searchParams.delete("sourceHostPort");
   const mappedOrigin = sourceHostPort ? String(UPSTREAM_ORIGIN_MAP.get(sourceHostPort) || "").trim() : "";
   const resolvedUpstreamOrigin = mappedOrigin || UPSTREAM_ORIGIN;
@@ -1954,8 +2776,15 @@ function buildUpstreamUrl(reqUrl) {
     /^\/api\/v2\/bots(?:\/[^/]+)?$/i.test(pathName) ||
     /^\/api\/v2\/bots\/[^/]+\/run-index\b/i.test(pathName) ||
     /^\/api\/v2\/bots\/[^/]+\/focused-live-session\b/i.test(pathName) ||
+    /^\/api\/v2\/bots\/[^/]+\/live-markers\b/i.test(pathName) ||
+    /^\/api\/v2\/bots\/[^/]+\/continuity-history\b/i.test(pathName) ||
+    /^\/api\/v2\/bots\/[^/]+\/last-session-history\b/i.test(pathName) ||
     /^\/api\/v2\/bots\/[^/]+\/latest-session-card\b/i.test(pathName) ||
+    /^\/api\/v2\/bots\/[^/]+\/session-artifacts-summary\b/i.test(pathName) ||
     /^\/api\/v2\/bots\/[^/]+\/rollover-ready\b/i.test(pathName) ||
+    /^\/api\/compare\/run-artifact\b/i.test(pathName) ||
+    /^\/api\/session-history\b/i.test(pathName) ||
+    /^\/api\/session-audits\/review\b/i.test(pathName) ||
     /^\/api\/stats\/summary\b/i.test(pathName) ||
     /^\/api\/operator-notices\b/i.test(pathName) ||
     /^\/api\/v2\/strategies\b/i.test(pathName) ||
@@ -1979,6 +2808,14 @@ function fetchUrl(url) {
       const chunks = [];
       resp.on("data", (chunk) => chunks.push(chunk));
       resp.on("end", () => {
+        upstreamHealthState.lastFetchUrl = String(url);
+        upstreamHealthState.lastFetchStatusCode = Number(resp.statusCode || 500);
+        if (Number(resp.statusCode || 500) >= 200 && Number(resp.statusCode || 500) < 500) {
+          upstreamHealthState.lastFetchOkAtMs = Date.now();
+          upstreamHealthState.lastFetchError = "";
+        } else {
+          upstreamHealthState.lastFetchErrAtMs = Date.now();
+        }
         resolve({
           statusCode: Number(resp.statusCode || 500),
           headers: resp.headers || {},
@@ -1986,10 +2823,39 @@ function fetchUrl(url) {
         });
       });
     });
-    req.on("error", reject);
+    req.on("error", (error) => {
+      upstreamHealthState.lastFetchUrl = String(url);
+      upstreamHealthState.lastFetchErrAtMs = Date.now();
+      upstreamHealthState.lastFetchError = String(error?.message || error);
+      reject(error);
+    });
     req.setTimeout(timeoutMs, () => req.destroy(new Error("timeout")));
     req.end();
   });
+}
+
+async function probeUpstreamHealth() {
+  const probeBase = (
+    LIVE_ONLY_SOURCE_HOST_PORT
+      ? String(UPSTREAM_ORIGIN_MAP.get(LIVE_ONLY_SOURCE_HOST_PORT) || "").trim()
+      : ""
+  ) || String(UPSTREAM_ORIGIN || "").trim();
+  if (!probeBase) return;
+  upstreamHealthState.lastProbeAtMs = Date.now();
+  try {
+    const probeUrl = new URL("/api/health?lite=1", `${probeBase}/`);
+    const result = await fetchUrl(probeUrl);
+    if (result.statusCode >= 200 && result.statusCode < 300) {
+      upstreamHealthState.lastProbeOkAtMs = Date.now();
+      upstreamHealthState.lastProbeError = "";
+    } else {
+      upstreamHealthState.lastProbeErrAtMs = Date.now();
+      upstreamHealthState.lastProbeError = `status=${result.statusCode}`;
+    }
+  } catch (error) {
+    upstreamHealthState.lastProbeErrAtMs = Date.now();
+    upstreamHealthState.lastProbeError = String(error?.message || error);
+  }
 }
 
 async function proxyWithCache(reqUrl) {
@@ -2128,6 +2994,839 @@ function sessionCardImagePaths(slugLike) {
   };
 }
 
+function runAuditSessionCompactPath(runNumLike, slugLike, hostPortLike = "") {
+  const runNum = Math.floor(Number(runNumLike));
+  const slug = String(slugLike || "").trim();
+  const safeHost = normalizeRunAuditHostPort(hostPortLike || RUN_AUDIT_HOST_PORT);
+  if (!(Number.isFinite(runNum) && runNum > 0) || !slug) return "";
+  return path.join(runAuditSourceMirrorDir(runNum, safeHost), "session_audits", `${slug}.compact.json`);
+}
+
+function sessionAuditCompactLooksStale(compactLike) {
+  const compact = compactLike && typeof compactLike === "object" ? compactLike : null;
+  if (!compact) return true;
+  const compactSource = String(compact?.sessionSummary?.source || "").trim();
+  const compactTradeCount = Array.isArray(compact?.tradeSummaries) ? compact.tradeSummaries.length : 0;
+  const compactTimelineCount = ["UP", "DOWN"].reduce((count, side) => (
+    count + (Array.isArray(compact?.sideAudit?.[side]?.timeline) ? compact.sideAudit[side].timeline.length : 0)
+  ), 0);
+  const compactTraceCount = Array.isArray(compact?.trace?.xMs) ? compact.trace.xMs.length : 0;
+  if (compactSource === "degraded_endpoint_fallback") return true;
+  if (
+    compactSource === "session_history_direct_fallback" &&
+    compactTimelineCount === 0 &&
+    compactTradeCount <= 1 &&
+    compactTraceCount < 2
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function localHostSessionAuditReviewPath(runNumLike, slugLike, hostPortLike = "") {
+  const runNum = Math.floor(Number(runNumLike));
+  const slug = String(slugLike || "").trim();
+  const safeHost = normalizeRunAuditHostPort(hostPortLike || RUN_AUDIT_HOST_PORT);
+  if (!(Number.isFinite(runNum) && runNum > 0) || !slug) return "";
+  return path.join(process.cwd(), "trade_logs", "hosts", `host_${safeHost}`, "multi_runs", `run_${runNum}`, "session_audits", `${slug}.review.html`);
+}
+
+function normalizeCompactTraceWorker(traceLike) {
+  const trace = traceLike && typeof traceLike === "object" ? traceLike : null;
+  const xMsRaw = Array.isArray(trace?.xMs) ? trace.xMs : [];
+  const upRaw = Array.isArray(trace?.up) ? trace.up : [];
+  const downRaw = Array.isArray(trace?.down) ? trace.down : [];
+  const points = [];
+  for (let idx = 0; idx < xMsRaw.length; idx += 1) {
+    const tsMs = Number(xMsRaw[idx]);
+    if (!(Number.isFinite(tsMs) && tsMs > 946684800000)) continue;
+    const upPx = Number(upRaw[idx]);
+    const downPx = Number(downRaw[idx]);
+    points.push({
+      tsMs,
+      up: Number.isFinite(upPx) ? upPx : null,
+      down: Number.isFinite(downPx) ? downPx : null,
+      idx,
+    });
+  }
+  points.sort((a, b) => a.tsMs === b.tsMs ? a.idx - b.idx : a.tsMs - b.tsMs);
+  const xMs = [];
+  const up = [];
+  const down = [];
+  for (const point of points) {
+    if (xMs.length && xMs[xMs.length - 1] === point.tsMs) {
+      up[up.length - 1] = point.up;
+      down[down.length - 1] = point.down;
+      continue;
+    }
+    xMs.push(point.tsMs);
+    up.push(point.up);
+    down.push(point.down);
+  }
+  if (xMs.length < 2) return null;
+  return {
+    xMs,
+    up,
+    down,
+    source: String(trace?.source || trace?.sourceFile || "continuity_trace"),
+  };
+}
+
+function buildRecoveredSideAuditFromSessionRowWorker(rowLike) {
+  const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+  const lanes = Array.isArray(row?.lanes) ? row.lanes : [];
+  const sideAudit = {
+    UP: { side: "UP", timeline: [], issues: [], inferredBlockers: [], tradeLagWindows: [], fills: {}, metrics: {} },
+    DOWN: { side: "DOWN", timeline: [], issues: [], inferredBlockers: [], tradeLagWindows: [], fills: {}, metrics: {} },
+  };
+  if (!lanes.length) return sideAudit;
+  const nextTradeNumBySide = new Map();
+  const tradeMetaByKey = new Map();
+  for (const laneRaw of lanes) {
+    const lane = laneRaw && typeof laneRaw === "object" ? laneRaw : null;
+    if (!lane) continue;
+    const side = String(lane?.side || "").trim().toUpperCase();
+    if (side !== "UP" && side !== "DOWN") continue;
+    const entryTsMs = Number(lane?.entryTsMs);
+    const exitTsMs = Number(lane?.exitTsMs);
+    const entryPx = Number(lane?.entryPx);
+    const exitPx = Number(lane?.exitPx);
+    if (
+      !(
+        Number.isFinite(entryTsMs) &&
+        entryTsMs > 946684800000 &&
+        Number.isFinite(exitTsMs) &&
+        exitTsMs >= entryTsMs &&
+        Number.isFinite(entryPx) &&
+        Number.isFinite(exitPx)
+      )
+    ) continue;
+    const tradeKey = `${side}|${Math.round(entryTsMs)}|${Number(entryPx).toFixed(6)}`;
+    let tradeMeta = tradeMetaByKey.get(tradeKey) || null;
+    if (!tradeMeta) {
+      const tradeNum = Number(nextTradeNumBySide.get(side) || 0) + 1;
+      nextTradeNumBySide.set(side, tradeNum);
+      tradeMeta = {
+        tradeNum,
+        tradeParadigm: `Recovered Trade ${tradeNum}`,
+        entryAdded: false,
+      };
+      tradeMetaByKey.set(tradeKey, tradeMeta);
+    }
+    const entryShares =
+      Number.isFinite(Number(lane?.shares))
+        ? Number(lane.shares)
+        : (
+            Number.isFinite(Number(lane?.sharesClosed)) && Number.isFinite(Number(lane?.sharesRemaining))
+              ? Number(lane.sharesClosed) + Number(lane.sharesRemaining)
+              : null
+          );
+    const sharesClosed =
+      Number.isFinite(Number(lane?.sharesClosed))
+        ? Number(lane.sharesClosed)
+        : (Number.isFinite(Number(lane?.soldShares)) ? Number(lane.soldShares) : entryShares);
+    const sharesRemaining =
+      Number.isFinite(Number(lane?.sharesRemaining))
+        ? Number(lane.sharesRemaining)
+        : (
+            Number.isFinite(Number(entryShares)) && Number.isFinite(Number(sharesClosed))
+              ? Math.max(0, Number(entryShares) - Number(sharesClosed))
+              : null
+          );
+    if (!tradeMeta.entryAdded) {
+      const entryRow = {
+        side,
+        tradeNum: tradeMeta.tradeNum,
+        tradeParadigm: tradeMeta.tradeParadigm,
+        tsMs: entryTsMs,
+        fillTsMs: entryTsMs,
+        event: "enter",
+        entryPx,
+        actualFillPx: entryPx,
+        fillPx: entryPx,
+        signalPx: entryPx,
+        intendedPx: entryPx,
+        executionMode: "paper",
+        fillSource: "continuity_session_recovery",
+        reason: String(lane?.via || "continuity_recovered_entry").trim(),
+        shares: Number.isFinite(Number(entryShares)) ? Number(entryShares) : null,
+        notionalUsd: Number.isFinite(Number(lane?.notionalUsd)) ? Number(lane.notionalUsd) : null,
+        feesUsd: Number.isFinite(Number(lane?.entryFeeUsd)) ? Number(lane.entryFeeUsd) : null,
+        pnlUsd: Number.isFinite(Number(lane?.entryFeeUsd)) ? -Math.abs(Number(lane.entryFeeUsd)) : null,
+      };
+      sideAudit[side].timeline.push(entryRow);
+      if (!sideAudit[side].fills.entry) sideAudit[side].fills.entry = entryRow;
+      tradeMeta.entryAdded = true;
+    }
+    const exitTypeRaw = String(lane?.exitType || lane?.exitReasonRaw || "").trim();
+    const exitTypeLower = exitTypeRaw.toLowerCase();
+    const partial = lane?.partial === true || /partial|derisk/.test(exitTypeLower);
+    const exitRow = {
+      side,
+      tradeNum: tradeMeta.tradeNum,
+      tradeParadigm: tradeMeta.tradeParadigm,
+      tsMs: exitTsMs,
+      fillTsMs: exitTsMs,
+      event: partial ? "exit_partial" : "exit",
+      entryPx,
+      exitPx,
+      actualFillPx: exitPx,
+      fillPx: exitPx,
+      signalPx: exitPx,
+      intendedPx: exitPx,
+      executionMode: "paper",
+      fillSource: "continuity_session_recovery",
+      reason: String(lane?.exitReasonRaw || lane?.via || (partial ? "continuity_recovered_partial" : "continuity_recovered_exit")).trim(),
+      exitType: partial
+        ? "derisk"
+        : (
+            exitTypeLower.includes("stop")
+              ? "stop"
+              : (exitTypeLower.includes("tp") ? "tp" : (exitTypeLower || "exit"))
+          ),
+      sharesClosed: Number.isFinite(Number(sharesClosed)) ? Number(sharesClosed) : null,
+      soldShares: Number.isFinite(Number(sharesClosed)) ? Number(sharesClosed) : null,
+      sharesRemaining: Number.isFinite(Number(sharesRemaining)) ? Number(sharesRemaining) : null,
+      grossPnlUsd: Number.isFinite(Number(lane?.grossPnlUsd)) ? Number(lane.grossPnlUsd) : null,
+      feesUsd: Number.isFinite(Number(lane?.exitFeeUsd))
+        ? Number(lane.exitFeeUsd)
+        : (
+            partial
+              ? null
+              : (Number.isFinite(Number(lane?.feesUsd)) ? Number(lane.feesUsd) : null)
+          ),
+      pnlUsd: Number.isFinite(Number(lane?.pnlUsd)) ? Number(lane.pnlUsd) : null,
+    };
+    sideAudit[side].timeline.push(exitRow);
+    if (partial) {
+      if (!sideAudit[side].fills.derisk) sideAudit[side].fills.derisk = exitRow;
+    } else {
+      sideAudit[side].fills.exit = exitRow;
+    }
+  }
+  for (const side of ["UP", "DOWN"]) {
+    sideAudit[side].timeline.sort((a, b) => Number(a?.tsMs || 0) - Number(b?.tsMs || 0));
+    sideAudit[side].issues = Array.isArray(row?.auditIssues) ? row.auditIssues.slice() : [];
+    if (row?.noTrade === true) sideAudit[side].inferredBlockers = ["no_trade"];
+  }
+  return sideAudit;
+}
+
+function buildCompactPayloadFromSessionRow(rowLike, sourceTag = "session_history_fallback") {
+  const row = rowLike && typeof rowLike === "object" ? rowLike : null;
+  if (!row) return null;
+  const preferNonZeroNumber = (...values) => {
+    let fallback = NaN;
+    for (const value of values) {
+      const num = Number(value);
+      if (!Number.isFinite(num)) continue;
+      if (!Number.isFinite(fallback)) fallback = num;
+      if (Math.abs(num) > 0.000001) return num;
+    }
+    return fallback;
+  };
+  const netCandidates = [row?.actualPnlUsd, row?.pnlUsd, row?.correctedPnlUsd, row?.auditNetPnlUsd];
+  const feesCandidates = [row?.actualFeesUsd, row?.feesUsd];
+  const grossCandidates = [row?.actualGrossPnlUsd, row?.grossPnlUsd];
+  const pickFinite = (values) => {
+    for (const value of values) {
+      const num = Number(value);
+      if (Number.isFinite(num)) return num;
+    }
+    return NaN;
+  };
+  const net = preferNonZeroNumber(...netCandidates);
+  const feesRaw = pickFinite(feesCandidates);
+  const grossRaw = pickFinite(grossCandidates);
+  const fees = Number.isFinite(feesRaw) ? feesRaw : 0;
+  const gross = Number.isFinite(grossRaw)
+    ? grossRaw
+    : (Number.isFinite(net) ? Number((net + fees).toFixed(10)) : NaN);
+  const startMs = Number.isFinite(Number(row?.startMs)) ? Number(row.startMs) : null;
+  const endMs = Number.isFinite(Number(row?.endMs)) ? Number(row.endMs) : null;
+  const slug = String(row?.slug || "").trim();
+  if (!slug) return null;
+  if (!(Number.isFinite(net) || Number.isFinite(gross) || Number.isFinite(fees))) return null;
+  const recoveredTradeSummary = (
+    Number.isFinite(net) &&
+    Math.abs(net) > 0.000001
+  )
+    ? [{
+        tradeKey: `continuity-${slug}`,
+        tradeParadigm: "Recovered Session Trade",
+        side: null,
+        entryTsMs: startMs,
+        exitTsMs: endMs,
+        entryPx: null,
+        exitPx: null,
+        peakPnlPct: null,
+        peakPx: null,
+        peakToExitSec:
+          Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs
+            ? Number(((endMs - startMs) / 1000).toFixed(3))
+            : null,
+        grossPnlUsd: Number.isFinite(gross) ? gross : null,
+        feesUsd: Number.isFinite(fees) ? fees : null,
+        pnlUsd: net,
+        reason: "Recovered from run-history continuity because explicit audit trades were unavailable.",
+        exitType: "session_close",
+      }]
+    : [];
+  const sideAudit = buildRecoveredSideAuditFromSessionRowWorker(row);
+  const normalizedTrace = normalizeCompactTraceWorker(row?.trace || null);
+  return {
+    slug,
+    financials: {
+      netPnlUsd: Number.isFinite(net) ? net : null,
+      actualNetPnlUsd: Number.isFinite(net) ? net : null,
+      grossPnlUsd: Number.isFinite(gross) ? gross : null,
+      feesUsd: Number.isFinite(fees) ? fees : null,
+    },
+    sessionSummary: {
+      slug,
+      startMs,
+      endMs,
+      pnlUsd: Number.isFinite(net) ? net : null,
+      netPnlUsd: Number.isFinite(net) ? net : null,
+      grossPnlUsd: Number.isFinite(gross) ? gross : null,
+      feesUsd: Number.isFinite(fees) ? fees : null,
+      continuityBalanceUsd: Number.isFinite(Number(row?.continuityBalanceUsd ?? row?.balanceUsd))
+        ? Number(row?.continuityBalanceUsd ?? row?.balanceUsd)
+        : null,
+      cumulativeBalanceUsd: Number.isFinite(Number(row?.continuityBalanceUsd ?? row?.balanceUsd))
+        ? Number(row?.continuityBalanceUsd ?? row?.balanceUsd)
+        : null,
+      source: sourceTag,
+    },
+    trace: normalizedTrace,
+    traceSource: String(normalizedTrace?.source || row?.traceSource || sourceTag),
+    tradeSummaries: recoveredTradeSummary,
+    sideAudit,
+    issues: Array.isArray(row?.auditIssues) ? row.auditIssues.slice() : [],
+  };
+}
+
+async function buildSessionAuditCompactFromContinuity(runNumLike, slugLike, reqUrl, hostPortLike = "") {
+  const runNum = Math.floor(Number(runNumLike));
+  const slug = String(slugLike || "").trim();
+  const sourceHostPort = resolveScopedSourceHostPort(
+    hostPortLike || reqUrl?.searchParams?.get("sourceHostPort") || reqUrl?.searchParams?.get("hostPort") || RUN_AUDIT_HOST_PORT
+  );
+  if (!(Number.isFinite(runNum) && runNum > 0) || !slug) return null;
+  const requestedRunId = String(reqUrl?.searchParams?.get("runId") || "").trim();
+  const requestedStartedAtMs = Number(reqUrl?.searchParams?.get("startedAtMs") || 0);
+  const botsReq = new URL("/api/v2/bots", "http://worker.local");
+  botsReq.searchParams.set("engine", sourceHostPort === "8791" ? "live" : "paper");
+  botsReq.searchParams.set("sourceHostPort", sourceHostPort);
+  const botsPayload = await fetchJsonDirect(buildUpstreamUrl(botsReq).toString());
+  const items = Array.isArray(botsPayload?.items) ? botsPayload.items : [];
+  const bot = items.find((item) => {
+    const itemRunNum = Number(item?.runNum || 0);
+    const itemRunId = String(item?.runId || "").trim();
+    const itemStartedAtMs = Number(item?.launchedAtMs || item?.startedAtMs || 0);
+    if (Math.floor(itemRunNum) !== runNum) return false;
+    if (requestedRunId && itemRunId && itemRunId !== requestedRunId) return false;
+    if (requestedStartedAtMs && Number.isFinite(itemStartedAtMs) && itemStartedAtMs > 0 && Math.floor(itemStartedAtMs) !== Math.floor(requestedStartedAtMs)) return false;
+    return true;
+  }) || null;
+  const instanceId = String(bot?.instanceId || "").trim();
+  if (!instanceId) return null;
+  const continuity = await fetchContinuityHistoryPayloadForInstance(instanceId, {
+    includeTrace: true,
+    maxSessions: 5000,
+    sourceHostPort,
+  });
+  const rawSessions = Array.isArray(continuity?.payload?.sessions)
+    ? continuity.payload.sessions
+    : (Array.isArray(continuity?.payload?.items) ? continuity.payload.items : []);
+  const rawRow = rawSessions.find((row) => String(row?.slug || "").trim() === slug) || null;
+  if (rawRow && typeof rawRow === "object") {
+    const compact = buildCompactPayloadFromSessionRow({
+      ...rawRow,
+      instanceId,
+      runNum,
+      runIdText: requestedRunId || String(rawRow?.runIdText || rawRow?.runId || "").trim() || null,
+    }, "session_history_direct_fallback");
+    if (compact) return compact;
+  }
+  const rows = compactRowsFromContinuityPayload(continuity.payload, {
+    instanceId,
+    maxSessions: null,
+    offset: 0,
+  }).filter((row) => {
+    const rowSlug = String(row?.slug || "").trim();
+    if (rowSlug !== slug) return false;
+    return rowWithinRunStart(row, Number(bot?.launchedAtMs || bot?.startedAtMs || 0));
+  });
+  return buildCompactPayloadFromSessionRow(rows[0] || null, "session_history_direct_fallback");
+}
+
+async function buildSessionAuditCompactFromSessionHistory(runNumLike, slugLike, reqUrl, hostPortLike = "") {
+  const runNum = Math.floor(Number(runNumLike));
+  const slug = String(slugLike || "").trim();
+  const sourceHostPort = resolveScopedSourceHostPort(
+    hostPortLike || reqUrl?.searchParams?.get("sourceHostPort") || reqUrl?.searchParams?.get("hostPort") || RUN_AUDIT_HOST_PORT
+  );
+  if (!(Number.isFinite(runNum) && runNum > 0) || !slug) return null;
+  const historyUrl = new URL("/api/session-history", runAuditSourceBaseUrl(sourceHostPort));
+  historyUrl.searchParams.set("engine", sourceHostPort === "8791" ? "live" : "paper");
+  historyUrl.searchParams.set("scope", "runs");
+  historyUrl.searchParams.set("runs", "50");
+  historyUrl.searchParams.set("includeTrace", "1");
+  historyUrl.searchParams.set("maxSessions", "5000");
+  historyUrl.searchParams.set("marketSlug", slug);
+  const startedAtMs = Number(reqUrl?.searchParams?.get("startedAtMs") || 0);
+  if (Number.isFinite(startedAtMs) && startedAtMs > 0) {
+    historyUrl.searchParams.set("sinceMs", String(Math.floor(startedAtMs)));
+  }
+  const payload = await fetchJsonDirect(historyUrl.toString());
+  const rows = (Array.isArray(payload?.sessions) ? payload.sessions : [])
+    .filter((row) => String(row?.slug || "").trim() === slug);
+  return buildCompactPayloadFromSessionRow(rows[0] || null, "session_history_direct_fallback");
+}
+
+async function buildSessionAuditCompactFromCachedContinuity(runNumLike, slugLike, reqUrl, hostPortLike = "") {
+  const runNum = Math.floor(Number(runNumLike));
+  const slug = String(slugLike || "").trim();
+  const sourceHostPort = resolveScopedSourceHostPort(
+    hostPortLike || reqUrl?.searchParams?.get("sourceHostPort") || reqUrl?.searchParams?.get("hostPort") || RUN_AUDIT_HOST_PORT
+  );
+  if (!(Number.isFinite(runNum) && runNum > 0) || !slug) return null;
+  const instanceId = findCachedLastSessionHistoryInstanceForSlug(slug);
+  if (!instanceId) return null;
+  const continuity = await fetchContinuityHistoryPayloadForInstance(instanceId, {
+    includeTrace: true,
+    maxSessions: 5000,
+    sourceHostPort,
+  });
+  const rawSessions = Array.isArray(continuity?.payload?.sessions)
+    ? continuity.payload.sessions
+    : (Array.isArray(continuity?.payload?.items) ? continuity.payload.items : []);
+  const rawRow = rawSessions.find((row) => String(row?.slug || "").trim() === slug) || null;
+  if (rawRow && typeof rawRow === "object") {
+    const compact = buildCompactPayloadFromSessionRow({
+      ...rawRow,
+      instanceId,
+      runNum,
+      runIdText: String(reqUrl?.searchParams?.get("runId") || rawRow?.runIdText || rawRow?.runId || "").trim() || null,
+    }, "session_history_direct_fallback");
+    if (compact) return compact;
+  }
+  const rows = compactRowsFromContinuityPayload(continuity.payload, {
+    instanceId,
+    maxSessions: null,
+    offset: 0,
+  }).filter((row) => String(row?.slug || "").trim() === slug);
+  return buildCompactPayloadFromSessionRow(rows[0] || null, "session_history_direct_fallback");
+}
+
+function buildTraceFromRunArtifactEvents(eventsText, slugLike, startMsLike, endMsLike) {
+  const slug = String(slugLike || "").trim();
+  const startMs = Number(startMsLike);
+  const endMs = Number(endMsLike);
+  if (!slug) return null;
+  const pointsByTs = new Map();
+  for (const lineRaw of String(eventsText || "").split(/\r?\n/)) {
+    const line = String(lineRaw || "").trim();
+    if (!line) continue;
+    let row = null;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const rowSlug = String(row?.marketSlug || row?.slug || row?.sessionSlug || "").trim();
+    if (rowSlug !== slug) continue;
+    const tsMs = Number(row?.eventTsMs ?? row?.t ?? row?.ts ?? row?.timestampMs ?? 0);
+    if (!(Number.isFinite(tsMs) && tsMs > 946684800000)) continue;
+    if (Number.isFinite(startMs) && startMs > 0 && tsMs < startMs) continue;
+    if (Number.isFinite(endMs) && endMs > 0 && tsMs > endMs) continue;
+    const runtime = row?.runtime && typeof row.runtime === "object" ? row.runtime : null;
+    const upBid = Number(runtime?.upBid ?? row?.upBid ?? row?.upPx ?? row?.decisionSnapshot?.upBid);
+    const downBid = Number(runtime?.downBid ?? row?.downBid ?? row?.downPx ?? row?.decisionSnapshot?.downBid);
+    if (!Number.isFinite(upBid) && !Number.isFinite(downBid)) continue;
+    pointsByTs.set(tsMs, {
+      tsMs,
+      up: Number.isFinite(upBid) ? upBid : null,
+      down: Number.isFinite(downBid) ? downBid : null,
+    });
+  }
+  const points = Array.from(pointsByTs.values()).sort((a, b) => Number(a.tsMs) - Number(b.tsMs));
+  if (points.length < 2) return null;
+  return {
+    xMs: points.map((point) => Number(point.tsMs)),
+    up: points.map((point) => point.up),
+    down: points.map((point) => point.down),
+    source: "run_artifact_events_runtime",
+  };
+}
+
+async function buildSessionAuditCompactFromRunArtifacts(runNumLike, slugLike, reqUrl, hostPortLike = "") {
+  const runNum = Math.floor(Number(runNumLike));
+  const slug = String(slugLike || "").trim();
+  const sourceHostPort = resolveScopedSourceHostPort(
+    hostPortLike || reqUrl?.searchParams?.get("sourceHostPort") || reqUrl?.searchParams?.get("hostPort") || RUN_AUDIT_HOST_PORT
+  );
+  if (!(Number.isFinite(runNum) && runNum > 0) || !slug) return null;
+  const requestedIdentity = {
+    hostPort: sourceHostPort,
+    runIdText: String(reqUrl?.searchParams?.get("runId") || "").trim(),
+    startedAtMs: Number(reqUrl?.searchParams?.get("startedAtMs") || 0),
+  };
+  let remoteInputs = null;
+  try {
+    remoteInputs = await readRemoteRunAuditInputs(runNum, requestedIdentity);
+  } catch {
+    return null;
+  }
+  const indexSessions = Array.isArray(remoteInputs?.index?.sessions) ? remoteInputs.index.sessions : [];
+  const indexRow = indexSessions.find((row) => String(row?.slug || "").trim() === slug) || null;
+  if (!(indexRow && typeof indexRow === "object")) return null;
+  const row = {
+    ...indexRow,
+    runNum,
+    runIdText: String(remoteInputs?.summary?.runId || remoteInputs?.index?.run?.runId || indexRow?.runIdText || "").trim() || null,
+  };
+  const startMs = Number(row?.startMs);
+  const endMs = Number(row?.endMs);
+  try {
+    const safeHost = normalizeRunAuditHostPort(sourceHostPort || RUN_AUDIT_HOST_PORT);
+    const artifactBase = runAuditSourceBaseUrl(safeHost);
+    const runIdText = String(remoteInputs?.summary?.runId || remoteInputs?.index?.run?.runId || "").trim();
+    const startedAtMs = Number(remoteInputs?.summary?.startedAtMs || remoteInputs?.summary?.launchedAtMs || remoteInputs?.index?.run?.startedAtMs || 0);
+    const eventsUrl = new URL(
+      `/api/compare/run-artifact?hostPort=${encodeURIComponent(safeHost)}&runNum=${encodeURIComponent(String(runNum))}&kind=events`,
+      artifactBase,
+    );
+    if (runIdText) eventsUrl.searchParams.set("runId", runIdText);
+    if (Number.isFinite(startedAtMs) && startedAtMs > 0) eventsUrl.searchParams.set("startedAtMs", String(Math.floor(startedAtMs)));
+    const trace = buildTraceFromRunArtifactEvents(await fetchTextDirect(eventsUrl.toString()), slug, startMs, endMs);
+    if (trace) {
+      row.trace = trace;
+      row.traceSource = String(trace.source || "run_artifact_events_runtime");
+    }
+  } catch {}
+  return buildCompactPayloadFromSessionRow(row, "run_artifact_index_fallback");
+}
+
+function renderSessionAuditCompactHtml(compact, meta = {}) {
+  const slug = String(compact?.slug || meta.slug || "").trim();
+  const fin = compact?.financials && typeof compact.financials === "object" ? compact.financials : {};
+  const summary = compact?.sessionSummary && typeof compact.sessionSummary === "object" ? compact.sessionSummary : {};
+  const sideAudit = compact?.sideAudit && typeof compact.sideAudit === "object" ? compact.sideAudit : {};
+  const trace = normalizeCompactTraceWorker(compact?.trace || null);
+  const tradeSummaries = Array.isArray(compact?.tradeSummaries) ? compact.tradeSummaries : [];
+  const timelineRows = ["UP", "DOWN"].flatMap((side) => {
+    const rows = Array.isArray(sideAudit?.[side]?.timeline) ? sideAudit[side].timeline : [];
+    return rows
+      .filter((row) => row && typeof row === "object")
+      .map((row) => ({ ...row, side: String(row?.side || side).toUpperCase() }));
+  }).sort((a, b) => Number(a?.tsMs || 0) - Number(b?.tsMs || 0));
+  const deriveTimelineRowsForDisplay = (rows) => {
+    const grouped = new Map();
+    for (const row of rows) {
+      const side = String(row?.side || "").toUpperCase() || "UNK";
+      const tradeIdRaw =
+        Number.isFinite(Number(row?.tradeNum))
+          ? `trade-${Number(row.tradeNum)}`
+          : String(row?.tradeParadigm || row?.tradeKey || row?.orderId || "trade-na");
+      const tradeKey = `${side}|${tradeIdRaw}`;
+      if (!grouped.has(tradeKey)) grouped.set(tradeKey, []);
+      grouped.get(tradeKey).push(row);
+    }
+    const derived = [];
+    for (const tradeRows of grouped.values()) {
+      const sorted = tradeRows.slice().sort((a, b) => Number(a?.tsMs || 0) - Number(b?.tsMs || 0));
+      let entryPx = NaN;
+      let entryShares = NaN;
+      let remaining = NaN;
+      for (const row of sorted) {
+        const event = String(row?.event || "").toLowerCase();
+        const out = { ...row };
+        if (event === "enter") {
+          entryPx = Number(row?.entryPx ?? row?.actualFillPx ?? row?.fillPx);
+          entryShares = Number(row?.shares ?? row?.sharesClosed ?? row?.soldShares);
+          if (!Number.isFinite(entryShares) || entryShares <= 0) {
+            const closed = Number(row?.sharesClosed);
+            const remain = Number(row?.sharesRemaining);
+            if (Number.isFinite(closed) || Number.isFinite(remain)) {
+              entryShares = Math.max(0, (Number.isFinite(closed) ? closed : 0) + (Number.isFinite(remain) ? remain : 0));
+            }
+          }
+          remaining = Number.isFinite(entryShares) ? Math.max(0, entryShares) : NaN;
+          out.displayShares = Number.isFinite(entryShares) ? entryShares : null;
+          out.displayRemaining = Number.isFinite(remaining) ? remaining : null;
+          if (!Number.isFinite(Number(out?.pnlUsd))) {
+            const fee = Number(out?.feesUsd);
+            out.pnlUsd = Number.isFinite(fee) ? -Math.abs(fee) : null;
+          }
+          derived.push(out);
+          continue;
+        }
+        const sharesClosedRaw = Number(row?.sharesClosed ?? row?.soldShares ?? row?.shares);
+        let sharesClosed = Number.isFinite(sharesClosedRaw) ? Math.max(0, sharesClosedRaw) : NaN;
+        if (!(Number.isFinite(sharesClosed) && sharesClosed > 0) && Number.isFinite(Number(remaining)) && Number.isFinite(Number(row?.sharesRemaining))) {
+          sharesClosed = Math.max(0, Number(remaining) - Math.max(0, Number(row.sharesRemaining)));
+        }
+        if (!(Number.isFinite(sharesClosed) && sharesClosed > 0) && Number.isFinite(Number(remaining))) {
+          sharesClosed = Math.max(0, Number(remaining));
+        }
+        let nextRemaining = Number(row?.sharesRemaining);
+        if (!(Number.isFinite(nextRemaining) && nextRemaining >= 0) && Number.isFinite(Number(remaining))) {
+          nextRemaining = Math.max(0, Number(remaining) - (Number.isFinite(sharesClosed) ? sharesClosed : 0));
+        }
+        if (Number.isFinite(Number(remaining)) && Number.isFinite(nextRemaining) && nextRemaining > Number(remaining)) {
+          nextRemaining = Math.max(0, Number(remaining) - (Number.isFinite(sharesClosed) ? sharesClosed : 0));
+        }
+        const exitPx = Number(row?.exitPx ?? row?.actualFillPx ?? row?.fillPx);
+        const feesUsd = Number(row?.feesUsd);
+        if (!Number.isFinite(Number(row?.grossPnlUsd)) && Number.isFinite(exitPx) && Number.isFinite(entryPx) && Number.isFinite(sharesClosed)) {
+          out.grossPnlUsd = (exitPx - entryPx) * sharesClosed;
+        }
+        if (!Number.isFinite(Number(row?.pnlUsd))) {
+          if (Number.isFinite(Number(out.grossPnlUsd)) && Number.isFinite(feesUsd)) out.pnlUsd = Number(out.grossPnlUsd) - feesUsd;
+          else if (Number.isFinite(Number(out.grossPnlUsd))) out.pnlUsd = Number(out.grossPnlUsd);
+        }
+        out.displayShares = Number.isFinite(sharesClosed) ? sharesClosed : null;
+        out.displayRemaining = Number.isFinite(nextRemaining) ? nextRemaining : null;
+        remaining = Number.isFinite(nextRemaining) ? nextRemaining : remaining;
+        derived.push(out);
+      }
+    }
+    return derived.sort((a, b) => Number(a?.tsMs || 0) - Number(b?.tsMs || 0));
+  };
+  const displayTimelineRows = deriveTimelineRowsForDisplay(timelineRows);
+  const timelineTotals = displayTimelineRows.reduce((acc, row) => {
+    const event = String(row?.event || "").toLowerCase();
+    const shares = Number(row?.displayShares);
+    const pnlUsd = Number(row?.pnlUsd);
+    if (event === "enter") {
+      if (Number.isFinite(shares)) acc.entryShares += shares;
+    } else if (Number.isFinite(shares)) {
+      acc.closedShares += shares;
+    }
+    if (Number.isFinite(pnlUsd)) acc.netPnlUsd += pnlUsd;
+    const remain = Number(row?.displayRemaining);
+    if (Number.isFinite(remain)) acc.finalRemaining = remain;
+    return acc;
+  }, { entryShares: 0, closedShares: 0, netPnlUsd: 0, finalRemaining: NaN });
+  if (!Number.isFinite(timelineTotals.finalRemaining) && timelineTotals.entryShares > 0) {
+    timelineTotals.finalRemaining = Math.max(0, timelineTotals.entryShares - timelineTotals.closedShares);
+  }
+  const net = Number(fin.actualNetPnlUsd ?? fin.netPnlUsd ?? summary.netPnlUsd ?? summary.pnlUsd);
+  const gross = Number(fin.grossPnlUsd ?? summary.grossPnlUsd);
+  const fees = Number(fin.feesUsd ?? summary.feesUsd);
+  const fmt = (value) => Number.isFinite(value) ? `${value >= 0 ? "+" : "-"}$${Math.abs(value).toFixed(2)}` : "—";
+  const fmtTs = (value) => {
+    const ms = Number(value);
+    if (!(Number.isFinite(ms) && ms > 946684800000)) return "—";
+    return new Date(ms).toLocaleString("en-US", {
+      timeZone: "America/Los_Angeles",
+      hour12: true,
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      timeZoneName: "short",
+    });
+  };
+  const chartHtml = (() => {
+    const w = 1040;
+    const h = 280;
+    const pad = 20;
+    const traceX = Array.isArray(trace?.xMs) ? trace.xMs : [];
+    const hasTrace = traceX.length >= 2;
+    const eventPoints = timelineRows
+      .map((row) => {
+        const tsMs = Number(row?.tsMs);
+        const event = String(row?.event || "").toLowerCase();
+        const px = Number(
+          event === "exit" || event === "exit_partial"
+            ? (row?.exitPx ?? row?.actualFillPx ?? row?.fillPx)
+            : (row?.entryPx ?? row?.actualFillPx ?? row?.fillPx)
+        );
+        return Number.isFinite(tsMs) && Number.isFinite(px) ? { tsMs, px, row } : null;
+      })
+      .filter(Boolean);
+    let xMs = hasTrace ? traceX.slice() : eventPoints.map((point) => Number(point.tsMs)).sort((a, b) => a - b);
+    if (!xMs.length) {
+      return `<div class="card"><div class="meta">No trace or event timeline available.</div></div>`;
+    }
+    if (xMs.length === 1) xMs = [xMs[0] - 5000, xMs[0] + 5000];
+    const minX = Number(xMs[0]);
+    const maxX = Number(xMs[xMs.length - 1]);
+    const spanX = Math.max(1, maxX - minX);
+    const sx = (tsMs) => pad + (((Number(tsMs) - minX) / spanX) * (w - pad * 2));
+    const sy = (px) => h - pad - (Math.max(0, Math.min(1, Number(px))) * (h - pad * 2));
+    const mkPath = (values) => {
+      const out = [];
+      let started = false;
+      for (let idx = 0; idx < xMs.length; idx += 1) {
+        const tsMs = Number(xMs[idx]);
+        const px = Number(values[idx]);
+        if (!(Number.isFinite(tsMs) && Number.isFinite(px))) {
+          started = false;
+          continue;
+        }
+        out.push(`${started ? "L" : "M"} ${sx(tsMs).toFixed(2)} ${sy(px).toFixed(2)}`);
+        started = true;
+      }
+      return out.join(" ");
+    };
+    const traceUp = Array.isArray(trace?.up) ? trace.up : [];
+    const traceDown = Array.isArray(trace?.down) ? trace.down : [];
+    const groupedTrades = new Map();
+    for (const row of timelineRows) {
+      const tradeNum = Number(row?.tradeNum);
+      const tradeKey = `${String(row?.side || "").toUpperCase()}|${Number.isFinite(tradeNum) ? tradeNum : "na"}`;
+      if (!groupedTrades.has(tradeKey)) groupedTrades.set(tradeKey, []);
+      groupedTrades.get(tradeKey).push(row);
+    }
+    const colors = ["#57a6ff", "#ffb454", "#4ad59b", "#d88fff", "#8de1ff", "#ffd166"];
+    const tradeMarks = Array.from(groupedTrades.entries()).map(([tradeKey, rows], idx) => {
+      const sorted = rows.slice().sort((a, b) => Number(a?.tsMs || 0) - Number(b?.tsMs || 0));
+      const poly = sorted
+        .map((row) => {
+          const event = String(row?.event || "").toLowerCase();
+          const px = Number(event === "exit" || event === "exit_partial" ? (row?.exitPx ?? row?.actualFillPx) : (row?.entryPx ?? row?.actualFillPx));
+          const tsMs = Number(row?.tsMs);
+          if (!(Number.isFinite(tsMs) && Number.isFinite(px))) return null;
+          return `${sx(tsMs).toFixed(2)},${sy(px).toFixed(2)}`;
+        })
+        .filter(Boolean)
+        .join(" ");
+      const points = sorted.map((row) => {
+        const event = String(row?.event || "").toLowerCase();
+        const px = Number(event === "exit" || event === "exit_partial" ? (row?.exitPx ?? row?.actualFillPx) : (row?.entryPx ?? row?.actualFillPx));
+        const tsMs = Number(row?.tsMs);
+        if (!(Number.isFinite(tsMs) && Number.isFinite(px))) return "";
+        const fill = event === "enter" ? "#57a6ff" : (event === "exit_partial" ? "#4ad59b" : "#ff7d96");
+        return `<circle cx="${sx(tsMs).toFixed(2)}" cy="${sy(px).toFixed(2)}" r="4.5" fill="${fill}" stroke="#fff" stroke-width="1.1" />`;
+      }).join("");
+      return `${poly ? `<polyline points="${poly}" fill="none" stroke="${colors[idx % colors.length]}" stroke-width="3" opacity="0.95" />` : ""}${points}`;
+    }).join("");
+    return `<div class="card">
+      <h2 style="margin:0 0 10px;font-size:20px;">Trace And Trade Lines</h2>
+      <svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" style="display:block;background:#0d1728;border:1px solid #243650;border-radius:12px;">
+        <rect x="0" y="0" width="${w}" height="${h}" fill="#0d1728" />
+        <line x1="${pad}" y1="${h - pad}" x2="${w - pad}" y2="${h - pad}" stroke="#243650" stroke-width="1" />
+        <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${h - pad}" stroke="#243650" stroke-width="1" />
+        ${hasTrace ? `<path d="${mkPath(traceUp)}" fill="none" stroke="#f8d24f" stroke-width="1.8" />` : ""}
+        ${hasTrace ? `<path d="${mkPath(traceDown)}" fill="none" stroke="#c7cdd7" stroke-width="1.5" stroke-dasharray="4 4" />` : ""}
+        ${tradeMarks}
+      </svg>
+      <div class="meta" style="margin-top:10px;">${escapeHtmlLite(hasTrace ? `Trace source: ${String(compact?.traceSource || "continuity_trace")}` : "Trade-line fallback rendered without trace.")}</div>
+    </div>`;
+  })();
+  const tradeHtml = tradeSummaries.length
+    ? `<div class="card">
+      <div class="meta" style="margin-bottom:10px;">Recovered trade summaries from run-history continuity</div>
+      ${tradeSummaries.map((trade, idx) => {
+        const pnlUsd = Number(trade?.pnlUsd);
+        const pnlCls = Number.isFinite(pnlUsd) ? (pnlUsd > 0 ? "pos" : (pnlUsd < 0 ? "neg" : "")) : "";
+        return `<div class="tradeCard">
+          <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">
+            <strong>${escapeHtmlLite(String(trade?.tradeParadigm || `Trade ${idx + 1}`))}</strong>
+            <span class="${pnlCls}">${fmt(pnlUsd)}</span>
+          </div>
+          <div class="meta">Entry: ${escapeHtmlLite(fmtTs(trade?.entryTsMs))}</div>
+          <div class="meta">Exit: ${escapeHtmlLite(fmtTs(trade?.exitTsMs))}${trade?.exitType ? ` | ${escapeHtmlLite(String(trade.exitType).toUpperCase())}` : ""}</div>
+          <div class="meta">Gross: ${fmt(Number(trade?.grossPnlUsd))} | Fees: ${Number.isFinite(Number(trade?.feesUsd)) ? `$${Math.abs(Number(trade.feesUsd)).toFixed(2)}` : "—"}</div>
+          <div class="meta">${escapeHtmlLite(String(trade?.reason || ""))}</div>
+        </div>`;
+      }).join("")}
+    </div>`
+    : "";
+  const timelineHtml = displayTimelineRows.length
+    ? `<div class="card">
+      <h2 style="margin:0 0 10px;font-size:20px;">Event Timeline</h2>
+      <div style="overflow:auto;border:1px solid #243650;border-radius:12px;">
+        <table style="width:100%;border-collapse:collapse;">
+          <thead>
+            <tr>
+              <th>Side</th><th>Trade</th><th>Time</th><th>Event</th><th>Entry Px</th><th>Exit Px</th><th>Shares</th><th>Remain</th><th>Net P/L</th><th>Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${displayTimelineRows.map((row) => `<tr>
+              <td>${escapeHtmlLite(String(row?.side || "-"))}</td>
+              <td>${escapeHtmlLite(String(row?.tradeParadigm || row?.tradeNum || "-"))}</td>
+              <td>${escapeHtmlLite(fmtTs(row?.tsMs))}</td>
+              <td>${escapeHtmlLite(String(row?.event || "-"))}</td>
+              <td>${Number.isFinite(Number(row?.entryPx)) ? Number(row.entryPx).toFixed(3) : "—"}</td>
+              <td>${Number.isFinite(Number(row?.exitPx)) ? Number(row.exitPx).toFixed(3) : "—"}</td>
+              <td>${Number.isFinite(Number(row?.displayShares)) ? Number(row.displayShares).toFixed(4) : "—"}</td>
+              <td>${Number.isFinite(Number(row?.displayRemaining)) ? Number(row.displayRemaining).toFixed(4) : "—"}</td>
+              <td>${Number.isFinite(Number(row?.pnlUsd)) ? Number(row.pnlUsd).toFixed(3) : "—"}</td>
+              <td>${escapeHtmlLite(String(row?.reason || "-"))}</td>
+            </tr>`).join("")}
+            <tr style="border-top:1px solid #243650;background:#0d1728;font-weight:700;">
+              <td>TOTAL</td>
+              <td>—</td>
+              <td>—</td>
+              <td>session</td>
+              <td>—</td>
+              <td>—</td>
+              <td>${timelineTotals.closedShares > 0 ? timelineTotals.closedShares.toFixed(4) : "—"}</td>
+              <td>${Number.isFinite(timelineTotals.finalRemaining) ? timelineTotals.finalRemaining.toFixed(4) : "—"}</td>
+              <td>${Number.isFinite(timelineTotals.netPnlUsd) ? timelineTotals.netPnlUsd.toFixed(3) : "—"}</td>
+              <td>derived from rendered timeline</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>`
+    : "";
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Session Audit Compact · ${escapeHtmlLite(slug)}</title>
+  <style>
+    :root{color-scheme:dark}
+    body{margin:0;background:#0b1220;color:#e9f0fb;font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    .wrap{max-width:1100px;margin:0 auto;padding:24px}
+    .card{background:#121d30;border:1px solid #243650;border-radius:14px;padding:16px 18px;margin-bottom:16px}
+    .meta{color:#9bb0cb}
+    .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+    .pill{font-weight:700}
+    .tradeCard{border:1px solid #243650;border-radius:12px;background:#0d1728;padding:12px 14px;margin-top:10px}
+    .pos{color:#48d597}
+    .neg{color:#ff7d96}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px 10px;border-bottom:1px solid #243650;text-align:left;white-space:nowrap}
+    th{position:sticky;top:0;background:#17243a;color:#9bb0cb;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+    pre{white-space:pre-wrap;word-break:break-word;background:#0d1728;border:1px solid #243650;border-radius:12px;padding:14px;overflow:auto}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1 style="margin:0 0 8px;font-size:24px;">Session Audit Compact</h1>
+      <div class="meta">${escapeHtmlLite(slug)}</div>
+    </div>
+    <div class="card grid">
+      <div><div class="meta">Net P/L</div><div class="pill">${fmt(net)}</div></div>
+      <div><div class="meta">Gross P/L</div><div class="pill">${fmt(gross)}</div></div>
+      <div><div class="meta">Fees</div><div class="pill">${Number.isFinite(fees) ? `$${fees.toFixed(2)}` : "—"}</div></div>
+    </div>
+    <div class="card grid" style="grid-template-columns:repeat(2,minmax(0,1fr));">
+      <div><div class="meta">Trades</div><div class="pill">${tradeSummaries.length}</div></div>
+      <div><div class="meta">Source</div><div class="pill">${escapeHtmlLite(String(summary?.source || "readonly_worker"))}</div></div>
+    </div>
+    ${chartHtml}
+    ${tradeHtml}
+    ${timelineHtml}
+    <div class="card">
+      <div class="meta">Readonly worker generated this visual audit from recovered continuity history because a canonical session review artifact was missing.</div>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
 function pruneSessionCardImageCacheKeepSlugs(keepSlugsLike) {
   const keepSafe = new Set(
     (Array.isArray(keepSlugsLike) ? keepSlugsLike : [keepSlugsLike])
@@ -2150,10 +3849,11 @@ function pruneSessionCardImageCacheKeepSlugs(keepSlugsLike) {
 }
 
 async function warmSessionCardImagesForHistoryRows(rowsLike) {
+  if (!SESSION_CARD_BACKGROUND_WARM_ENABLED) return;
   const rows = (Array.isArray(rowsLike) ? rowsLike : [])
     .map((row) => String(row?.slug || "").trim())
     .filter(Boolean)
-    .slice(0, 100);
+    .slice(0, SESSION_CARD_WARM_HISTORY_LIMIT);
   if (!rows.length) return;
   await mapLimit(rows, 3, async (slug) => {
     const paths = sessionCardImagePaths(slug);
@@ -2161,6 +3861,7 @@ async function warmSessionCardImagesForHistoryRows(rowsLike) {
     const reqUrl = new URL("http://worker.local/api/session-card-image");
     reqUrl.searchParams.set("slug", slug);
     reqUrl.searchParams.set("format", "jpeg");
+    reqUrl.searchParams.set("background", "1");
     try { await ensureSessionCardJpeg(reqUrl); } catch {}
     return true;
   });
@@ -2186,6 +3887,9 @@ function shQuote(value) {
 }
 
 async function runRemoteBash(script) {
+  if (RUN_AUDIT_LOCAL_FS_ENABLED) {
+    return runCommand("bash", ["-lc", script]);
+  }
   if (!(RUN_AUDIT_REMOTE_HOST && RUN_AUDIT_REMOTE_KEY)) {
     throw new Error("remote ssh config missing");
   }
@@ -2223,12 +3927,18 @@ async function findRemoteLatestRunSummaryPath() {
 }
 
 async function readRemoteTextFile(filePath) {
+  if (RUN_AUDIT_LOCAL_FS_ENABLED) {
+    return fs.readFileSync(String(filePath || ""), "utf8");
+  }
   const script = `cat ${shQuote(filePath)}`;
   const { stdout } = await runRemoteBash(script);
   return String(stdout || "");
 }
 
 async function readRemoteBinaryFile(filePath) {
+  if (RUN_AUDIT_LOCAL_FS_ENABLED) {
+    return fs.readFileSync(String(filePath || ""));
+  }
   const script = `python3 - <<'PY'
 from pathlib import Path
 import base64
@@ -2259,11 +3969,20 @@ async function readRemoteSessionAuditCompact(runNumLike, slugLike, hostPortLike 
   const cached = remoteSessionAuditCompactCache.get(cacheKey);
   if (cached && (Date.now() - Number(cached.atMs || 0)) < 15_000) return cached.row ?? null;
   try {
+    const localCompactPath = runAuditSessionCompactPath(runNum, slug, hostPortLike || RUN_AUDIT_HOST_PORT);
+    if (localCompactPath && fs.existsSync(localCompactPath)) {
+      const localRow = JSON.parse(fs.readFileSync(localCompactPath, "utf8"));
+      const normalizedLocalRow = localRow && typeof localRow === "object" ? localRow : null;
+      remoteSessionAuditCompactCache.set(cacheKey, { atMs: Date.now(), row: normalizedLocalRow });
+      return normalizedLocalRow;
+    }
+  } catch {}
+  try {
     const sourceBase = await resolveRunAuditSourceBaseUrl(hostPortLike || RUN_AUDIT_HOST_PORT);
     const compactUrl = new URL("/api/session-audits/review", sourceBase);
     compactUrl.searchParams.set("runNum", String(runNum));
     compactUrl.searchParams.set("slug", slug);
-    compactUrl.searchParams.set("format", "compact");
+    compactUrl.searchParams.set("format", "json");
     const row = JSON.parse(await fetchTextDirect(compactUrl.toString()));
     remoteSessionAuditCompactCache.set(cacheKey, { atMs: Date.now(), row: row && typeof row === "object" ? row : null });
     return row && typeof row === "object" ? row : null;
@@ -2292,6 +4011,27 @@ function correctedAccountingFromCompactAuditSummaryWorker(compactLike) {
     projectedFillNetPnlUsd: Number.isFinite(Number(summary.projectedFillNetPnlUsd)) ? Number(summary.projectedFillNetPnlUsd) : null,
     settleNetPnlUsd: Number.isFinite(Number(summary.settleNetPnlUsd)) ? Number(summary.settleNetPnlUsd) : null,
     correctedExitStrategy: String(summary.correctedExitStrategy || "").trim() || null,
+  };
+}
+
+function normalizeSessionAuditJsonPayloadWorker(compactLike) {
+  const compact = compactLike && typeof compactLike === "object" ? compactLike : {};
+  const sideAudit = compact?.sideAudit && typeof compact.sideAudit === "object" ? compact.sideAudit : {};
+  const mergedTimeline = ["UP", "DOWN"].flatMap((side) => {
+    const timeline = Array.isArray(sideAudit?.[side]?.timeline) ? sideAudit[side].timeline : [];
+    return timeline
+      .filter((row) => row && typeof row === "object")
+      .map((row) => ({
+        ...row,
+        side: String(row.side || side || "").toUpperCase() || null,
+      }));
+  }).sort((a, b) => Number(a?.tsMs || 0) - Number(b?.tsMs || 0));
+  const tradeSummaries = Array.isArray(compact?.tradeSummaries) ? compact.tradeSummaries : [];
+  return {
+    ...compact,
+    timeline: Array.isArray(compact?.timeline) && compact.timeline.length > 0 ? compact.timeline : mergedTimeline,
+    trades: Array.isArray(compact?.trades) && compact.trades.length > 0 ? compact.trades : tradeSummaries,
+    sessionAudit: compact,
   };
 }
 
@@ -2411,6 +4151,8 @@ async function convertSvgToJpeg(svgPath, jpgPath) {
   throw new Error(`missing converter ${SIPS_BIN}`);
 }
 
+const sessionCardJpegInFlight = new Map();
+
 async function ensureSessionCardJpeg(reqUrl) {
   const slug = String(reqUrl.searchParams.get("slug") || "").trim();
   if (!slug) {
@@ -2423,6 +4165,14 @@ async function ensureSessionCardJpeg(reqUrl) {
     };
   }
   const refresh = shouldBypassCache(reqUrl);
+  const backgroundWarm =
+    String(reqUrl.searchParams.get("background") || "").trim() === "1" ||
+    String(reqUrl.searchParams.get("backgroundWarm") || "").trim() === "1";
+  const inFlightKey = `${slug}::${refresh ? "refresh" : "normal"}`;
+  if (sessionCardJpegInFlight.has(inFlightKey)) {
+    return sessionCardJpegInFlight.get(inFlightKey);
+  }
+  const buildPromise = (async () => {
   const paths = sessionCardImagePaths(slug);
   let cachedMeta = null;
   try {
@@ -2432,12 +4182,14 @@ async function ensureSessionCardJpeg(reqUrl) {
     Number(cachedMeta?.traceAudit?.version || 0) >= SESSION_CARD_TRACE_AUDIT_VERSION &&
     cachedMeta?.traceAudit?.hasVisibleTrace === true;
   if (!refresh && fs.existsSync(paths.jpgPath) && cachedAuditOk) {
-    pushActivity(`USING CACHED SESSION CARD JPEG FOR SLUG ${slug.toUpperCase()}`, withSlugMeta({
-      type: "session-card-cache-hit",
-      auditVersion: cachedMeta?.traceAudit?.version || 0,
-      jpegUrl: `${reqUrl.origin}/api/session-card-image?slug=${encodeURIComponent(slug)}&format=jpeg`,
-      traceSvgUrl: `${reqUrl.origin}/api/session-card-image?slug=${encodeURIComponent(slug)}&format=svg`,
-    }, slug));
+    if (!backgroundWarm) {
+      pushActivity(`USING CACHED SESSION CARD JPEG FOR SLUG ${slug.toUpperCase()}`, withSlugMeta({
+        type: "session-card-cache-hit",
+        auditVersion: cachedMeta?.traceAudit?.version || 0,
+        jpegUrl: `${reqUrl.origin}/api/session-card-image?slug=${encodeURIComponent(slug)}&format=jpeg`,
+        traceSvgUrl: `${reqUrl.origin}/api/session-card-image?slug=${encodeURIComponent(slug)}&format=svg`,
+      }, slug));
+    }
     return {
       statusCode: 200,
       contentType: "image/jpeg",
@@ -2448,10 +4200,12 @@ async function ensureSessionCardJpeg(reqUrl) {
   }
   fs.mkdirSync(paths.dir, { recursive: true });
   try {
-    pushActivity(`CREATING SESSION CARD JPEG FOR SLUG ${slug.toUpperCase()}`, withSlugMeta({
-      type: "session-card-jpeg-start",
-      refresh: refresh ? "1" : "0",
-    }, slug));
+    if (!backgroundWarm) {
+      pushActivity(`CREATING SESSION CARD JPEG FOR SLUG ${slug.toUpperCase()}`, withSlugMeta({
+        type: "session-card-jpeg-start",
+        refresh: refresh ? "1" : "0",
+      }, slug));
+    }
     const remoteJpegPath = remoteCanonicalSessionAssetPath(slug, "low_fidelity_trace.jpg", RUN_AUDIT_HOST_PORT);
     const remoteSvgPath = remoteCanonicalSessionAssetPath(slug, "low_fidelity_trace.svg", RUN_AUDIT_HOST_PORT);
     const remoteLowPath = remoteCanonicalSessionAssetPath(slug, "low_fidelity.json", RUN_AUDIT_HOST_PORT);
@@ -2524,10 +4278,12 @@ async function ensureSessionCardJpeg(reqUrl) {
       }
     }
     if (!usedCanonicalPayload) {
-      pushActivity(`REQUESTING SESSION CARD TRACE SVG FOR SLUG ${slug.toUpperCase()}`, withSlugMeta({
-        type: "session-card-svg-fetch",
-        canonicalAuditError: canonicalAuditError || "",
-      }, slug));
+      if (!backgroundWarm) {
+        pushActivity(`REQUESTING SESSION CARD TRACE SVG FOR SLUG ${slug.toUpperCase()}`, withSlugMeta({
+          type: "session-card-svg-fetch",
+          canonicalAuditError: canonicalAuditError || "",
+        }, slug));
+      }
       const upstreamReq = new URL("/api/session-card-image", "http://worker.local");
       upstreamReq.searchParams.set("slug", slug);
       upstreamReq.searchParams.set("format", "svg");
@@ -2562,12 +4318,14 @@ async function ensureSessionCardJpeg(reqUrl) {
       renderSource = "upstream_svg";
     }
     await convertSvgToJpeg(paths.svgPath, paths.jpgPath);
-    pushActivity(`Session Card JPEG complete with traces: ${reqUrl.origin}/api/session-card-image?slug=${encodeURIComponent(slug)}&format=jpeg`, withSlugMeta({
-      type: "session-card-jpeg-finished",
-      jpgPath: paths.jpgPath,
-      jpegUrl: `${reqUrl.origin}/api/session-card-image?slug=${encodeURIComponent(slug)}&format=jpeg`,
-      traceSvgUrl: `${reqUrl.origin}/api/session-card-image?slug=${encodeURIComponent(slug)}&format=svg`,
-    }, slug));
+    if (!backgroundWarm) {
+      pushActivity(`Session Card JPEG complete with traces: ${reqUrl.origin}/api/session-card-image?slug=${encodeURIComponent(slug)}&format=jpeg`, withSlugMeta({
+        type: "session-card-jpeg-finished",
+        jpgPath: paths.jpgPath,
+        jpegUrl: `${reqUrl.origin}/api/session-card-image?slug=${encodeURIComponent(slug)}&format=jpeg`,
+        traceSvgUrl: `${reqUrl.origin}/api/session-card-image?slug=${encodeURIComponent(slug)}&format=svg`,
+      }, slug));
+    }
     if (DUBLIN_CANONICAL_HOST_ROOT && SESSION_CARD_REMOTE_CANONICAL_WRITE_ENABLED) {
       const svgTextForRemote = fs.readFileSync(paths.svgPath, "utf8");
       const jpgBodyForRemote = fs.readFileSync(paths.jpgPath);
@@ -2597,10 +4355,12 @@ async function ensureSessionCardJpeg(reqUrl) {
       upstreamUrl,
     };
   } catch (error) {
-    pushActivity(`FAILED TO CREATE SESSION CARD JPEG FOR SLUG ${slug.toUpperCase()}`, withSlugMeta({
-      type: "session-card-jpeg-error",
-      error: String(error?.message || error),
-    }, slug));
+    if (!backgroundWarm) {
+      pushActivity(`FAILED TO CREATE SESSION CARD JPEG FOR SLUG ${slug.toUpperCase()}`, withSlugMeta({
+        type: "session-card-jpeg-error",
+        error: String(error?.message || error),
+      }, slug));
+    }
     return {
       statusCode: 503,
       contentType: "application/json",
@@ -2614,6 +4374,13 @@ async function ensureSessionCardJpeg(reqUrl) {
       cacheStatus: "error",
       upstreamUrl: "",
     };
+  }
+  })();
+  sessionCardJpegInFlight.set(inFlightKey, buildPromise);
+  try {
+    return await buildPromise;
+  } finally {
+    sessionCardJpegInFlight.delete(inFlightKey);
   }
 }
 
@@ -3560,10 +5327,11 @@ async function buildSessionArtifactsSummaryPayload(reqUrl) {
     instanceId,
   });
   const marketPrefix = String(reqUrl.searchParams.get("marketPrefix") || "").trim().toLowerCase();
+  const sourceHostPort = String(reqUrl.searchParams.get("sourceHostPort") || "").trim();
   const limitRaw = Number(reqUrl.searchParams.get("limit") || 100);
   const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.floor(limitRaw))) : 100;
   try {
-    const runIndex = await fetchRunIndexPayloadForInstance(instanceId);
+    const runIndex = await fetchRunIndexPayloadForInstance(instanceId, { sourceHostPort });
     const runIndexRunNum = Number(runIndex?.payload?.run?.runNum ?? runIndex?.payload?.summary?.runNum ?? 0) || null;
     const runIndexRunId = String(runIndex?.payload?.run?.runAuditIdentity?.runId || runIndex?.payload?.summary?.runId || "").trim() || null;
     const runIndexStartedAtMs = Number(runIndex?.payload?.runStartMs ?? runIndex?.payload?.summary?.startedAtMs ?? runIndex?.payload?.run?.runAuditIdentity?.startedAtMs ?? runIndex?.payload?.run?.launchedAtMs ?? 0) || null;
@@ -3575,6 +5343,8 @@ async function buildSessionArtifactsSummaryPayload(reqUrl) {
       if (runIndexRunId) params.set("runId", runIndexRunId);
       if (Number.isFinite(runIndexStartedAtMs) && runIndexStartedAtMs > 0) params.set("startedAtMs", String(runIndexStartedAtMs));
       params.set("slug", slug);
+      params.set("allowRunFallback", "1");
+      if (sourceHostPort) params.set("sourceHostPort", sourceHostPort);
       return `/api/session-audits/review?${params.toString()}`;
     };
     const runIndexRows = await Promise.all(compactRowsFromRunIndexPayload(runIndex.payload, {
@@ -3836,6 +5606,7 @@ function runAuditIdentityToken(runNum, runIdText, startedAtMs) {
 function runAuditIdentityFromRequest(reqUrl, remoteSummaryLike) {
   const runNum = Number(reqUrl.searchParams.get("runNum") || 0);
   const requestedRunId = String(reqUrl.searchParams.get("runId") || "").trim();
+  const requestedInstanceId = String(reqUrl.searchParams.get("instanceId") || "").trim();
   const requestedStartedAtMsRaw = Number(reqUrl.searchParams.get("startedAtMs") || 0);
   const requestedHostPort = normalizeRunAuditHostPort(reqUrl.searchParams.get("hostPort"));
   const remoteSummary = remoteSummaryLike && typeof remoteSummaryLike === "object" ? remoteSummaryLike : null;
@@ -3843,6 +5614,7 @@ function runAuditIdentityFromRequest(reqUrl, remoteSummaryLike) {
     runNum: Number.isFinite(runNum) && runNum > 0 ? Math.floor(runNum) : null,
     hostPort: requestedHostPort,
     runIdText: requestedRunId || String(remoteSummary?.runId || "").trim() || null,
+    instanceIdText: requestedInstanceId || String(remoteSummary?.instanceId || "").trim() || null,
     startedAtMs:
       Number.isFinite(requestedStartedAtMsRaw) && requestedStartedAtMsRaw > 0 ? Math.floor(requestedStartedAtMsRaw) : (
         Number.isFinite(Number(remoteSummary?.startedAtMs || remoteSummary?.launchedAtMs || 0))
@@ -3908,56 +5680,80 @@ function runAuditSourceBaseUrl(hostPortLike = "") {
 }
 
 async function readLiveRunAuditInputsFromBotEndpoints(runNum, requestedIdentity, hostPort) {
-  const botsReq = new URL("/api/v2/bots", "http://worker.local");
-  botsReq.searchParams.set("engine", "paper");
-  if (hostPort) botsReq.searchParams.set("sourceHostPort", normalizeRunAuditHostPort(hostPort));
-  const botsUrl = buildUpstreamUrl(botsReq).toString();
-  const botsPayload = await fetchJsonDirect(botsUrl);
-  const items = Array.isArray(botsPayload?.items) ? botsPayload.items : [];
   const requested = requestedIdentity && typeof requestedIdentity === "object" ? requestedIdentity : {};
   const requestedRunId = String(requested.runIdText || "").trim();
+  const requestedInstanceId = String(requested.instanceIdText || "").trim();
   const requestedStartedAtMs = Number(requested.startedAtMs || 0);
-  const bot = items.find((item) => {
-    const itemRunNum = Number(item?.runNum || 0);
-    const itemRunId = String(item?.runId || "").trim();
-    const itemStartedAtMs = Number(item?.launchedAtMs || item?.startedAtMs || 0);
-    if (Math.floor(itemRunNum) !== Math.floor(Number(runNum) || 0)) return false;
-    if (requestedRunId && itemRunId && itemRunId !== requestedRunId) return false;
-    if (requestedStartedAtMs && Number.isFinite(itemStartedAtMs) && itemStartedAtMs > 0 && Math.floor(itemStartedAtMs) !== Math.floor(requestedStartedAtMs)) return false;
-    return true;
-  }) || null;
-  if (!bot) throw new Error(`live bot payload missing run ${String(runNum)}`);
-  const instanceId = String(bot?.instanceId || "").trim();
+  let botsUrl = null;
+  let bot = null;
+  if (!requestedInstanceId) {
+    const botsReq = new URL("/api/v2/bots", "http://worker.local");
+    botsReq.searchParams.set("engine", "paper");
+    if (hostPort) botsReq.searchParams.set("sourceHostPort", normalizeRunAuditHostPort(hostPort));
+    botsUrl = buildUpstreamUrl(botsReq).toString();
+    const botsPayload = await fetchJsonDirect(botsUrl);
+    const items = Array.isArray(botsPayload?.items) ? botsPayload.items : [];
+    bot = items.find((item) => {
+      const itemRunNum = Number(item?.runNum || 0);
+      const itemRunId = String(item?.runId || "").trim();
+      const itemStartedAtMs = Number(item?.launchedAtMs || item?.startedAtMs || 0);
+      if (Math.floor(itemRunNum) !== Math.floor(Number(runNum) || 0)) return false;
+      if (requestedRunId && itemRunId && itemRunId !== requestedRunId) return false;
+      if (requestedStartedAtMs && Number.isFinite(itemStartedAtMs) && itemStartedAtMs > 0 && Math.floor(itemStartedAtMs) !== Math.floor(requestedStartedAtMs)) return false;
+      return true;
+    }) || null;
+  }
+  const instanceId = String(requestedInstanceId || bot?.instanceId || "").trim();
   if (!instanceId) throw new Error(`missing instanceId for live run ${String(runNum)}`);
-  const continuityResult = await fetchContinuityHistoryPayloadForInstance(instanceId, {
-    includeTrace: false,
-    maxSessions: 5000,
+  const runIndexResult = await fetchRunIndexPayloadForInstance(instanceId, {
     sourceHostPort: hostPort,
+    maxSessions: 5000,
   });
-  const continuityUrl = continuityResult.upstreamUrl;
-  const continuityPayload = continuityResult.payload;
-  const sessions = compactRowsFromContinuityPayload(continuityPayload, {
+  const runIndexPayload = runIndexResult.payload;
+  const sessions = compactRowsFromRunIndexPayload(runIndexPayload, {
     instanceId,
     maxSessions: 5000,
     offset: 0,
   })
-    .filter((row) => rowWithinRunStart(row, Number(bot?.launchedAtMs || bot?.startedAtMs || 0)))
+    .filter((row) => rowWithinRunStart(row, Number(bot?.launchedAtMs || bot?.startedAtMs || requestedStartedAtMs || 0)))
     .sort((a, b) => Number(a?.startMs || 0) - Number(b?.startMs || 0));
+  const oldestSession = sessions[0] || null;
+  const newestSession = sessions[sessions.length - 1] || null;
+  const inferredStartedAtMs = Number(bot?.launchedAtMs || bot?.startedAtMs || requestedStartedAtMs || oldestSession?.startMs || 0) || null;
+  const inferredLatestBalanceUsd = Number(
+    bot?.latestBalanceUsd ??
+    runIndexPayload?.summary?.latestBalanceUsd ??
+    runIndexPayload?.summary?.endBalanceUsd ??
+    newestSession?.balanceUsd ??
+    newestSession?.continuityBalanceUsd ??
+    0
+  ) || null;
+  const inferredStartBalanceUsd = Number(
+    bot?.startBalanceUsd ??
+    runIndexPayload?.summary?.startBalanceUsd ??
+    (
+      oldestSession &&
+      Number.isFinite(Number(oldestSession.balanceUsd)) &&
+      Number.isFinite(Number(oldestSession.actualPnlUsd ?? oldestSession.auditNetPnlUsd ?? oldestSession.pnlUsd))
+        ? Number(oldestSession.balanceUsd) - Number(oldestSession.actualPnlUsd ?? oldestSession.auditNetPnlUsd ?? oldestSession.pnlUsd)
+        : 0
+    )
+  ) || null;
   const summary = {
     runNum: Math.floor(Number(bot?.runNum || runNum) || 0),
-    runId: String(bot?.runId || requestedRunId || "").trim(),
-    startedAtMs: Number(bot?.launchedAtMs || bot?.startedAtMs || requestedStartedAtMs || 0) || null,
-    launchedAtMs: Number(bot?.launchedAtMs || bot?.startedAtMs || requestedStartedAtMs || 0) || null,
-    strategyId: String(bot?.strategyId || "").trim(),
+    runId: String(bot?.runId || requestedRunId || runIndexPayload?.run?.runId || runIndexPayload?.summary?.runId || "").trim(),
+    startedAtMs: inferredStartedAtMs,
+    launchedAtMs: inferredStartedAtMs,
+    strategyId: String(bot?.strategyId || runIndexPayload?.run?.strategyId || runIndexPayload?.summary?.strategyId || "").trim(),
     instanceId,
     mode: String(bot?.mode || "paper").trim(),
     status: String(bot?.status || "").trim(),
-    marketTitle: String(bot?.marketTitle || "").trim(),
-    marketSlug: String(bot?.marketSlug || "").trim(),
-    startBalanceUsd: Number(bot?.startBalanceUsd || 0) || null,
-    endBalanceUsd: Number(bot?.latestBalanceUsd || 0) || null,
-    latestBalanceUsd: Number(bot?.latestBalanceUsd || 0) || null,
-    latestPnlUsd: Number(bot?.latestPnlUsd || 0) || null,
+    marketTitle: String(bot?.marketTitle || runIndexPayload?.summary?.marketTitle || "").trim(),
+    marketSlug: String(bot?.marketSlug || runIndexPayload?.run?.marketSlug || runIndexPayload?.summary?.marketSlug || "").trim(),
+    startBalanceUsd: inferredStartBalanceUsd,
+    endBalanceUsd: inferredLatestBalanceUsd,
+    latestBalanceUsd: inferredLatestBalanceUsd,
+    latestPnlUsd: Number(bot?.latestPnlUsd || runIndexPayload?.summary?.latestPnlUsd || 0) || null,
     betUsd: Number(bot?.betUsd || 0) || null,
     maxBetUsd: Number(bot?.maxBetUsd || 0) || null,
     sizingProfile: String(bot?.sizingProfile || "").trim() || null,
@@ -3979,9 +5775,9 @@ async function readLiveRunAuditInputsFromBotEndpoints(runNum, requestedIdentity,
   };
   return {
     runDir: runAuditRunDir(runNum, hostPort),
-    summaryPath: botsUrl,
+    summaryPath: botsUrl || runIndexResult.upstreamUrl.toString(),
     summary,
-    indexPath: continuityUrl.toString(),
+    indexPath: runIndexResult.upstreamUrl.toString(),
     index,
     fallback: "live_bot_endpoints",
   };
@@ -4166,6 +5962,89 @@ async function syncRunAuditSourceMirror(runNum, remoteInputs, hostPort, opts = {
       }
     }
   }
+  if (mirroredCompactCount === 0) {
+    try {
+      const sourceBase = await resolveRunAuditSourceBaseUrl(safeHost);
+      const instanceId = String(
+        remoteInputs?.summary?.instanceId
+        || remoteInputs?.index?.run?.instanceId
+        || remoteInputs?.summary?.botInstanceId
+        || ""
+      ).trim();
+      const historyUrl = new URL("/api/session-history", sourceBase);
+      if (instanceId) historyUrl.searchParams.set("instanceId", instanceId);
+      historyUrl.searchParams.set("runNum", String(runNum));
+      const historyPayload = JSON.parse(await fetchTextDirect(historyUrl.toString()));
+      const historyRows = Array.isArray(historyPayload?.sessions) ? historyPayload.sessions : [];
+      for (const row of historyRows) {
+        const slug = String(row?.slug || "").trim();
+        if (!slug) continue;
+        const netCandidates = [row?.auditNetPnlUsd, row?.pnlUsd, row?.actualPnlUsd, row?.correctedPnlUsd];
+        const feesCandidates = [row?.actualFeesUsd, row?.feesUsd];
+        const grossCandidates = [row?.actualGrossPnlUsd, row?.grossPnlUsd];
+        const pickFinite = (values) => {
+          for (const value of values) {
+            const num = Number(value);
+            if (Number.isFinite(num)) return num;
+          }
+          return NaN;
+        };
+        const net = pickFinite(netCandidates);
+        const feesRaw = pickFinite(feesCandidates);
+        const grossRaw = pickFinite(grossCandidates);
+        const fees = Number.isFinite(feesRaw) ? feesRaw : 0;
+        const gross = Number.isFinite(grossRaw)
+          ? grossRaw
+          : (Number.isFinite(net) ? Number((net + fees).toFixed(10)) : NaN);
+        if (!(Number.isFinite(net) || Number.isFinite(gross) || Number.isFinite(fees))) continue;
+        const compactPayload = {
+          slug,
+          financials: {
+            netPnlUsd: Number.isFinite(net) ? net : null,
+            actualNetPnlUsd: Number.isFinite(net) ? net : null,
+            grossPnlUsd: Number.isFinite(gross) ? gross : null,
+            feesUsd: Number.isFinite(fees) ? fees : null,
+          },
+          sessionSummary: {
+            slug,
+            startMs: Number.isFinite(Number(row?.startMs)) ? Number(row.startMs) : null,
+            endMs: Number.isFinite(Number(row?.endMs)) ? Number(row.endMs) : null,
+            pnlUsd: Number.isFinite(net) ? net : null,
+            netPnlUsd: Number.isFinite(net) ? net : null,
+            grossPnlUsd: Number.isFinite(gross) ? gross : null,
+            feesUsd: Number.isFinite(fees) ? fees : null,
+            continuityBalanceUsd: Number.isFinite(Number(row?.continuityBalanceUsd)) ? Number(row.continuityBalanceUsd) : null,
+            cumulativeBalanceUsd: Number.isFinite(Number(row?.continuityBalanceUsd)) ? Number(row.continuityBalanceUsd) : null,
+            source: "session_history_fallback",
+          },
+          tradeSummaries: [],
+          sideAudit: {},
+        };
+        fs.writeFileSync(
+          path.join(mirroredSessionAuditDir, `${slug}.compact.json`),
+          `${JSON.stringify(compactPayload, null, 2)}\n`,
+          "utf8",
+        );
+        mirroredCompactCount += 1;
+      }
+      if (mirroredCompactCount > 0) {
+        pushActivity(`FALLING BACK TO SESSION HISTORY FOR RUN AUDIT COMPACTS ON RUN ${String(runNum)}`, {
+          type: "run-audit-session-history-fallback",
+          runNum,
+          mirroredCompactCount: String(mirroredCompactCount),
+          instanceId,
+          hostPort: safeHost,
+        });
+      }
+    } catch (error) {
+      pushActivity(`FAILED SESSION HISTORY FALLBACK FOR RUN AUDIT COMPACTS ON RUN ${String(runNum)}`, {
+        type: "run-audit-session-history-fallback-error",
+        runNum,
+        hostPort: safeHost,
+        error: String(error?.message || error),
+      });
+    }
+  }
   return { runDir, summaryPath, indexPath, eventsPath, telemetryPath, strategyId };
 }
 
@@ -4244,6 +6123,44 @@ function auditDocCompleteness(doc, runNum, requestedIdentity, remoteInputs) {
     };
   }
   const currentSlug = String(remoteSummary?.marketSlug || remoteIndex?.run?.marketSlug || "").trim();
+  const remoteStatus = String(remoteSummary?.status || remoteIndex?.run?.status || "").trim().toLowerCase();
+  const remoteStartBalanceUsd = Number(
+    remoteSummary?.startBalanceUsd ??
+    remoteIndex?.run?.startBalanceUsd ??
+    remoteSummary?.summary?.startBalanceUsd
+  );
+  const remoteLatestBalanceUsd = Number(
+    remoteSummary?.latestBalanceUsd ??
+    remoteSummary?.endBalanceUsd ??
+    remoteIndex?.run?.latestBalanceUsd ??
+    remoteIndex?.run?.endBalanceUsd
+  );
+  const docActualNetPnlUsd = Number(doc?.run?.actualNetPnlUsd);
+  const docTradesClosed = Number(doc?.run?.tradesClosed);
+  const liveBalanceMoved = (
+    Number.isFinite(remoteStartBalanceUsd) &&
+    Number.isFinite(remoteLatestBalanceUsd) &&
+    Math.abs(remoteLatestBalanceUsd - remoteStartBalanceUsd) > 0.01
+  );
+  if (
+    remoteStatus === "running" &&
+    indexedSlugs.size > 0 &&
+    Number.isFinite(docActualNetPnlUsd) &&
+    Math.abs(docActualNetPnlUsd) <= 1e-9 &&
+    Number.isFinite(docTradesClosed) &&
+    docTradesClosed <= 0 &&
+    liveBalanceMoved
+  ) {
+    return {
+      ok: false,
+      reason: "empty_active_run_artifact",
+      remoteStatus,
+      remoteStartBalanceUsd,
+      remoteLatestBalanceUsd,
+      indexedSessionCount: indexedSlugs.size,
+      auditSessionCount: auditSlugs.size,
+    };
+  }
   const latestIndexedStartSec = indexedSessions.reduce((best, session) => {
     const startSec = parseSlugStartSec(session?.slug);
     return startSec > best ? startSec : best;
@@ -4304,6 +6221,24 @@ async function ensureRunAuditArtifact(reqUrl) {
   const cachedPaths = runAuditCachePaths(runNum, requestedIdentity);
   const cachedOutPath = wantJson ? cachedPaths.jsonPath : cachedPaths.htmlPath;
   const hasCachedArtifact = fs.existsSync(cachedPaths.htmlPath) && fs.existsSync(cachedPaths.jsonPath);
+  if (
+    hasCachedArtifact &&
+    !refresh &&
+    !backgroundWarm &&
+    String(requestedIdentity?.instanceIdText || "").trim()
+  ) {
+    pushActivity(`SERVING CACHED RUN AUDIT FOR RUN ${String(runNum)} VIA INSTANCE HINT`, {
+      type: "run-audit-cache-hit-instance-hint",
+      runNum,
+      instanceId: String(requestedIdentity.instanceIdText || "").trim(),
+      outPath: cachedOutPath,
+    });
+    return {
+      statusCode: 200,
+      contentType: wantJson ? "application/json" : "text/html",
+      filePath: cachedOutPath,
+    };
+  }
   if (runAuditInflight.has(cacheKey) && hasCachedArtifact) {
     pushActivity(`SERVING LAST GOOD RUN AUDIT FOR RUN ${String(runNum)} WHILE REBUILD IS INFLIGHT`, {
       type: "run-audit-cache-serve-while-inflight",
@@ -4363,7 +6298,8 @@ async function ensureRunAuditArtifact(reqUrl) {
           String(completeness.reason || "") === "audit_code_version_mismatch" ||
           String(completeness.reason || "") === "invalid_cached_json" ||
           String(completeness.reason || "") === "missing_indexed_sessions" ||
-          String(completeness.reason || "") === "latest_session_behind_index"
+          String(completeness.reason || "") === "latest_session_behind_index" ||
+          String(completeness.reason || "") === "empty_active_run_artifact"
         );
       if (cacheExists && !completeness.ok && !completenessRequiresImmediateRebuild) {
         pushActivity(`SERVING STALE CACHED RUN AUDIT FOR RUN ${String(runNum)}`, {
@@ -4415,7 +6351,7 @@ async function ensureRunAuditArtifact(reqUrl) {
           }
         }
         if (!sourceMirror) {
-          if (!(RUN_AUDIT_REMOTE_HOST && RUN_AUDIT_REMOTE_KEY && RUN_AUDIT_REMOTE_ROOT)) {
+          if (!(RUN_AUDIT_LOCAL_FS_ENABLED || (RUN_AUDIT_REMOTE_HOST && RUN_AUDIT_REMOTE_KEY && RUN_AUDIT_REMOTE_ROOT))) {
             throw new Error("run audit worker requires remote canonical source configuration");
           }
           sourceMirror = await syncRunAuditSourceMirror(
@@ -4528,16 +6464,63 @@ async function ensureRunAuditArtifact(reqUrl) {
   }
 }
 
+function buildDisabledLiveClaimStatus() {
+  return {
+    enabled: false,
+    reason: LIVE_CLAIM_ENABLED ? "worker_not_initialized" : "LIVE_CLAIM_ENABLED=0",
+    running: false,
+    startedAtMs: null,
+    pollMs: null,
+    targetSec: null,
+    windowSec: null,
+    maxPerRun: null,
+    profileAddress: null,
+    signerAddress: null,
+    lastSeenSlug: null,
+    lastEligibleSlug: null,
+    lastCheckedSlug: null,
+    lastCheckedAtMs: null,
+    lastRedeemedSlug: null,
+    lastRedeemedAtMs: null,
+    lastRedeemedConditions: 0,
+    lastClaimableRows: 0,
+    lastResult: null,
+    lastError: null,
+  };
+}
+
+const liveClaimWorker = typeof startLiveClaimWorker === "function"
+  ? startLiveClaimWorker({
+      env: process.env,
+      getSessionContext: fetchLiveClaimSessionContext,
+      onActivity: (message, details) => pushActivity(message, details),
+      onClaimSettled: async (details) => recordAuthoritativeLiveBalanceAfterClaim(details),
+      log: (message) => log(message),
+    })
+  : null;
+
 function workerHealth() {
   const processCpuPct = sampleProcessCpuPct();
   const mem = process.memoryUsage();
   const rssMb = Number(mem?.rss) / (1024 * 1024);
   const heapUsedMb = Number(mem?.heapUsed) / (1024 * 1024);
+  const now = Date.now();
+  const upstreamOkAtMs = Math.max(
+    Number(upstreamHealthState.lastProbeOkAtMs || 0),
+    Number(upstreamHealthState.lastFetchOkAtMs || 0)
+  );
+  const upstreamHealthy =
+    !!UPSTREAM_ORIGIN &&
+    Number.isFinite(upstreamOkAtMs) &&
+    upstreamOkAtMs > 0 &&
+    (now - upstreamOkAtMs) <= UPSTREAM_HEALTH_STALE_MS;
   return {
-    ok: true,
+    ok: (!UPSTREAM_ORIGIN || upstreamHealthy) && !storageHealthState.degraded,
     worker: WORKER_LABEL,
     workerLabel: WORKER_LABEL,
     port: PORT,
+    workerScope: WORKER_SCOPE,
+    liveOnlySourceHostPort: LIVE_ONLY_SOURCE_HOST_PORT || null,
     upstreamOrigin: UPSTREAM_ORIGIN || null,
     cacheRoot: CACHE_ROOT,
     cacheEntries: cacheMem.size,
@@ -4554,12 +6537,39 @@ function workerHealth() {
     runAuditBackgroundWarmEnabled: RUN_AUDIT_BACKGROUND_WARM_ENABLED,
     runAuditBackgroundWarmIntervalMs: RUN_AUDIT_BACKGROUND_WARM_INTERVAL_MS,
     runAuditRemoteHost: RUN_AUDIT_ENABLED ? RUN_AUDIT_REMOTE_HOST : null,
+    liveClaimEnabled: LIVE_CLAIM_ENABLED,
+    liveClaim: liveClaimWorker ? liveClaimWorker.getStatus() : buildDisabledLiveClaimStatus(),
     routing: {
       allowHotQuery: ALLOW_HOT_QUERY,
     },
+    storageHealth: {
+      degraded: storageHealthState.degraded,
+      lastWriteTarget: storageHealthState.lastWriteTarget || null,
+      lastWriteCode: storageHealthState.lastWriteCode || null,
+      lastWriteError: storageHealthState.lastWriteError || null,
+      lastWriteFailedAtMs: storageHealthState.lastWriteFailedAtMs || null,
+      lastNoSpaceAtMs: storageHealthState.lastNoSpaceAtMs || null,
+      stdoutWriteError: storageHealthState.stdoutWriteError || null,
+      stdoutWriteFailedAtMs: storageHealthState.stdoutWriteFailedAtMs || null,
+      activityLogWriteError: storageHealthState.activityLogWriteError || null,
+      activityLogWriteFailedAtMs: storageHealthState.activityLogWriteFailedAtMs || null,
+    },
+    upstreamHealth: {
+      healthy: !UPSTREAM_ORIGIN ? null : upstreamHealthy,
+      staleAfterMs: UPSTREAM_HEALTH_STALE_MS,
+      lastFetchOkAtMs: upstreamHealthState.lastFetchOkAtMs || null,
+      lastFetchErrAtMs: upstreamHealthState.lastFetchErrAtMs || null,
+      lastFetchStatusCode: upstreamHealthState.lastFetchStatusCode,
+      lastFetchUrl: upstreamHealthState.lastFetchUrl || null,
+      lastFetchError: upstreamHealthState.lastFetchError || null,
+      lastProbeAtMs: upstreamHealthState.lastProbeAtMs || null,
+      lastProbeOkAtMs: upstreamHealthState.lastProbeOkAtMs || null,
+      lastProbeErrAtMs: upstreamHealthState.lastProbeErrAtMs || null,
+      lastProbeError: upstreamHealthState.lastProbeError || null,
+    },
     activityCount: activityLog.length,
-    activityStreamPath: "/api/activity/stream",
-    activityPage: "/activity",
+    activityStreamPath: withBasePath("/api/activity/stream"),
+    activityPage: withBasePath("/activity"),
     t: Date.now(),
   };
 }
@@ -4569,7 +6579,7 @@ async function warmActiveRunAuditsInBackground() {
   if (runAuditBackgroundWarmInflight) return;
   runAuditBackgroundWarmInflight = true;
   try {
-    const bots = await listActivePaperBotsForRunAuditWarm();
+    const bots = await listActiveRunAuditBotsForWarm();
     const activeKeys = new Set();
     for (const bot of bots) {
       const key = `${String(bot.instanceId)}:${String(bot.runId)}:${String(bot.runNum)}`;
@@ -4579,6 +6589,22 @@ async function warmActiveRunAuditsInBackground() {
       const firstSeen = !previous;
       const staleCheckDue = !previous || (Date.now() - Number(previous.lastAttemptAtMs || 0)) >= RUN_AUDIT_BACKGROUND_WARM_INTERVAL_MS;
       if (!(firstSeen || slugChanged || staleCheckDue)) continue;
+      const sessionAuditCandidates = [];
+      const pendingSessionAuditSlug = String(previous?.pendingSessionAuditSlug || "").trim();
+      if (pendingSessionAuditSlug) sessionAuditCandidates.push(pendingSessionAuditSlug);
+      if (slugChanged && String(previous?.marketSlug || "").trim()) {
+        sessionAuditCandidates.push(String(previous.marketSlug).trim());
+      } else if (firstSeen) {
+        const backfillSlug = buildAdjacentSessionSlug(bot.marketSlug, -1);
+        if (backfillSlug) sessionAuditCandidates.push(backfillSlug);
+      }
+      const closedSessionAuditSlugs = Array.from(
+        new Set(
+          sessionAuditCandidates
+            .map((slug) => String(slug || "").trim().toLowerCase())
+            .filter((slug) => slug && slug !== String(bot.marketSlug || "").trim().toLowerCase())
+        )
+      );
       runAuditBackgroundWarmState.set(key, {
         ...previous,
         marketSlug: String(bot.marketSlug || ""),
@@ -4586,6 +6612,7 @@ async function warmActiveRunAuditsInBackground() {
         runNum: Number(bot.runNum || 0),
         runId: String(bot.runId || ""),
         instanceId: String(bot.instanceId || ""),
+        pendingSessionAuditSlug: pendingSessionAuditSlug || "",
       });
       pushActivity(
         `${firstSeen ? "WARMING" : (slugChanged ? "UPDATING" : "RECHECKING")} RUN AUDIT IN BACKGROUND FOR RUN ${String(bot.runNum)}${slugChanged ? ` AFTER ROLLOVER TO ${String(bot.marketSlug || "").toUpperCase()}` : ""}`,
@@ -4598,6 +6625,54 @@ async function warmActiveRunAuditsInBackground() {
           trigger: firstSeen ? "first_seen" : (slugChanged ? "session_rollover" : "periodic_recheck"),
         },
       );
+      let pendingSessionAuditSlugNext = "";
+      for (const closedSlug of closedSessionAuditSlugs) {
+        pushActivity(
+          `${pendingSessionAuditSlug && closedSlug === pendingSessionAuditSlug ? "RETRYING" : "WARMING"} SESSION AUDIT FOR ${closedSlug.toUpperCase()} ON RUN ${String(bot.runNum)}`,
+          {
+            type: "session-audit-background-warm",
+            runNum: String(bot.runNum),
+            runId: String(bot.runId),
+            instanceId: String(bot.instanceId),
+            marketSlug: String(bot.marketSlug),
+            closedSlug,
+            trigger:
+              slugChanged && closedSlug === String(previous?.marketSlug || "").trim().toLowerCase()
+                ? "session_rollover"
+                : (firstSeen ? "startup_backfill" : "periodic_retry"),
+          },
+        );
+        const sessionResult = await ensureSessionAuditArtifact(buildSessionAuditWarmUrl(bot, closedSlug));
+        if (sessionResult?.ok) {
+          pushActivity(
+            `READY SESSION AUDIT FOR ${closedSlug.toUpperCase()} ON RUN ${String(bot.runNum)}`,
+            {
+              type: "session-audit-background-warm-finished",
+              runNum: String(bot.runNum),
+              runId: String(bot.runId),
+              instanceId: String(bot.instanceId),
+              closedSlug,
+              statusCode: String(sessionResult.statusCode || 200),
+              localCompactBuilt: sessionResult.localCompactBuilt ? "1" : "0",
+            },
+          );
+          continue;
+        }
+        pendingSessionAuditSlugNext = closedSlug;
+        pushActivity(
+          `FAILED SESSION AUDIT WARM FOR ${closedSlug.toUpperCase()} ON RUN ${String(bot.runNum)}`,
+          {
+            type: "session-audit-background-warm-error",
+            runNum: String(bot.runNum),
+            runId: String(bot.runId),
+            instanceId: String(bot.instanceId),
+            closedSlug,
+            statusCode: String(sessionResult?.statusCode || 500),
+            error: String(sessionResult?.error || "session_audit_warm_failed"),
+          },
+        );
+        break;
+      }
       const result = await ensureRunAuditArtifact(buildRunAuditWarmUrl(bot));
       runAuditBackgroundWarmState.set(key, {
         ...runAuditBackgroundWarmState.get(key),
@@ -4605,6 +6680,9 @@ async function warmActiveRunAuditsInBackground() {
         lastAttemptAtMs: Date.now(),
         lastStatusCode: Number(result?.statusCode || 0),
         lastOkAtMs: Number(result?.statusCode || 0) < 400 ? Date.now() : Number(previous?.lastOkAtMs || 0),
+        lastSessionAuditSlug: closedSessionAuditSlugs.length ? closedSessionAuditSlugs[closedSessionAuditSlugs.length - 1] : String(previous?.lastSessionAuditSlug || ""),
+        lastSessionAuditOkAtMs: !pendingSessionAuditSlugNext && closedSessionAuditSlugs.length ? Date.now() : Number(previous?.lastSessionAuditOkAtMs || 0),
+        pendingSessionAuditSlug: pendingSessionAuditSlugNext,
       });
     }
     for (const key of Array.from(runAuditBackgroundWarmState.keys())) {
@@ -4633,11 +6711,19 @@ const server = http.createServer(async (req, res) => {
       return res.end();
     }
     if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "method not allowed" });
-    if (reqUrl.pathname === "/" || reqUrl.pathname === "/activity") {
+    if (isLiveOnlyWorkerRequest(reqUrl) && requestTargetsPaperMode(reqUrl)) {
+      return sendJson(res, 409, {
+        ok: false,
+        error: "live_worker_rejects_paper_requests",
+        workerScope: WORKER_SCOPE,
+        sourceHostPort: LIVE_ONLY_SOURCE_HOST_PORT || null,
+      });
+    }
+    if (matchesPath(reqUrl.pathname, "/") || matchesPath(reqUrl.pathname, "/activity")) {
       return sendText(res, 200, renderActivityDashboard(), "text/html");
     }
-    if (reqUrl.pathname === "/api/activity") return sendJson(res, 200, activitySnapshot());
-    if (reqUrl.pathname === "/api/activity/stream") {
+    if (matchesPath(reqUrl.pathname, "/api/activity")) return sendJson(res, 200, activitySnapshot());
+    if (matchesPath(reqUrl.pathname, "/api/activity/stream")) {
       res.writeHead(200, {
         "content-type": "text/event-stream; charset=utf-8",
         "cache-control": "no-store, no-transform",
@@ -4650,7 +6736,136 @@ const server = http.createServer(async (req, res) => {
       req.on("close", () => activityClients.delete(res));
       return;
     }
-    if (reqUrl.pathname === "/api/health") return sendJson(res, 200, workerHealth());
+    if (matchesPath(reqUrl.pathname, "/api/health")) return sendJson(res, 200, workerHealth());
+    if (reqUrl.pathname === "/api/session-audits/review") {
+      const runNum = Math.floor(Number(reqUrl.searchParams.get("runNum") || 0));
+      const slug = String(reqUrl.searchParams.get("slug") || "").trim();
+      const sourceHostPort = String(reqUrl.searchParams.get("sourceHostPort") || reqUrl.searchParams.get("hostPort") || RUN_AUDIT_HOST_PORT).trim();
+      const responseFormat = String(reqUrl.searchParams.get("format") || "").trim().toLowerCase();
+      const wantsCompactJson = responseFormat === "compact";
+      const localReviewPath = localHostSessionAuditReviewPath(runNum, slug, sourceHostPort);
+      if (!wantsCompactJson && responseFormat !== "json" && localReviewPath && fs.existsSync(localReviewPath)) {
+        const html = fs.readFileSync(localReviewPath, "utf8");
+        return sendText(res, 200, html, "text/html", {
+          "x-mmx-worker": WORKER_LABEL,
+          "x-mmx-cache": "local",
+          "x-mmx-upstream": "local:session_audit_review_html",
+        });
+      }
+      const compactPath = runAuditSessionCompactPath(runNum, slug, sourceHostPort);
+      let compact = null;
+      if (compactPath && fs.existsSync(compactPath)) {
+        compact = JSON.parse(fs.readFileSync(compactPath, "utf8"));
+        if (sessionAuditCompactLooksStale(compact)) compact = null;
+      } else {
+        try {
+          compact = await buildSessionAuditCompactFromRunArtifacts(runNum, slug, reqUrl, sourceHostPort);
+          if (sessionAuditCompactLooksStale(compact)) compact = null;
+          if (!compact) {
+            compact = await buildSessionAuditCompactFromCachedContinuity(runNum, slug, reqUrl, sourceHostPort);
+            if (sessionAuditCompactLooksStale(compact)) compact = null;
+          }
+          if (!compact) {
+            compact = await buildSessionAuditCompactFromSessionHistory(runNum, slug, reqUrl, sourceHostPort);
+            if (sessionAuditCompactLooksStale(compact)) compact = null;
+          }
+          if (compactPath && compact && typeof compact === "object") {
+            fs.mkdirSync(path.dirname(compactPath), { recursive: true });
+            fs.writeFileSync(compactPath, `${JSON.stringify(compact, null, 2)}\n`, "utf8");
+          }
+        } catch {}
+      }
+      if (!compact) {
+        try {
+          compact = await fetchUpstreamSessionAuditCompact(reqUrl, runNum, slug, sourceHostPort);
+          if (sessionAuditCompactLooksStale(compact)) compact = null;
+          if (compactPath && compact && typeof compact === "object") {
+            fs.mkdirSync(path.dirname(compactPath), { recursive: true });
+            fs.writeFileSync(compactPath, `${JSON.stringify(compact, null, 2)}\n`, "utf8");
+          }
+        } catch {}
+      }
+      if (!compact) {
+        try {
+          compact = await buildSessionAuditCompactFromContinuity(runNum, slug, reqUrl, sourceHostPort);
+          if (sessionAuditCompactLooksStale(compact)) compact = null;
+          if (compactPath && compact && typeof compact === "object") {
+            fs.mkdirSync(path.dirname(compactPath), { recursive: true });
+            fs.writeFileSync(compactPath, `${JSON.stringify(compact, null, 2)}\n`, "utf8");
+          }
+        } catch {}
+      }
+      if (compact && typeof compact === "object") {
+        if (wantsCompactJson) {
+          return sendJson(res, 200, compact);
+        }
+        if (responseFormat === "json") {
+          return sendJson(res, 200, normalizeSessionAuditJsonPayloadWorker(compact));
+        }
+        return sendText(res, 200, renderSessionAuditCompactHtml(compact, { runNum, slug, hostPort: sourceHostPort }), "text/html", {
+          "x-mmx-worker": WORKER_LABEL,
+          "x-mmx-cache": "local",
+          "x-mmx-upstream": "local:session_audit_compact",
+        });
+      }
+      if (!wantsCompactJson && responseFormat !== "json") {
+        try {
+          const upstreamUrl = buildUpstreamUrl(reqUrl);
+          const result = await fetchUrl(upstreamUrl);
+          if (result.statusCode >= 200 && result.statusCode < 300) {
+            const contentType = String(result.headers["content-type"] || "text/html").split(";")[0].trim() || "text/html";
+            return sendText(res, result.statusCode, result.body.toString("utf8"), contentType, {
+              "x-mmx-worker": WORKER_LABEL,
+              "x-mmx-cache": "pass",
+              "x-mmx-upstream": upstreamUrl.toString(),
+            });
+          }
+        } catch {}
+      }
+    }
+    if (reqUrl.pathname === "/api/live-claim/status") {
+      return sendJson(res, 200, {
+        ok: true,
+        worker: WORKER_LABEL,
+        liveClaim: liveClaimWorker ? liveClaimWorker.getStatus() : buildDisabledLiveClaimStatus(),
+        t: Date.now(),
+      });
+    }
+    if (reqUrl.pathname === "/api/live-account-balance") {
+      if (!liveClaimWorker || typeof liveClaimWorker.getAuthoritativeBalance !== "function") {
+        return sendJson(res, 503, {
+          ok: false,
+          worker: WORKER_LABEL,
+          error: "live_claim_worker_balance_unavailable",
+          t: Date.now(),
+        });
+      }
+      const refresh = String(reqUrl.searchParams.get("refresh") || "").trim() === "1";
+      const balance = await liveClaimWorker.getAuthoritativeBalance({ forceFresh: refresh });
+      return sendJson(res, 200, {
+        ok: true,
+        worker: WORKER_LABEL,
+        balanceUsd: Number.isFinite(Number(balance?.balanceUsd)) ? Number(balance.balanceUsd) : null,
+        cashBalanceUsd: Number.isFinite(Number(balance?.cashBalanceUsd)) ? Number(balance.cashBalanceUsd) : null,
+        openPositionsValueUsd: Number.isFinite(Number(balance?.openPositionsValueUsd)) ? Number(balance.openPositionsValueUsd) : null,
+        asOfMs: Number.isFinite(Number(balance?.asOfMs)) ? Number(balance.asOfMs) : null,
+        source: String(balance?.source || "worker_polymarket_portfolio_balance").trim() || "worker_polymarket_portfolio_balance",
+        cached: balance?.cached !== false,
+        t: Date.now(),
+      });
+    }
+    if (reqUrl.pathname === "/api/live-claim/run") {
+      const result = liveClaimWorker
+        ? await liveClaimWorker.runNow()
+        : { ok: false, skipped: true, reason: "worker_not_initialized" };
+      return sendJson(res, Number(result?.ok === false ? 500 : 200), {
+        ok: result?.ok !== false,
+        worker: WORKER_LABEL,
+        result,
+        liveClaim: liveClaimWorker ? liveClaimWorker.getStatus() : buildDisabledLiveClaimStatus(),
+        t: Date.now(),
+      });
+    }
     if (
       reqUrl.pathname === "/api/session-history" &&
       String(reqUrl.searchParams.get("engine") || "paper").trim().toLowerCase() === "paper" &&
@@ -4732,6 +6947,15 @@ const server = http.createServer(async (req, res) => {
     }
     if (reqUrl.pathname === "/api/v2/markets/volume-5m-24h") {
       const proxied = await localJsonWithCache(reqUrl, buildVolumeSeriesPayload, "local:polymarket_gamma");
+      const body = Buffer.from(String(proxied.bodyBase64 || ""), "base64");
+      return sendText(res, Number(proxied.statusCode || 200), body.toString("utf8"), "application/json", {
+        "x-mmx-worker": WORKER_LABEL,
+        "x-mmx-cache": proxied.cacheStatus || "pass",
+        "x-mmx-upstream": String(proxied.upstreamUrl || ""),
+      });
+    }
+    if (/^\/api\/v2\/bots\/[^/]+\/continuity-history\b/i.test(reqUrl.pathname)) {
+      const proxied = await localJsonWithCache(reqUrl, buildContinuityHistoryPayload, "local:continuity_history");
       const body = Buffer.from(String(proxied.bodyBase64 || ""), "base64");
       return sendText(res, Number(proxied.statusCode || 200), body.toString("utf8"), "application/json", {
         "x-mmx-worker": WORKER_LABEL,
@@ -4831,7 +7055,12 @@ server.listen(PORT, HOST, () => {
     port: actualPort,
     upstream: UPSTREAM_ORIGIN || "-",
     parity: PARITY_ENABLED ? "on" : "off",
+    liveClaim: LIVE_CLAIM_ENABLED ? "on" : "off",
   });
+  void probeUpstreamHealth();
+  setInterval(() => {
+    void probeUpstreamHealth();
+  }, Math.min(UPSTREAM_HEALTH_STALE_MS, 15000));
   if (RUN_AUDIT_ENABLED && RUN_AUDIT_BACKGROUND_WARM_ENABLED) {
     setTimeout(() => {
       void warmActiveRunAuditsInBackground();

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 KEY_PATH="${KEY_PATH:-${HOME}/.ssh/ireland-ec2.pem}"
 AWS_USER="${AWS_USER:-ec2-user}"
-AWS_HOST="${AWS_HOST:-18.201.169.95}"
+AWS_HOST="${AWS_HOST:-3.250.161.191}"
 REMOTE_SCRIPT_PATH="${REMOTE_SCRIPT_PATH:-/home/ec2-user/polymarket-bot/src/run_remote_server_prune.sh}"
 SSH_OPTS=(
   -i "${KEY_PATH}"

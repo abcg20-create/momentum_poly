@@ -50,6 +50,8 @@
     breakoutEpsilonPx: 0.01,
     emaSlopeMinPx: 0.002,
     entryConfirmTimeoutMs: 1500,
+    sessionSec: 300,
+    entryCutoffSec: 297.5,
     acceptSyntheticQuoteMaxAgeMs: 2000,
     immediateDualTpOnFill: true,
   });
@@ -423,6 +425,8 @@
       breakoutEpsilonPx: Math.max(0, toNum(params && params.breakoutEpsilonPx, PRESET.breakoutEpsilonPx)),
       emaSlopeMinPx: Math.max(0, toNum(params && params.emaSlopeMinPx, PRESET.emaSlopeMinPx)),
       entryConfirmTimeoutMs: Math.max(250, Math.floor(toNum(params && params.entryConfirmTimeoutMs, PRESET.entryConfirmTimeoutMs))),
+      sessionSec: Math.max(1, toNum(params && params.sessionSec, PRESET.sessionSec)),
+      entryCutoffSec: Math.max(0, toNum(params && params.entryCutoffSec, PRESET.entryCutoffSec)),
       acceptSyntheticQuoteMaxAgeMs: Math.max(250, Math.floor(toNum(params && params.acceptSyntheticQuoteMaxAgeMs, PRESET.acceptSyntheticQuoteMaxAgeMs))),
     };
 
@@ -460,6 +464,7 @@
         };
 
     let entriesThisSession = Math.max(0, seedInt('entriesThisSession', 0));
+    let singlePartialTakenThisSession = !!(seed && seed.singlePartialTakenThisSession);
     let pureObservedTicks = Math.max(0, seedInt('pureObservedTicks', 0));
     let nonPureSkippedTicks = Math.max(0, seedInt('nonPureSkippedTicks', 0));
     let acceptedSyntheticTicks = Math.max(0, seedInt('acceptedSyntheticTicks', 0));
@@ -494,6 +499,9 @@
       activeTrade.partial.orderPlaced = !!activeTrade.partial.orderPlaced;
       activeTrade.partial.filled = !!activeTrade.partial.filled;
       activeTrade.partial.completed = !!activeTrade.partial.completed;
+      activeTrade.partial.requestedAtMs = Number.isFinite(Number(activeTrade.partial.requestedAtMs))
+        ? Number(activeTrade.partial.requestedAtMs)
+        : null;
     }
     if (activeTrade) {
       activeTrade.profitLockBreachStreak = Math.max(0, Math.floor(Number(activeTrade.profitLockBreachStreak || 0)));
@@ -627,6 +635,7 @@
       if (
         partial &&
         partial.orderPlaced &&
+        !singlePartialTakenThisSession &&
         !partial.filled &&
         Number.isFinite(Number(partial.limitPx)) &&
         Number.isFinite(Number(partial.shares)) &&
@@ -683,6 +692,7 @@
           stageTriggered: false,
           armTriggered: false,
           fillDetectedTsMs: null,
+          requestedAtMs: null,
         },
         exitPending: null,
       };
@@ -764,14 +774,52 @@
 
     function maybeSyncTradeFromRuntime(t, nowMs) {
       const pos = t && t.position && typeof t.position === 'object' ? t.position : null;
+      const observedVenuePosition =
+        pos && pos.observedVenuePosition && typeof pos.observedVenuePosition === 'object'
+          ? pos.observedVenuePosition
+          : null;
       const runtimeEntered = !!pos?.entered && (pos?.side === 'UP' || pos?.side === 'DOWN');
-      const runtimeSide = runtimeEntered ? normalizeSide(pos.side) : null;
-      const runtimeShares = Number(pos && pos.shares);
-      const runtimeEntryPx = Number(pos && pos.entryPx);
+      const observedVenueEntered =
+        !!observedVenuePosition?.entered &&
+        (observedVenuePosition?.side === 'UP' || observedVenuePosition?.side === 'DOWN') &&
+        Number.isFinite(Number(observedVenuePosition?.shares)) &&
+        Number(observedVenuePosition?.shares) > 1e-9;
+      const effectiveEntered = runtimeEntered || observedVenueEntered;
+      const runtimeSide = runtimeEntered
+        ? normalizeSide(pos.side)
+        : (observedVenueEntered ? normalizeSide(observedVenuePosition.side) : null);
+      const runtimeShares = Number(
+        runtimeEntered
+          ? (pos && pos.shares)
+          : (observedVenueEntered ? observedVenuePosition.shares : null)
+      );
+      const runtimeEntryPx = Number(
+        runtimeEntered
+          ? (pos && pos.entryPx)
+          : (observedVenueEntered ? observedVenuePosition.entryPx : null)
+      );
+      const runtimeNotionalUsd = Number(
+        runtimeEntered
+          ? (pos && pos.notionalUsd)
+          : (observedVenueEntered ? observedVenuePosition.notionalUsd : null)
+      );
+      const runtimeEntryRejectedAtMs = Number(pos && pos.entryRejectedAtMs);
+      const runtimePartialRejectedAtMs = Number(pos && pos.partialTpRejectedAtMs);
+      const runtimePendingTpLimitPx = Number(pos && pos.pendingTpLimitPx);
+      const runtimePendingTpShares = Number(pos && pos.pendingTpShares);
+      const runtimePendingTpExitType = String(pos && pos.pendingTpExitType || '').trim().toUpperCase();
+      const runtimePartialArmed =
+        effectiveEntered &&
+        runtimePendingTpExitType === 'PARTIAL_TP_27' &&
+        Number.isFinite(runtimePendingTpLimitPx) &&
+        runtimePendingTpLimitPx > 0 &&
+        Number.isFinite(runtimePendingTpShares) &&
+        runtimePendingTpShares > 1e-9;
+      const partialRequestFreshMs = 750;
 
-      if (!activeTrade && runtimeEntered) {
-        const inferredBetUsd = Number.isFinite(Number(pos?.notionalUsd)) && Number(pos.notionalUsd) > 0
-          ? Number(pos.notionalUsd)
+      if (!activeTrade && effectiveEntered) {
+        const inferredBetUsd = Number.isFinite(runtimeNotionalUsd) && runtimeNotionalUsd > 0
+          ? runtimeNotionalUsd
           : cfg.bet;
         const shares = Number.isFinite(runtimeShares) && runtimeShares > 0
           ? runtimeShares
@@ -799,7 +847,7 @@
           profitLockBreachStreak: 0,
           stopBreachStreak: 0,
           partial: {
-            orderPlaced: false,
+            orderPlaced: runtimePartialArmed,
             filled: false,
             completed: false,
             shares: shares * cfg.partialQtyPct,
@@ -807,6 +855,7 @@
             stageTriggered: false,
             armTriggered: false,
             fillDetectedTsMs: null,
+            requestedAtMs: null,
           },
           exitPending: null,
         };
@@ -816,7 +865,18 @@
 
       if (!activeTrade) return;
 
-      if (runtimeEntered && runtimeSide === activeTrade.side) {
+      if (
+        activeTrade.status === 'enter_pending' &&
+        !runtimeEntered &&
+        Number.isFinite(runtimeEntryRejectedAtMs) &&
+        runtimeEntryRejectedAtMs >= Number(activeTrade.intentTsMs || 0)
+      ) {
+        entriesThisSession = Math.max(0, entriesThisSession - 1);
+        activeTrade = null;
+        return;
+      }
+
+      if (effectiveEntered && runtimeSide === activeTrade.side) {
         if (activeTrade.status === 'enter_pending') {
           activeTrade.status = 'open';
           if (Number.isFinite(runtimeEntryPx) && runtimeEntryPx > 0) {
@@ -832,27 +892,59 @@
           if (cfg.immediateDualTpOnFill && activeTrade.partial) {
             activeTrade.partial.stageTriggered = true;
             activeTrade.partial.armTriggered = true;
-            activeTrade.partial.orderPlaced = true;
+            activeTrade.partial.orderPlaced = runtimePartialArmed;
             activeTrade.partial.completed = false;
           }
         } else if (activeTrade.status !== 'open') {
           activeTrade.status = 'open';
         }
 
+        if (activeTrade.partial) {
+          if (runtimePartialArmed && !activeTrade.partial.filled && !activeTrade.partial.completed) {
+            activeTrade.partial.orderPlaced = true;
+            activeTrade.partial.requestedAtMs = null;
+          } else if (
+            !activeTrade.partial.filled &&
+            !activeTrade.partial.completed &&
+            Number.isFinite(runtimePartialRejectedAtMs) &&
+            runtimePartialRejectedAtMs >= Number(activeTrade.intentTsMs || 0)
+          ) {
+            activeTrade.partial.orderPlaced = false;
+            activeTrade.partial.requestedAtMs = null;
+          } else if (
+            !activeTrade.partial.filled &&
+            !activeTrade.partial.completed &&
+            Number.isFinite(Number(activeTrade.partial.requestedAtMs)) &&
+            (Number(nowMs) - Number(activeTrade.partial.requestedAtMs)) >= partialRequestFreshMs
+          ) {
+            // Live partial fills can land seconds after the original request. Clearing the
+            // "placed" flag should not reopen the strategy to another partial once shares
+            // actually start decreasing for the still-open position.
+            activeTrade.partial.orderPlaced = false;
+            activeTrade.partial.requestedAtMs = null;
+          }
+        }
+
         if (Number.isFinite(runtimeShares) && runtimeShares > 0) {
           const prevShares = Number(activeTrade.currentShares);
           if (
             activeTrade.partial &&
-            activeTrade.partial.orderPlaced &&
             !activeTrade.partial.filled &&
+            !activeTrade.partial.completed &&
+            !singlePartialTakenThisSession &&
             Number.isFinite(prevShares) &&
             runtimeShares < (prevShares - 1e-6)
           ) {
             const soldShares = Math.max(0, prevShares - runtimeShares);
             if (soldShares > 0) {
+              // Treat the first in-position share reduction as the single partial, even if
+              // the original request aged out of the freshness window before the venue fill
+              // was observed locally.
+              singlePartialTakenThisSession = true;
               activeTrade.partial.filled = true;
               activeTrade.partial.completed = true;
               activeTrade.partial.orderPlaced = false;
+              activeTrade.partial.requestedAtMs = null;
               activeTrade.partial.fillDetectedTsMs = Number(nowMs);
               activeTrade.realizedGrossPnlUsd += soldShares * (Number(activeTrade.partial.limitPx) - Number(activeTrade.entryPx));
             }
@@ -970,6 +1062,7 @@
           inflectStateBySide.UP = { peakVal: NaN, peakIdx: -1, negStreak: 0, lastEmitPeakIdx: -1 };
           inflectStateBySide.DOWN = { peakVal: NaN, peakIdx: -1, negStreak: 0, lastEmitPeakIdx: -1 };
           entriesThisSession = 0;
+          singlePartialTakenThisSession = false;
           rearmBlocked.UP = false;
           rearmBlocked.DOWN = false;
           activeTrade = null;
@@ -1035,8 +1128,8 @@
           return null;
         }
 
-        const quoteSeq = Number.isFinite(Number(quoteMeta && quoteMeta.quoteSeq))
-          ? Number(quoteMeta.quoteSeq)
+        const quoteSeq = Number.isFinite(Number(quoteMeta?.quoteSeq))
+          ? Number(quoteMeta?.quoteSeq)
           : null;
         if (
           !allowSyntheticFinal &&
@@ -1205,9 +1298,14 @@
           if (
             activeTrade.partial.stageTriggered &&
             activeTrade.partial.armTriggered &&
+            !singlePartialTakenThisSession &&
             !activeTrade.partial.orderPlaced &&
             !activeTrade.partial.filled &&
             !activeTrade.partial.completed &&
+            !(
+              Number.isFinite(Number(activeTrade.partial.requestedAtMs)) &&
+              (Number(nowMs) - Number(activeTrade.partial.requestedAtMs)) < 750
+            ) &&
             Number(activeTrade.currentShares) > 1e-9
           ) {
             const partialShares = Math.max(
@@ -1216,7 +1314,7 @@
             );
             const partialLimitPx = clamp01(Number(activeTrade.partial.limitPx));
             if (partialShares > 1e-9 && Number.isFinite(partialLimitPx) && partialLimitPx > 0) {
-              activeTrade.partial.orderPlaced = true;
+              activeTrade.partial.requestedAtMs = Number(nowMs);
               activeTrade.partial.completed = false;
               return {
                 exit: {
@@ -1237,6 +1335,12 @@
 
         if (!(lastElapsedSec >= cfg.minEntrySec)) return null;
         if (Number.isFinite(crossCooldownUntilMs) && nowMs < crossCooldownUntilMs) return null;
+        if (Number.isFinite(cfg.entryCutoffSec) && lastElapsedSec >= cfg.entryCutoffSec) return null;
+        if (
+          Number.isFinite(cfg.sessionSec) &&
+          Number.isFinite(cfg.entryCutoffSec) &&
+          cfg.entryCutoffSec > cfg.sessionSec
+        ) return null;
 
         const candidate = maybeSelectEntry(upBid, downBid);
         if (!candidate) return null;
@@ -1288,6 +1392,8 @@
             breakoutEpsilonPx: cfg.breakoutEpsilonPx,
             emaSlopeMinPx: cfg.emaSlopeMinPx,
             entryConfirmTimeoutMs: cfg.entryConfirmTimeoutMs,
+            sessionSec: cfg.sessionSec,
+            entryCutoffSec: cfg.entryCutoffSec,
           },
           state: {
             tickIdx,
@@ -1301,6 +1407,7 @@
             lastResampleSourceTsMs,
             observedSearchStartIdx,
             entriesThisSession: entriesThisSession,
+            singlePartialTakenThisSession: !!singlePartialTakenThisSession,
             pureObservedTicks,
             nonPureSkippedTicks,
             acceptedSyntheticTicks,

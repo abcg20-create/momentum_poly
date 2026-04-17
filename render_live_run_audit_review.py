@@ -53,7 +53,7 @@ RUN_AUDIT_INCREMENTAL_TAIL_SESSIONS = 5
 RUN_AUDIT_INITIAL_VISIBLE_SESSIONS = 8
 RUN_AUDIT_SESSION_LOAD_STEP = 8
 RUN_AUDIT_INLINE_DETAIL_SESSION_LIMIT = max(24, RUN_AUDIT_INITIAL_VISIBLE_SESSIONS + (RUN_AUDIT_SESSION_LOAD_STEP * 2))
-AUDIT_CODE_VERSION = "run_audit_mv_v37"
+AUDIT_CODE_VERSION = "run_audit_mv_v41"
 RUN_AUDIT_STATE_FILE = "run_audit_state.json"
 RUN_AUDIT_SESSION_CACHE_DIR = "run_audit_sessions"
 SESSION_RESOLUTION_TRUTH_FILE = "session_resolution_truth.jsonl"
@@ -581,6 +581,7 @@ def session_audit_trade_summaries(
                 "tradeNum": trade_num,
                 "role": "exit_fill",
                 "exitType": str(summary.get("exitType") or "").upper() or None,
+                "exitTypeLabel": format_exit_type_label(summary.get("exitType") or ""),
                 "note": str(summary.get("reason") or ""),
             })
         trades.append({
@@ -609,6 +610,7 @@ def session_audit_trade_summaries(
                 "fillTsMs": exit_ts if exit_ts > 0 else None,
                 "exitPx": exit_px if math.isfinite(exit_px) else None,
                 "exitType": str(summary.get("exitType") or "").upper() or "",
+                "exitTypeLabel": format_exit_type_label(summary.get("exitType") or ""),
                 "reason": str(summary.get("reason") or ""),
                 "actualSharesClosed": round6(shares),
                 "shareRatio": 1.0,
@@ -1219,6 +1221,9 @@ def fetch_session_audit_svg_fallback(cfg: SourceConfig, run_num: int, slug: str)
     params = {
         "runNum": str(int(run_num)),
         "slug": str(slug),
+        "allowRunFallback": "1",
+        "allowHot": "1",
+        "sourceHostPort": str(cfg.host_port or "").strip(),
     }
     qs = "&".join(f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items() if str(v))
     url = f"{base}/api/session-audits/review?{qs}"
@@ -1554,6 +1559,20 @@ def infer_exit_fee_mode(fill_row: dict[str, Any], exit_type: str) -> str:
     return "taker"
 
 
+def is_emergency_final_tp_exit_type(exit_type: Any) -> bool:
+    x = str(exit_type or "").strip().upper()
+    return x in {"FINAL_TP_099_BACKUP_MARKET", "FINAL_TP_099_BACKUP_MARKET_VENUE_ALREADY_FLAT"}
+
+
+def format_exit_type_label(exit_type: Any) -> str:
+    x = str(exit_type or "").strip().upper()
+    if not x:
+        return ""
+    if is_emergency_final_tp_exit_type(x):
+        return "EMERGENCY_FINAL_TP_099"
+    return x
+
+
 def partial_stage_key(exit_type: Any) -> str | None:
     x = str(exit_type or "").strip().upper()
     if not x:
@@ -1608,6 +1627,7 @@ def build_fallback_trades_from_lanes(session: dict[str, Any], session_start_ms: 
             "side": str(lane.get("side") or "").upper(),
             "px": exit_px,
             "exitType": str(lane.get("exitType") or "").upper() or None,
+            "exitTypeLabel": format_exit_type_label(lane.get("exitType") or ""),
             "sharesActual": shares,
             "sharesClosedActual": shares,
             "sharesRemainingActual": 0.0,
@@ -1643,6 +1663,7 @@ def build_fallback_trades_from_lanes(session: dict[str, Any], session_start_ms: 
                 "fillTsMs": exit_ts,
                 "exitPx": exit_px,
                 "exitType": str(lane.get("exitType") or "").upper() or "",
+                "exitTypeLabel": format_exit_type_label(lane.get("exitType") or ""),
                 "reason": str(lane.get("exitReasonRaw") or ""),
                 "actualSharesClosed": shares,
                 "shareRatio": 1.0,
@@ -1930,6 +1951,7 @@ def build_session_timeline_and_trades(session: dict[str, Any], raw_rows: list[di
                     "signalPx": n((signal or {}).get("row", {}).get("px")),
                     "exitPx": exit_px,
                     "exitType": str(raw.get("exitType") or "").upper(),
+                    "exitTypeLabel": format_exit_type_label(raw.get("exitType") or ""),
                     "reason": str(raw.get("exitReasonRaw") or raw.get("reason") or ""),
                     "orderId": str(raw.get("orderId") or "").strip() or None,
                     "executionMode": str(raw.get("executionMode") or "").strip().lower() or None,
@@ -2258,7 +2280,30 @@ def load_prior_session_artifacts_for_reuse(run_dir: str, run_num: int) -> dict[s
     return out
 
 
-def session_cache_sig(session: dict[str, Any], slug: str, events_for_slug: list[dict[str, Any]], current_slug: str, truth_row: dict[str, Any] | None = None) -> str:
+def compact_cache_sig(compact: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(compact, dict):
+        return None
+    payload = {
+        "financials": compact.get("financials") if isinstance(compact.get("financials"), dict) else None,
+        "sessionSummary": compact.get("sessionSummary") if isinstance(compact.get("sessionSummary"), dict) else None,
+        "tradeSummaries": compact.get("tradeSummaries") if isinstance(compact.get("tradeSummaries"), list) else None,
+        "sideAuditKeys": sorted(list((compact.get("sideAudit") or {}).keys())) if isinstance(compact.get("sideAudit"), dict) else [],
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return {
+        "sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "payload": payload,
+    }
+
+
+def session_cache_sig(
+    session: dict[str, Any],
+    slug: str,
+    events_for_slug: list[dict[str, Any]],
+    current_slug: str,
+    truth_row: dict[str, Any] | None = None,
+    session_audit_compact: dict[str, Any] | None = None,
+) -> str:
     lanes = []
     for lane in session.get("lanes") or []:
         if not isinstance(lane, dict):
@@ -2292,6 +2337,7 @@ def session_cache_sig(session: dict[str, Any], slug: str, events_for_slug: list[
         "eventCount": len(events_for_slug),
         "lastEventTsMs": max(event_ts) if event_ts else None,
         "truthRow": truth_row or None,
+        "sessionAuditCompact": (compact_cache_sig(session_audit_compact) or {}).get("sha256"),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -2548,6 +2594,8 @@ def build_doc(cfg: SourceConfig, run_num: int, out_html: str, out_json: str, t_o
 
     def audit_url(base_path: str, extra: dict[str, Any] | None = None) -> str:
         params = dict(run_identity_qs)
+        base_path_norm = str(base_path or "").strip()
+        host_port = str(cfg.host_port or "").strip()
         for k in list(params.keys()):
             if not params.get(k):
                 params.pop(k, None)
@@ -2557,6 +2605,10 @@ def build_doc(cfg: SourceConfig, run_num: int, out_html: str, out_json: str, t_o
             sv = str(v).strip()
             if sv:
                 params[k] = sv
+        if base_path_norm in ("/api/session-audits/review", "/api/run-audits/review"):
+            params["allowHot"] = "1"
+            if host_port:
+                params["sourceHostPort"] = host_port
         from urllib.parse import urlencode
         return f"{base_path}?{urlencode(params)}"
 
@@ -2760,10 +2812,10 @@ def build_doc(cfg: SourceConfig, run_num: int, out_html: str, out_json: str, t_o
         if slug in built_sessions_by_slug:
             continue
         session_events = events_by_slug.get(slug) or []
-        cache_sig = session_cache_sig(session, slug, session_events, current_slug, truth_by_slug.get(slug))
         start_ms = i(session.get("startMs") or slug_start_ms(slug) or 0)
         end_ms = start_ms + SESSION_WINDOW_SEC * 1000
         session_audit_compact = read_cached_session_compact(cfg, slug)
+        cache_sig = session_cache_sig(session, slug, session_events, current_slug, truth_by_slug.get(slug), session_audit_compact)
         session_audit_rows = session_audit_timeline_rows(session_audit_compact)
         session_audit_summary_rows, session_audit_summary_trades = session_audit_trade_summaries(session_audit_compact, slug, start_ms)
         session_audit_fin = session_audit_financials(session_audit_compact)
@@ -4267,6 +4319,64 @@ def html_page(doc: dict[str, Any]) -> str:
       }};
     }}
 
+    function actualRowMetricsForTrade(trade) {{
+      const entryRowId = trade.entryRowId;
+      const entryShares = round6(toNum(trade.actualShares, 0));
+      const totalTradeFees = Math.max(0, toNum(trade.actualFeesUsd, 0));
+      const explicitEntryFee = toNum(trade.actualEntryFeesUsd, NaN);
+      const out = {{}};
+      let legFeeTotal = 0;
+      let remaining = Math.max(0, entryShares);
+      const closeLegs = Array.isArray(trade.closeLegs) ? trade.closeLegs : [];
+      closeLegs.forEach((leg, idx) => {{
+        const fillRowId = leg.fillRowId;
+        let sharesClosed = round6(Math.max(0, toNum(leg.actualSharesClosed, 0)));
+        if (idx === closeLegs.length - 1) sharesClosed = round6(Math.max(0, remaining));
+        else sharesClosed = round6(Math.max(0, Math.min(remaining, sharesClosed)));
+        const gross = round6(toNum(leg.actualGrossPnlUsd, 0));
+        const net = round6(toNum(leg.actualNetPnlUsd, gross));
+        const fees = round6(Math.max(0, gross - net));
+        legFeeTotal += fees;
+        remaining = round6(Math.max(0, remaining - sharesClosed));
+        if (fillRowId) {{
+          out[fillRowId] = {{
+            shares: round6(sharesClosed),
+            closed: round6(sharesClosed),
+            remaining: round6(remaining),
+            gross: round6(gross),
+            fees: round6(fees),
+            net: round6(net),
+          }};
+        }}
+      }});
+      let entryFee = Number.isFinite(explicitEntryFee) && explicitEntryFee >= 0
+        ? explicitEntryFee
+        : Math.max(0, totalTradeFees - legFeeTotal);
+      entryFee = round6(entryFee);
+      if (entryRowId) {{
+        out[entryRowId] = {{
+          shares: round6(entryShares),
+          closed: 0,
+          remaining: round6(entryShares),
+          gross: 0,
+          fees: round6(entryFee),
+          net: round6(-entryFee),
+        }};
+      }}
+      return out;
+    }}
+
+    function actualSessionRowMetrics(session) {{
+      const out = {{}};
+      (session.trades || []).forEach((trade) => {{
+        const metrics = actualRowMetricsForTrade(trade);
+        Object.entries(metrics).forEach(([rowId, rowMetric]) => {{
+          out[rowId] = rowMetric;
+        }});
+      }});
+      return out;
+    }}
+
     function summarizeActualByIntervalRows() {{
       const rows = [];
       const source = doc?.summaries?.byTradeIntervalAtDefaultBets || {{}};
@@ -4350,8 +4460,53 @@ def html_page(doc: dict[str, Any]) -> str:
       }};
     }}
 
+    function isSyntheticPlaceholderSession(session) {{
+      if (!session || typeof session !== 'object') return false;
+      const issues = Array.isArray(session.auditIssues) ? session.auditIssues.map((v) => String(v || '').trim().toLowerCase()) : [];
+      const finalState = String(session.finalState || '').trim().toLowerCase();
+      const hasTraceSamples = Number(session.traceSampleCount || 0) > 0;
+      const hasTimelineRows = Array.isArray(session.timelineRows) && session.timelineRows.length > 0;
+      const hasTrades = Array.isArray(session.trades) && session.trades.length > 0;
+      const hasSessionMoney = Math.abs(Number(session.actualSessionNetPnlUsd || 0)) > 1e-9 ||
+        Math.abs(Number(session.actualSessionGrossPnlUsd || 0)) > 1e-9 ||
+        Math.abs(Number(session.actualSessionFeesUsd || 0)) > 1e-9;
+      const syntheticOnly = issues.includes('synthetic_current_slug') ||
+        issues.includes('synthetic_from_live_events') ||
+        issues.includes('synthetic_from_venue_truth');
+      return syntheticOnly && finalState === 'pending' && !hasTraceSamples && !hasTimelineRows && !hasTrades && !hasSessionMoney;
+    }}
+
+    function isEmptyAuditPlaceholderSession(session) {{
+      if (!session || typeof session !== 'object') return false;
+      const finalState = String(session.finalState || '').trim().toLowerCase();
+      const hasTraceSamples = Number(session.traceSampleCount || 0) > 0;
+      const hasTimelineRows = Array.isArray(session.timelineRows) && session.timelineRows.length > 0;
+      const hasTrades = Array.isArray(session.trades) && session.trades.length > 0;
+      const hasModelTrades = Array.isArray(session.modelTrades) && session.modelTrades.length > 0;
+      const hasSessionMoney = Math.abs(Number(session.actualSessionNetPnlUsd || 0)) > 1e-9 ||
+        Math.abs(Number(session.actualSessionGrossPnlUsd || 0)) > 1e-9 ||
+        Math.abs(Number(session.actualSessionFeesUsd || 0)) > 1e-9;
+      const hasVenueTruth = Number(session?.venueTruth?.fillCount || 0) > 0;
+      const hasUnresolvedPosition = !!session.unresolvedPosition;
+      const resolvedMode = String(session.strategyMode || session.mode || '').trim().toUpperCase();
+      const noUsefulData = !hasTraceSamples && !hasTimelineRows && !hasTrades && !hasModelTrades &&
+        !hasSessionMoney && !hasVenueTruth && !hasUnresolvedPosition;
+      if (!noUsefulData) return false;
+      if (finalState === 'pending') return true;
+      if (finalState === '' || finalState === 'unknown' || finalState === 'none' || finalState === 'null') {{
+        return resolvedMode === '' || resolvedMode === 'UNKNOWN';
+      }}
+      return false;
+    }}
+
+    function getRenderableSessions() {{
+      const sessions = Array.isArray(doc.sessions) ? doc.sessions : [];
+      return sessions.filter((session) => !isSyntheticPlaceholderSession(session) && !isEmptyAuditPlaceholderSession(session));
+    }}
+
     function updateSessionRenderControls() {{
-      const total = Array.isArray(doc.sessions) ? doc.sessions.length : 0;
+      const sessions = getRenderableSessions();
+      const total = sessions.length;
       const visible = Math.min(total, Math.max(1, Number(state.visibleSessionCount || initialVisibleSessions)));
       if (sessionsSummaryEl) {{
         sessionsSummaryEl.textContent = total > visible
@@ -4372,9 +4527,10 @@ def html_page(doc: dict[str, Any]) -> str:
     }}
 
     function renderSessions() {{
-      const total = Array.isArray(doc.sessions) ? doc.sessions.length : 0;
+      const renderableSessions = getRenderableSessions();
+      const total = renderableSessions.length;
       const visible = Math.min(total, Math.max(1, Number(state.visibleSessionCount || initialVisibleSessions)));
-      const sessionsToRender = doc.sessions.slice(-visible).reverse();
+      const sessionsToRender = renderableSessions.slice(-visible).reverse();
       sessionsEl.innerHTML = sessionsToRender.map((session, idx) => {{
         const trace = session.trace || null;
         const cardId = `sess-${{idx + 1}}`;
@@ -4437,7 +4593,7 @@ def html_page(doc: dict[str, Any]) -> str:
           return `<line x1="${{pad}}" y1="${{y}}" x2="${{w-pad}}" y2="${{y}}" stroke="#23314f" stroke-width="1" />`;
         }}).join('');
         const exitLatencyLines = (trade) => (trade.closeLegs || []).map((leg) => `
-          <div class="trade-line"><b>${{leg.exitType || 'EXIT'}}</b> Latency ${{leg.signalToFillMs != null ? `${{leg.signalToFillMs}}ms` : '—'}} · <b>Signal Px</b> ${{px(leg.signalPx)}} · <b>Fill Δ</b> ${{leg.deltaPx != null ? `${{leg.deltaPx >= 0 ? '+' : ''}}${{Number(leg.deltaPx).toFixed(4)}} (${{leg.deltaPct >= 0 ? '+' : ''}}${{Number(leg.deltaPct).toFixed(2)}}%)` : '—'}}</div>
+          <div class="trade-line"><b>${{leg.exitTypeLabel || leg.exitType || 'EXIT'}}</b> Latency ${{leg.signalToFillMs != null ? `${{leg.signalToFillMs}}ms` : '—'}} · <b>Signal Px</b> ${{px(leg.signalPx)}} · <b>Fill Δ</b> ${{leg.deltaPx != null ? `${{leg.deltaPx >= 0 ? '+' : ''}}${{Number(leg.deltaPx).toFixed(4)}} (${{leg.deltaPct >= 0 ? '+' : ''}}${{Number(leg.deltaPct).toFixed(2)}}%)` : '—'}}</div>
         `).join('');
         const venueTruthLines = Array.isArray(session.venueTruth?.fills) ? session.venueTruth.fills.map((fill) => {{
           const secLabel = Number.isFinite(Number(fill?.tsMs)) ? sec((Number(fill.tsMs) - Number(session.startMs || 0)) / 1000) : '—';
@@ -4554,12 +4710,12 @@ def html_page(doc: dict[str, Any]) -> str:
             <td>${{px(row.actualFillPx ?? row.px)}}</td>
             <td>${{px(row.px)}}</td>
             <td class="mono">${{Number.isFinite(Number(row.nominalUsd)) ? usdAbsBlankZero(row.nominalUsd) : '—'}}</td>
-            <td class="mono actual-shares">${{fixedBlankZero(row.sharesActual, 4)}}</td>
-            <td class="mono">${{fixedBlankZero(row.sharesClosedActual, 4)}}</td>
-            <td class="mono">${{fixedBlankZero(row.sharesRemainingActual, 4)}}</td>
-            <td class="mono">${{Number.isFinite(Number(row.actualGrossPnlUsd)) ? usdBlankZero(row.actualGrossPnlUsd) : '—'}}</td>
-            <td class="mono">${{Number.isFinite(Number(row.actualFeesUsd)) ? usdBlankZero(row.actualFeesUsd) : '—'}}</td>
-            <td class="mono">${{Number.isFinite(Number(row.actualNetPnlUsd)) ? usdBlankZero(row.actualNetPnlUsd) : '—'}}</td>
+            <td class="mono actual-shares" data-row-id="${{row.rowId}}">${{fixedBlankZero(row.sharesActual, 4)}}</td>
+            <td class="mono actual-closed" data-row-id="${{row.rowId}}">${{fixedBlankZero(row.sharesClosedActual, 4)}}</td>
+            <td class="mono actual-remain" data-row-id="${{row.rowId}}">${{fixedBlankZero(row.sharesRemainingActual, 4)}}</td>
+            <td class="mono actual-gross" data-row-id="${{row.rowId}}">${{Number.isFinite(Number(row.actualGrossPnlUsd)) ? usdBlankZero(row.actualGrossPnlUsd) : '—'}}</td>
+            <td class="mono actual-fees" data-row-id="${{row.rowId}}">${{Number.isFinite(Number(row.actualFeesUsd)) ? usdBlankZero(row.actualFeesUsd) : '—'}}</td>
+            <td class="mono actual-net" data-row-id="${{row.rowId}}">${{Number.isFinite(Number(row.actualNetPnlUsd)) ? usdBlankZero(row.actualNetPnlUsd) : '—'}}</td>
             <td class="mono">${{row.signalToOrderMs != null ? `${{row.signalToOrderMs}}ms` : '—'}}</td>
             <td class="mono">${{row.signalToFillMs != null ? `${{row.signalToFillMs}}ms` : '—'}}</td>
             <td class="mono">${{row.orderIdTail || '—'}}</td>
@@ -4657,7 +4813,9 @@ def html_page(doc: dict[str, Any]) -> str:
                 <tbody>${{rows}}</tbody>
                 <tfoot>
                   <tr>
-                    <td colspan="13">Session Net Summary</td>
+                    <td colspan="11">Session Net Summary</td>
+                    <td class="mono session-closed" data-slug="${{session.slug}}">—</td>
+                    <td class="mono session-remain" data-slug="${{session.slug}}">—</td>
                     <td class="mono session-gross" data-slug="${{session.slug}}">—</td>
                     <td class="mono session-fees" data-slug="${{session.slug}}">—</td>
                     <td class="mono session-net" data-slug="${{session.slug}}">—</td>
@@ -4804,9 +4962,35 @@ def html_page(doc: dict[str, Any]) -> str:
           const grossEl = card.querySelector(`.session-gross[data-slug="${{slug}}"]`);
           const feesEl = card.querySelector(`.session-fees[data-slug="${{slug}}"]`);
           const cumEl = card.querySelector(`.session-cum[data-slug="${{slug}}"]`);
+          const sessionClosedEl = card.querySelector(`.session-closed[data-slug="${{slug}}"]`);
+          const sessionRemainEl = card.querySelector(`.session-remain[data-slug="${{slug}}"]`);
           if (grossEl) {{ grossEl.textContent = usdBlankZero(model.gross); grossEl.classList.toggle('pos', model.gross >= 0); grossEl.classList.toggle('neg', model.gross < 0); }}
           if (feesEl) feesEl.textContent = usdAbsBlankZero(model.fees);
           if (cumEl) cumEl.textContent = `$${{Number(model.cumulativeBalanceUsd || 0).toFixed(2)}}`;
+
+          const actualMetrics = actualSessionRowMetrics(session);
+          let actualClosedTotal = 0;
+          let actualFinalRemain = NaN;
+          Object.entries(actualMetrics).forEach(([rowId, metrics]) => {{
+            const row = card.querySelector(`tr[data-row-id="${{rowId}}"]`);
+            if (!row) return;
+            const sharesEl = row.querySelector(`.actual-shares[data-row-id="${{rowId}}"]`);
+            const closedEl = row.querySelector(`.actual-closed[data-row-id="${{rowId}}"]`);
+            const remainEl = row.querySelector(`.actual-remain[data-row-id="${{rowId}}"]`);
+            const grossElRow = row.querySelector(`.actual-gross[data-row-id="${{rowId}}"]`);
+            const feesElRow = row.querySelector(`.actual-fees[data-row-id="${{rowId}}"]`);
+            const netElRow = row.querySelector(`.actual-net[data-row-id="${{rowId}}"]`);
+            if (sharesEl && Number.isFinite(Number(metrics.shares))) sharesEl.textContent = Number(metrics.shares).toFixed(4);
+            if (closedEl && Number.isFinite(Number(metrics.closed))) closedEl.textContent = Number(metrics.closed).toFixed(4);
+            if (remainEl && Number.isFinite(Number(metrics.remaining))) remainEl.textContent = Number(metrics.remaining).toFixed(4);
+            if (grossElRow) {{ grossElRow.textContent = usdBlankZero(metrics.gross || 0); grossElRow.classList.toggle('pos', Number(metrics.gross || 0) >= 0); grossElRow.classList.toggle('neg', Number(metrics.gross || 0) < 0); }}
+            if (feesElRow) feesElRow.textContent = usdAbsBlankZero(metrics.fees || 0);
+            if (netElRow) {{ netElRow.textContent = usdBlankZero(metrics.net || 0); netElRow.classList.toggle('pos', Number(metrics.net || 0) >= 0); netElRow.classList.toggle('neg', Number(metrics.net || 0) < 0); }}
+            if (Number.isFinite(Number(metrics.closed))) actualClosedTotal += Number(metrics.closed || 0);
+            if (Number.isFinite(Number(metrics.remaining))) actualFinalRemain = Number(metrics.remaining);
+          }});
+          if (sessionClosedEl) sessionClosedEl.textContent = Number.isFinite(actualClosedTotal) && actualClosedTotal > 0 ? Number(actualClosedTotal).toFixed(4) : '—';
+          if (sessionRemainEl) sessionRemainEl.textContent = Number.isFinite(actualFinalRemain) ? Number(actualFinalRemain).toFixed(4) : '—';
 
           (session.trades || []).forEach((trade) => {{
             const tradeModel = state.tradeModels[trade.tradeKey];
