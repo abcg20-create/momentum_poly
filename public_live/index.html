@@ -13824,12 +13824,18 @@
     if (focused) return focused;
     try {
       const bots = Array.isArray(mmxState?.bots) ? mmxState.bots : [];
-      const runningPaper = bots.find((b) => {
+      const preferredMode = mmxIsLiveSubpathPage() ? "live" : "paper";
+      const fallbackMode = preferredMode === "live" ? "paper" : "live";
+      const preferredBot = bots.find((b) => {
         const mode = String(b?.mode || "").trim().toLowerCase();
         const slug = String(b?.marketSlug || b?.runtime?.marketSlug || "").trim();
-        return !!slug && mode !== "live";
+        return !!slug && mode === preferredMode;
+      }) || bots.find((b) => {
+        const mode = String(b?.mode || "").trim().toLowerCase();
+        const slug = String(b?.marketSlug || b?.runtime?.marketSlug || "").trim();
+        return !!slug && mode === fallbackMode;
       }) || null;
-      const inferred = normalizeMarketScopeSlug(String(runningPaper?.marketSlug || runningPaper?.runtime?.marketSlug || "").trim());
+      const inferred = normalizeMarketScopeSlug(String(preferredBot?.marketSlug || preferredBot?.runtime?.marketSlug || "").trim());
       if (inferred) return inferred;
     } catch {}
     return null;
@@ -13859,10 +13865,16 @@
       }))
       .filter((b) => b.instanceId);
     if (candidates.length === 1) return candidates[0].instanceId;
-    const runningPaper = candidates
-      .filter((b) => b.status === "running" && b.mode !== "live")
+    const preferredMode = mmxIsLiveSubpathPage() ? "live" : "paper";
+    const fallbackMode = preferredMode === "live" ? "paper" : "live";
+    const runningPreferred = candidates
+      .filter((b) => b.status === "running" && b.mode === preferredMode)
       .sort((a, b) => Number(b.runNum || 0) - Number(a.runNum || 0));
-    if (runningPaper.length) return runningPaper[0].instanceId;
+    if (runningPreferred.length) return runningPreferred[0].instanceId;
+    const runningFallback = candidates
+      .filter((b) => b.status === "running" && b.mode === fallbackMode)
+      .sort((a, b) => Number(b.runNum || 0) - Number(a.runNum || 0));
+    if (runningFallback.length) return runningFallback[0].instanceId;
     const newest = candidates
       .slice()
       .sort((a, b) => Number(b.runNum || 0) - Number(a.runNum || 0));
@@ -14577,8 +14589,9 @@
                   timeoutMs: forceBust ? 12000 : 6000,
                 });
             const botItems = Array.isArray(botsPayload?.items) ? botsPayload.items : [];
+            const preferredMode = mmxIsLiveSubpathPage() ? "live" : "paper";
             const fallbackBot = botItems
-              .filter((row) => String(row?.mode || "paper").trim().toLowerCase() === "paper")
+              .filter((row) => String(row?.mode || "paper").trim().toLowerCase() === preferredMode)
               .sort((a, b) => Number(b?.launchedAtMs || 0) - Number(a?.launchedAtMs || 0))[0] || null;
             if (fallbackBot) {
               focused = fallbackBot;
@@ -20821,62 +20834,7 @@
         try { setActiveHistorySessionCard(String(snap?.slug || selectedSlug || ""), { animate: false }); } catch {}
         return true;
       }
-      const maxSessions = 3;
-      const scopeQ = (() => {
-        if (!scope) return "";
-        if (scope.startsWith("prefix:")) {
-          const pref = sessionSlugBase(String(scope.slice("prefix:".length)).trim());
-          return pref ? `&marketPrefix=${encodeURIComponent(pref)}` : "";
-        }
-        return `&marketSlug=${encodeURIComponent(scope)}`;
-      })();
-      let sessions = [];
-      try {
-        const params = new URLSearchParams();
-        if (scope.startsWith("prefix:")) {
-          const pref = sessionSlugBase(String(scope.slice("prefix:".length)).trim());
-          if (pref) params.set("marketPrefix", pref);
-        }
-        params.set("limit", String(maxSessions));
-        params.set("refresh", "1");
-        params.set("includeTrace", "0");
-        params.set("maxSessions", String(maxSessions));
-        const j = await mmxJget(
-          `/api/v2/bots/${encodeURIComponent(instanceId)}/continuity-history?${params.toString()}`,
-          { readOnly: true, timeoutMs: 20000 }
-        );
-        sessions = Array.isArray(j?.sessions) ? j.sessions : [];
-      } catch {}
-      const currentSlugKey = String(currentSlug || focusedMarketSlug || "").trim().toLowerCase();
-      const latestClosed = sessions.find((row) => {
-        const slug = String(row?.slug || "").trim().toLowerCase();
-        if (!slug || (currentSlugKey && slug === currentSlugKey)) return false;
-        return isSessionFinalizedForCard(row);
-      }) || null;
-      if (!latestClosed) return false;
-      let snap = null;
-      try {
-        snap = await fetchRebuiltSnapshotFromServerForCard({
-          sessionKey: String(latestClosed?.key || latestClosed?.sessionKey || ""),
-          slug: String(latestClosed?.slug || ""),
-          instanceId,
-          entryTsMs: Number(latestClosed?.entryTsMs),
-          exitTsMs: Number(latestClosed?.exitTsMs),
-        });
-      } catch {}
-      if (!snap) {
-        try { snap = mmxBuildHomepageHistorySnapshotFromServerSession(latestClosed); } catch {}
-      }
-      if (!snap) return false;
-      const mergedCards = limitCardsForSimpleRebuild([snap].concat(readStoredSessionCards()));
-      clearHistoryCards({ preserveLiveRuntime: true });
-      writeStoredSessionCards(mergedCards);
-      historyCardsAll = mergedCards;
-      historyRenderedCount = 0;
-      await renderHistoryCardsPaginated(mergedCards, "ensureLatestClosedHistoryCardVisible");
-      mmxForceRefreshStandaloneRecentSessions();
-      try { setActiveHistorySessionCard(String(snap?.slug || latestClosed?.slug || ""), { animate: false }); } catch {}
-      return true;
+      return false;
     } catch {
       return false;
     }
@@ -34691,14 +34649,6 @@
       const candidatePath = `${candidate.pathname}${candidate.search}${candidate.hash}`;
       if (resolvedOrigin && resolvedOrigin !== window.location.origin) {
         return new URL(candidatePath, resolvedOrigin).toString();
-      }
-      const livePrefix = String(mmxLiveTransportBasePath() || "").trim();
-      if (livePrefix) {
-        const withoutLivePrefix = candidatePath.startsWith(`${livePrefix}/`) || candidatePath === livePrefix
-          ? candidatePath.slice(livePrefix.length)
-          : candidatePath;
-        const workerPath = `${livePrefix}/worker${withoutLivePrefix.startsWith("/") ? withoutLivePrefix : `/${withoutLivePrefix}`}`;
-        return new URL(workerPath, window.location.origin).toString();
       }
       return mmxOverlayWorkerApiUrl(candidatePath);
     } catch {
