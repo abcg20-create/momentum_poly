@@ -4,6 +4,8 @@ set -euo pipefail
 KEY_PATH="${KEY_PATH:-/home/ec2-user/.ssh/nonessential_worker.pem}"
 WORKER_HOST="${WORKER_HOST:-18.219.88.73}"
 WORKER_USER="${WORKER_USER:-ec2-user}"
+MAIN_LOCAL_PORT="${MAIN_LOCAL_PORT:-9001}"
+LIVE_LOCAL_PORT="${LIVE_LOCAL_PORT:-9002}"
 SKIP_WORKER_HEALTH="${SKIP_WORKER_HEALTH:-0}"
 
 kill_listener_pid() {
@@ -17,12 +19,10 @@ kill_listener_pid() {
 }
 
 chmod 400 "${KEY_PATH}"
-kill_listener_pid 28890
-kill_listener_pid 9002
+kill_listener_pid "${MAIN_LOCAL_PORT}"
+kill_listener_pid "${LIVE_LOCAL_PORT}"
 pkill -f '127.0.0.1:9001' || true
 pkill -f '127.0.0.1:9002' || true
-pkill -f '127.0.0.1:8788' || true
-pkill -f '127.0.0.1:8791' || true
 
 nohup ssh -NT \
   -o ExitOnForwardFailure=yes \
@@ -30,8 +30,7 @@ nohup ssh -NT \
   -o ServerAliveCountMax=3 \
   -o StrictHostKeyChecking=no \
   -i "${KEY_PATH}" \
-  -L 28890:127.0.0.1:9001 \
-  -R 18788:127.0.0.1:8788 \
+  -L "${MAIN_LOCAL_PORT}:127.0.0.1:9001" \
   "${WORKER_USER}@${WORKER_HOST}" \
   >/tmp/nonessential_tunnel_home.log 2>&1 </dev/null &
 
@@ -41,15 +40,14 @@ nohup ssh -NT \
   -o ServerAliveCountMax=3 \
   -o StrictHostKeyChecking=no \
   -i "${KEY_PATH}" \
-  -L 9002:127.0.0.1:9002 \
-  -R 18791:127.0.0.1:8791 \
+  -L "${LIVE_LOCAL_PORT}:127.0.0.1:9002" \
   "${WORKER_USER}@${WORKER_HOST}" \
   >/tmp/nonessential_tunnel_live.log 2>&1 </dev/null &
 
 sleep 2
 if [[ "${SKIP_WORKER_HEALTH}" != "1" ]]; then
-  curl -fsS http://127.0.0.1:28890/api/health
+  curl -fsS "http://127.0.0.1:${MAIN_LOCAL_PORT}/api/health"
   echo
-  curl -fsS http://127.0.0.1:9002/api/health
+  curl -fsS "http://127.0.0.1:${LIVE_LOCAL_PORT}/api/health"
   echo
 fi

@@ -15,7 +15,7 @@ kill_listener_pid() {
 
 kill_listener_pid 9001
 kill_listener_pid 9002
-pkill -f 'PORT=9001 .*tools_nonessential_readonly_worker.mjs' || true
-pkill -f 'PORT=9002 .*tools_nonessential_readonly_worker.mjs' || true
+pkill -f 'tools_main_readonly_worker.mjs' || true
+pkill -f 'tools_live_readonly_worker.mjs' || true
 
 exec "$ROOT/launch_nonessential_workers_remote.sh" "$ROOT"

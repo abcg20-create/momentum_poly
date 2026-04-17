@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="${1:-/home/ec2-user/polymarket-bot-nonessential}"
-mkdir -p "$ROOT/logs" "$ROOT/cache_home" "$ROOT/cache_live"
+mkdir -p "$ROOT/logs" "$ROOT/cache_main" "$ROOT/cache_live"
 
 if [[ -f "$ROOT/live_claim.env" ]]; then
   set -a
@@ -11,18 +11,23 @@ if [[ -f "$ROOT/live_claim.env" ]]; then
   set +a
 fi
 
+MAIN_UPSTREAM_ORIGIN="${MAIN_UPSTREAM_ORIGIN:-http://127.0.0.1:8788}"
+LIVE_UPSTREAM_ORIGIN="${LIVE_UPSTREAM_ORIGIN:-http://127.0.0.1:8791}"
+MAIN_RUN_AUDIT_PUBLIC_BASE="${MAIN_RUN_AUDIT_PUBLIC_BASE:-${MAIN_UPSTREAM_ORIGIN}}"
+LIVE_RUN_AUDIT_PUBLIC_BASE="${LIVE_RUN_AUDIT_PUBLIC_BASE:-${LIVE_UPSTREAM_ORIGIN}}"
+
 require_upstream() {
-  local port="$1"
+  local origin="$1"
   local label="$2"
   local i=0
   while (( i < 6 )); do
-    if curl -fsS --max-time 10 "http://127.0.0.1:${port}/api/health?lite=1" >/dev/null; then
+    if curl -fsS --max-time 10 "${origin%/}/api/health?lite=1" >/dev/null; then
       return 0
     fi
     sleep 2
     i=$((i + 1))
   done
-  echo "missing upstream tunnel for ${label} on 127.0.0.1:${port}" >&2
+  echo "missing upstream origin for ${label}: ${origin}" >&2
   exit 1
 }
 
@@ -36,29 +41,28 @@ kill_listener_pid() {
   fi
 }
 
-start_home_worker() {
+start_main_worker() {
   nohup env \
     NODE_OPTIONS=--max-old-space-size=4096 \
     PORT=9001 \
     HOST=0.0.0.0 \
-    BASE_PATH=/worker \
-    WORKER_LABEL=home-readonly \
-    WORKER_SCOPE=shared \
-    UPSTREAM_ORIGIN=http://127.0.0.1:18788 \
-    UPSTREAM_ORIGIN_MAP=8788=http://127.0.0.1:18788,8790=http://127.0.0.1:18788 \
-    CACHE_ROOT="$ROOT/cache_home" \
+    WORKER_LABEL=main-readonly \
+    WORKER_SCOPE=main \
+    UPSTREAM_ORIGIN="${MAIN_UPSTREAM_ORIGIN}" \
+    UPSTREAM_ORIGIN_MAP="8788=${MAIN_UPSTREAM_ORIGIN},8790=${MAIN_UPSTREAM_ORIGIN}" \
+    CACHE_ROOT="$ROOT/cache_main" \
     PARITY_ENABLED=0 \
     RUN_AUDIT_ENABLED=1 \
     RUN_AUDIT_SCRIPT_PATH="$ROOT/render_live_run_audit_review.py" \
     RUN_AUDIT_HOST_PORT=8788 \
-    RUN_AUDIT_PUBLIC_BASE=http://127.0.0.1:18788 \
+    RUN_AUDIT_PUBLIC_BASE="${MAIN_RUN_AUDIT_PUBLIC_BASE}" \
     RUN_AUDIT_MAX_AGE_MS=86400000 \
     RUN_AUDIT_SYNC_BUILD_TIMEOUT_MS=300000 \
     SESSION_CARD_REMOTE_CANONICAL_READ_ENABLED=1 \
     SESSION_CARD_REMOTE_CANONICAL_WRITE_ENABLED=1 \
     LIVE_CLAIM_ENABLED=0 \
-    node "$ROOT/tools_nonessential_readonly_worker.mjs" \
-    >"$ROOT/logs/worker_9001.log" 2>&1 &
+    node "$ROOT/tools_main_readonly_worker.mjs" \
+    >"$ROOT/logs/main_worker.log" 2>&1 &
 }
 
 start_live_worker() {
@@ -66,18 +70,17 @@ start_live_worker() {
     NODE_OPTIONS=--max-old-space-size=4096 \
     PORT=9002 \
     HOST=0.0.0.0 \
-    BASE_PATH=/live/worker \
     WORKER_LABEL=live-readonly \
     WORKER_SCOPE=live \
     LIVE_ONLY_SOURCE_HOST_PORT=8791 \
-    UPSTREAM_ORIGIN=http://127.0.0.1:18791 \
-    UPSTREAM_ORIGIN_MAP=8791=http://127.0.0.1:18791 \
+    UPSTREAM_ORIGIN="${LIVE_UPSTREAM_ORIGIN}" \
+    UPSTREAM_ORIGIN_MAP="8791=${LIVE_UPSTREAM_ORIGIN}" \
     CACHE_ROOT="$ROOT/cache_live" \
     PARITY_ENABLED=0 \
     RUN_AUDIT_ENABLED=1 \
     RUN_AUDIT_SCRIPT_PATH="$ROOT/render_live_run_audit_review.py" \
     RUN_AUDIT_HOST_PORT=8791 \
-    RUN_AUDIT_PUBLIC_BASE=http://127.0.0.1:18791 \
+    RUN_AUDIT_PUBLIC_BASE="${LIVE_RUN_AUDIT_PUBLIC_BASE}" \
     RUN_AUDIT_MAX_AGE_MS=86400000 \
     RUN_AUDIT_SYNC_BUILD_TIMEOUT_MS=300000 \
     SESSION_CARD_REMOTE_CANONICAL_READ_ENABLED=1 \
@@ -96,19 +99,19 @@ start_live_worker() {
     RELAYER_API_KEY_ADDRESS="${RELAYER_API_KEY_ADDRESS:-}" \
     LIVE_CLAIM_RELAYER_BASE="${LIVE_CLAIM_RELAYER_BASE:-}" \
     RPC_URLS="${RPC_URLS:-${RPC_URL:-}}" \
-    node "$ROOT/tools_nonessential_readonly_worker.mjs" \
-    >"$ROOT/logs/worker_9002.log" 2>&1 &
+    node "$ROOT/tools_live_readonly_worker.mjs" \
+    >"$ROOT/logs/live_worker.log" 2>&1 &
 }
 
-require_upstream 18788 home
-require_upstream 18791 live
+require_upstream "${MAIN_UPSTREAM_ORIGIN}" main
+require_upstream "${LIVE_UPSTREAM_ORIGIN}" live
 
 kill_listener_pid 9001
 kill_listener_pid 9002
-pkill -f 'PORT=9001 .*tools_nonessential_readonly_worker.mjs' || true
-pkill -f 'PORT=9002 .*tools_nonessential_readonly_worker.mjs' || true
+pkill -f 'tools_main_readonly_worker.mjs' || true
+pkill -f 'tools_live_readonly_worker.mjs' || true
 
-start_home_worker
+start_main_worker
 start_live_worker
 
 sleep 2

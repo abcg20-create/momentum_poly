@@ -25,7 +25,8 @@ copy_file() {
 }
 
 ssh -i "$KEY_PATH" -o StrictHostKeyChecking=no "${REMOTE_USER}@${REMOTE_HOST}" "mkdir -p '${REMOTE_ROOT}'"
-copy_file "$ROOT/tools_nonessential_readonly_worker.mjs"
+copy_file "$ROOT/tools_main_readonly_worker.mjs"
+copy_file "$ROOT/tools_live_readonly_worker.mjs"
 copy_file "$ROOT/tools_nonessential_live_claim_worker.mjs"
 copy_file "$ROOT/render_live_run_audit_review.py"
 copy_file "$ROOT/launch_nonessential_workers_remote.sh"
@@ -62,7 +63,8 @@ ssh -i "$KEY_PATH" -o StrictHostKeyChecking=no "${REMOTE_USER}@${REMOTE_HOST}" "
     cd \"${REMOTE_ROOT}\"
     npm install --no-save ethers@5 @polymarket/builder-relayer-client@0.0.8 @polymarket/clob-client >/tmp/nonessential_npm_install.log 2>&1
   fi
-  chmod +x \"${REMOTE_ROOT}/tools_nonessential_readonly_worker.mjs\"
+  chmod +x \"${REMOTE_ROOT}/tools_main_readonly_worker.mjs\"
+  chmod +x \"${REMOTE_ROOT}/tools_live_readonly_worker.mjs\"
   chmod +x \"${REMOTE_ROOT}/tools_nonessential_live_claim_worker.mjs\"
   chmod +x \"${REMOTE_ROOT}/launch_nonessential_workers_remote.sh\"
   chmod +x \"${REMOTE_ROOT}/restart_nonessential_workers_remote.sh\"
