@@ -2782,28 +2782,28 @@ function buildUpstreamUrl(reqUrl) {
   const mappedOrigin = sourceHostPort ? String(UPSTREAM_ORIGIN_MAP.get(sourceHostPort) || "").trim() : "";
   const resolvedUpstreamOrigin = mappedOrigin || UPSTREAM_ORIGIN;
   if (!resolvedUpstreamOrigin) throw new Error("UPSTREAM_ORIGIN is required");
+  const requestPathName = String(upstreamReq.pathname || "").trim();
   const upstreamPath = prefixUpstreamPath(upstreamReq.pathname);
   const upstream = new URL(upstreamPath + upstreamReq.search, `${resolvedUpstreamOrigin}/`);
-  const pathName = String(upstream.pathname || "").trim();
   const allowHotPath =
-    /^\/api\/v2\/bots(?:\/[^/]+)?$/i.test(pathName) ||
-    /^\/api\/v2\/bots\/[^/]+\/run-index\b/i.test(pathName) ||
-    /^\/api\/v2\/bots\/[^/]+\/focused-live-session\b/i.test(pathName) ||
-    /^\/api\/v2\/bots\/[^/]+\/live-markers\b/i.test(pathName) ||
-    /^\/api\/v2\/bots\/[^/]+\/continuity-history\b/i.test(pathName) ||
-    /^\/api\/v2\/bots\/[^/]+\/last-session-history\b/i.test(pathName) ||
-    /^\/api\/v2\/bots\/[^/]+\/latest-session-card\b/i.test(pathName) ||
-    /^\/api\/v2\/bots\/[^/]+\/session-artifacts-summary\b/i.test(pathName) ||
-    /^\/api\/v2\/bots\/[^/]+\/rollover-ready\b/i.test(pathName) ||
-    /^\/api\/compare\/run-artifact\b/i.test(pathName) ||
-    /^\/api\/session-history\b/i.test(pathName) ||
-    /^\/api\/session-audits\/review\b/i.test(pathName) ||
-    /^\/api\/stats\/summary\b/i.test(pathName) ||
-    /^\/api\/operator-notices\b/i.test(pathName) ||
-    /^\/api\/v2\/strategies\b/i.test(pathName) ||
-    /^\/api\/v2\/markets\/(?:volume-5m-24h|hot|audit)\b/i.test(pathName) ||
-    /^\/api\/v2\/portfolio\/(?:summary|markets)\b/i.test(pathName) ||
-    /^\/api\/v2\/drive\/audit\b/i.test(pathName);
+    /^\/api\/v2\/bots(?:\/[^/]+)?$/i.test(requestPathName) ||
+    /^\/api\/v2\/bots\/[^/]+\/run-index\b/i.test(requestPathName) ||
+    /^\/api\/v2\/bots\/[^/]+\/focused-live-session\b/i.test(requestPathName) ||
+    /^\/api\/v2\/bots\/[^/]+\/live-markers\b/i.test(requestPathName) ||
+    /^\/api\/v2\/bots\/[^/]+\/continuity-history\b/i.test(requestPathName) ||
+    /^\/api\/v2\/bots\/[^/]+\/last-session-history\b/i.test(requestPathName) ||
+    /^\/api\/v2\/bots\/[^/]+\/latest-session-card\b/i.test(requestPathName) ||
+    /^\/api\/v2\/bots\/[^/]+\/session-artifacts-summary\b/i.test(requestPathName) ||
+    /^\/api\/v2\/bots\/[^/]+\/rollover-ready\b/i.test(requestPathName) ||
+    /^\/api\/compare\/run-artifact\b/i.test(requestPathName) ||
+    /^\/api\/session-history\b/i.test(requestPathName) ||
+    /^\/api\/session-audits\/review\b/i.test(requestPathName) ||
+    /^\/api\/stats\/summary\b/i.test(requestPathName) ||
+    /^\/api\/operator-notices\b/i.test(requestPathName) ||
+    /^\/api\/v2\/strategies\b/i.test(requestPathName) ||
+    /^\/api\/v2\/markets\/(?:volume-5m-24h|hot|audit)\b/i.test(requestPathName) ||
+    /^\/api\/v2\/portfolio\/(?:summary|markets)\b/i.test(requestPathName) ||
+    /^\/api\/v2\/drive\/audit\b/i.test(requestPathName);
   if (allowHotPath && !upstream.searchParams.has("allowHot")) upstream.searchParams.set("allowHot", ALLOW_HOT_QUERY);
   return upstream;
 }

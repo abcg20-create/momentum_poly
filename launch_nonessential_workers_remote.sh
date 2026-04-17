@@ -13,21 +13,53 @@ fi
 
 MAIN_UPSTREAM_ORIGIN="${MAIN_UPSTREAM_ORIGIN:-http://127.0.0.1:8788}"
 LIVE_UPSTREAM_ORIGIN="${LIVE_UPSTREAM_ORIGIN:-http://127.0.0.1:8791}"
+LIVE_UPSTREAM_PATH_PREFIX="${LIVE_UPSTREAM_PATH_PREFIX:-}"
 MAIN_RUN_AUDIT_PUBLIC_BASE="${MAIN_RUN_AUDIT_PUBLIC_BASE:-${MAIN_UPSTREAM_ORIGIN}}"
 LIVE_RUN_AUDIT_PUBLIC_BASE="${LIVE_RUN_AUDIT_PUBLIC_BASE:-${LIVE_UPSTREAM_ORIGIN}}"
+
+normalize_path_prefix() {
+  local raw="${1:-}"
+  raw="${raw#/}"
+  raw="${raw%/}"
+  if [[ -z "${raw}" ]]; then
+    printf '%s' ""
+  else
+    printf '/%s' "${raw}"
+  fi
+}
+
+build_health_url() {
+  local origin="$1"
+  local path_prefix="${2:-}"
+  local normalized_prefix=""
+  normalized_prefix="$(normalize_path_prefix "${path_prefix}")"
+  printf '%s%s/api/health?lite=1' "${origin%/}" "${normalized_prefix}"
+}
+
+build_state_url() {
+  local origin="$1"
+  local path_prefix="${2:-}"
+  local normalized_prefix=""
+  normalized_prefix="$(normalize_path_prefix "${path_prefix}")"
+  printf '%s%s/api/state?includeBots=0&lite=1' "${origin%/}" "${normalized_prefix}"
+}
 
 require_upstream() {
   local origin="$1"
   local label="$2"
+  local path_prefix="${3:-}"
   local i=0
   while (( i < 6 )); do
-    if curl -fsS --max-time 10 "${origin%/}/api/health?lite=1" >/dev/null; then
+    if curl -fsS --max-time 10 "$(build_health_url "${origin}" "${path_prefix}")" >/dev/null; then
+      return 0
+    fi
+    if curl -fsS --max-time 10 "$(build_state_url "${origin}" "${path_prefix}")" >/dev/null; then
       return 0
     fi
     sleep 2
     i=$((i + 1))
   done
-  echo "missing upstream origin for ${label}: ${origin}" >&2
+  echo "missing upstream origin for ${label}: $(build_health_url "${origin}" "${path_prefix}") or $(build_state_url "${origin}" "${path_prefix}")" >&2
   exit 1
 }
 
@@ -74,6 +106,7 @@ start_live_worker() {
     WORKER_SCOPE=live \
     LIVE_ONLY_SOURCE_HOST_PORT=8791 \
     UPSTREAM_ORIGIN="${LIVE_UPSTREAM_ORIGIN}" \
+    UPSTREAM_PATH_PREFIX="${LIVE_UPSTREAM_PATH_PREFIX}" \
     UPSTREAM_ORIGIN_MAP="8791=${LIVE_UPSTREAM_ORIGIN}" \
     CACHE_ROOT="$ROOT/cache_live" \
     PARITY_ENABLED=0 \
@@ -104,7 +137,7 @@ start_live_worker() {
 }
 
 require_upstream "${MAIN_UPSTREAM_ORIGIN}" main
-require_upstream "${LIVE_UPSTREAM_ORIGIN}" live
+require_upstream "${LIVE_UPSTREAM_ORIGIN}" live "${LIVE_UPSTREAM_PATH_PREFIX}"
 
 kill_listener_pid 9001
 kill_listener_pid 9002

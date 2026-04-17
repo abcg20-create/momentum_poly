@@ -7,6 +7,11 @@ REMOTE_HOST="${REMOTE_HOST:-18.219.88.73}"
 REMOTE_USER="${REMOTE_USER:-ec2-user}"
 REMOTE_ROOT="${REMOTE_ROOT:-/home/ec2-user/polymarket-bot-nonessential}"
 LIVE_CLAIM_ENV_TMP="/tmp/nonessential_live_claim.env"
+MAIN_UPSTREAM_ORIGIN="${MAIN_UPSTREAM_ORIGIN:-}"
+LIVE_UPSTREAM_ORIGIN="${LIVE_UPSTREAM_ORIGIN:-}"
+LIVE_UPSTREAM_PATH_PREFIX="${LIVE_UPSTREAM_PATH_PREFIX:-}"
+MAIN_RUN_AUDIT_PUBLIC_BASE="${MAIN_RUN_AUDIT_PUBLIC_BASE:-}"
+LIVE_RUN_AUDIT_PUBLIC_BASE="${LIVE_RUN_AUDIT_PUBLIC_BASE:-}"
 
 if [[ -f "$ROOT/.env" ]]; then
   set -a
@@ -30,7 +35,9 @@ copy_file "$ROOT/tools_live_readonly_worker.mjs"
 copy_file "$ROOT/tools_nonessential_live_claim_worker.mjs"
 copy_file "$ROOT/render_live_run_audit_review.py"
 copy_file "$ROOT/launch_nonessential_workers_remote.sh"
+copy_file "$ROOT/launch_nonessential_worker_remote.sh"
 copy_file "$ROOT/restart_nonessential_workers_remote.sh"
+copy_file "$ROOT/restart_worker_dublin_remote.sh"
 
 cat > "$LIVE_CLAIM_ENV_TMP" <<EOF
 LIVE_CLAIM_ENABLED=${LIVE_CLAIM_ENABLED:-1}
@@ -67,7 +74,14 @@ ssh -i "$KEY_PATH" -o StrictHostKeyChecking=no "${REMOTE_USER}@${REMOTE_HOST}" "
   chmod +x \"${REMOTE_ROOT}/tools_live_readonly_worker.mjs\"
   chmod +x \"${REMOTE_ROOT}/tools_nonessential_live_claim_worker.mjs\"
   chmod +x \"${REMOTE_ROOT}/launch_nonessential_workers_remote.sh\"
+  chmod +x \"${REMOTE_ROOT}/launch_nonessential_worker_remote.sh\"
   chmod +x \"${REMOTE_ROOT}/restart_nonessential_workers_remote.sh\"
+  chmod +x \"${REMOTE_ROOT}/restart_worker_dublin_remote.sh\"
   chmod 600 \"${REMOTE_ROOT}/live_claim.env\" || true
+  export MAIN_UPSTREAM_ORIGIN=\"${MAIN_UPSTREAM_ORIGIN}\"
+  export LIVE_UPSTREAM_ORIGIN=\"${LIVE_UPSTREAM_ORIGIN}\"
+  export LIVE_UPSTREAM_PATH_PREFIX=\"${LIVE_UPSTREAM_PATH_PREFIX}\"
+  export MAIN_RUN_AUDIT_PUBLIC_BASE=\"${MAIN_RUN_AUDIT_PUBLIC_BASE}\"
+  export LIVE_RUN_AUDIT_PUBLIC_BASE=\"${LIVE_RUN_AUDIT_PUBLIC_BASE}\"
   bash \"${REMOTE_ROOT}/launch_nonessential_workers_remote.sh\" \"${REMOTE_ROOT}\"
 '"

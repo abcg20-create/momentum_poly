@@ -11,7 +11,35 @@ if [[ -f "$ROOT/live_claim.env" ]]; then
 fi
 
 LIVE_UPSTREAM_ORIGIN="${LIVE_UPSTREAM_ORIGIN:-http://127.0.0.1:8791}"
+LIVE_UPSTREAM_PATH_PREFIX="${LIVE_UPSTREAM_PATH_PREFIX:-}"
 LIVE_RUN_AUDIT_PUBLIC_BASE="${LIVE_RUN_AUDIT_PUBLIC_BASE:-${LIVE_UPSTREAM_ORIGIN}}"
+
+normalize_path_prefix() {
+  local raw="${1:-}"
+  raw="${raw#/}"
+  raw="${raw%/}"
+  if [[ -z "${raw}" ]]; then
+    printf '%s' ""
+  else
+    printf '/%s' "${raw}"
+  fi
+}
+
+build_health_url() {
+  local origin="$1"
+  local path_prefix="${2:-}"
+  local normalized_prefix=""
+  normalized_prefix="$(normalize_path_prefix "${path_prefix}")"
+  printf '%s%s/api/health?lite=1' "${origin%/}" "${normalized_prefix}"
+}
+
+build_state_url() {
+  local origin="$1"
+  local path_prefix="${2:-}"
+  local normalized_prefix=""
+  normalized_prefix="$(normalize_path_prefix "${path_prefix}")"
+  printf '%s%s/api/state?includeBots=0&lite=1' "${origin%/}" "${normalized_prefix}"
+}
 
 kill_listener_pid() {
   local port="$1"
@@ -26,8 +54,9 @@ kill_listener_pid() {
 kill_listener_pid 9002
 pkill -f 'tools_live_readonly_worker.mjs' || true
 
-if ! curl -fsS --max-time 5 "${LIVE_UPSTREAM_ORIGIN%/}/api/health?lite=1" >/dev/null; then
-  echo "no live upstream available at ${LIVE_UPSTREAM_ORIGIN}; production restart requires direct live connectivity" >&2
+if ! curl -fsS --max-time 5 "$(build_health_url "${LIVE_UPSTREAM_ORIGIN}" "${LIVE_UPSTREAM_PATH_PREFIX}")" >/dev/null \
+  && ! curl -fsS --max-time 5 "$(build_state_url "${LIVE_UPSTREAM_ORIGIN}" "${LIVE_UPSTREAM_PATH_PREFIX}")" >/dev/null; then
+  echo "no live upstream available at $(build_health_url "${LIVE_UPSTREAM_ORIGIN}" "${LIVE_UPSTREAM_PATH_PREFIX}") or $(build_state_url "${LIVE_UPSTREAM_ORIGIN}" "${LIVE_UPSTREAM_PATH_PREFIX}"); production restart requires direct live connectivity" >&2
   exit 1
 fi
 
@@ -39,6 +68,7 @@ nohup env \
   WORKER_SCOPE=live \
   LIVE_ONLY_SOURCE_HOST_PORT=8791 \
   UPSTREAM_ORIGIN="${LIVE_UPSTREAM_ORIGIN}" \
+  UPSTREAM_PATH_PREFIX="${LIVE_UPSTREAM_PATH_PREFIX}" \
   UPSTREAM_ORIGIN_MAP="8791=${LIVE_UPSTREAM_ORIGIN}" \
   CACHE_ROOT="$ROOT/cache_live" \
   PARITY_ENABLED=0 \
