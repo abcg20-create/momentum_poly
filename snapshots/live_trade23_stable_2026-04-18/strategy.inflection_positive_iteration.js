@@ -1,0 +1,1642 @@
+(function () {
+  'use strict';
+
+  const { computeEntryFromBudget } = require('./execution_model_shared.js');
+
+  const PRESET = Object.freeze({
+    name: 'INFLECTION_POSITIVE_ITERATION_V1',
+    strategyId: 'inflection_positive_iteration',
+    sizingProfile: 'default',
+    minEntrySec: 100,
+    entryBreakoutThr: 0.55,
+    crossReentryThr: 0.55,
+    maxEntriesPerSession: 3,
+    bet: 25,
+    fixedEntryShares: 11,
+    stopLossPx: 0.45,
+    stopConfirmTicks: 3,
+    profitProtectLadder: [
+      { triggerPctBet: 12, stopPx: 0.50 },
+      { triggerPctBet: 17, stopPx: 0.55 },
+      { triggerPctBet: 22, stopPx: 0.60 },
+    ],
+    partialStagePctBet: 27,
+    partialArmPctBet: 27,
+    partialTargetPctBet: 27,
+    partialQtyPct: 0.20,
+    partialFixedShares: 5,
+    partialTriggerCapPx: 0.95,
+    profitLockMinPeakPctBet: 0.42,
+    profitLockDrawdownPct: 0.20,
+    profitLockConfirmTicks: 5,
+    kalmanQ: 0.00005,
+    kalmanR: 0.0008,
+    inflectEps: 0.0035,
+    inflectPeakMin: 0.57,
+    inflectNegConfirmTicks: 3,
+    inflectNegSlopeMax: -0.0003,
+    inflectMinDrop: 0.012,
+    inflectPromLookback: 22,
+    inflectPromMin: 0.018,
+    inflectMinSpacingTicks: 10,
+    exitNegSlopeConfirmTicks: 5,
+    rawCrossCooldownSec: 7,
+    resampleMs: 50,
+    checkpointDelayMs: 0,
+    slopeLookbackMs: 2500,
+    minSlopeSamples: 4,
+    emaFastMs: 250,
+    emaSlowMs: 1200,
+    rollingLowLookbackMs: 2500,
+    recentHighLookbackMs: 500,
+    recoveryMinPx: 0.06,
+    breakoutEpsilonPx: 0.01,
+    emaSlopeMinPx: 0.002,
+    entryConfirmTimeoutMs: 1500,
+    sessionSec: 300,
+    entryCutoffSec: 297.5,
+    acceptSyntheticQuoteMaxAgeMs: 2000,
+    finalTpTriggerPx: 0.97,
+    finalTpPx: 0.98,
+    tpCancelBelowPx: 0.95,
+    emergencyTpPx: 0.99,
+    immediateDualTpOnFill: false,
+  });
+
+  const GOLD_BETS_V1_WINDOWS = Object.freeze({
+    1: Object.freeze([
+      Object.freeze({ startSec: 180, endSec: 210, betUsd: 100 }),
+      Object.freeze({ startSec: 210, endSec: 240, betUsd: 100 }),
+      Object.freeze({ startSec: 240, endSec: 270, betUsd: 100 }),
+      Object.freeze({ startSec: 270, endSec: 297, betUsd: 100 }),
+    ]),
+    2: Object.freeze([
+      Object.freeze({ startSec: 210, endSec: 240, betUsd: 100 }),
+      Object.freeze({ startSec: 240, endSec: 270, betUsd: 100 }),
+      Object.freeze({ startSec: 270, endSec: 297, betUsd: 100 }),
+    ]),
+    3: Object.freeze([
+      Object.freeze({ startSec: 210, endSec: 240, betUsd: 100 }),
+      Object.freeze({ startSec: 240, endSec: 270, betUsd: 100 }),
+      Object.freeze({ startSec: 270, endSec: 297, betUsd: 100 }),
+    ]),
+  });
+
+  const GOLD_BETS_V2_WINDOWS = Object.freeze({
+    1: Object.freeze([
+      Object.freeze({ startSec: 90, endSec: 120, betUsd: 100 }),
+      Object.freeze({ startSec: 120, endSec: 150, betUsd: 100 }),
+      Object.freeze({ startSec: 150, endSec: 180, betUsd: 100 }),
+    ]),
+    2: Object.freeze([
+      Object.freeze({ startSec: 210, endSec: 240, betUsd: 100 }),
+      Object.freeze({ startSec: 240, endSec: 270, betUsd: 100 }),
+      Object.freeze({ startSec: 270, endSec: 297, betUsd: 100 }),
+    ]),
+    3: Object.freeze([
+      Object.freeze({ startSec: 210, endSec: 240, betUsd: 100 }),
+      Object.freeze({ startSec: 240, endSec: 270, betUsd: 100 }),
+      Object.freeze({ startSec: 270, endSec: 297, betUsd: 100 }),
+    ]),
+  });
+
+  const GOLD_BETS_V3_WINDOWS = Object.freeze({
+    1: Object.freeze([
+      Object.freeze({ startSec: 90, endSec: 180, betUsd: 100 }),
+    ]),
+    2: Object.freeze([
+      Object.freeze({ startSec: 295, endSec: 300, betUsd: 100 }),
+    ]),
+    3: Object.freeze([
+      Object.freeze({ startSec: 295, endSec: 300, betUsd: 100 }),
+    ]),
+  });
+
+  function toNum(v, d) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : d;
+  }
+
+  function clamp01(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return NaN;
+    return Math.max(0, Math.min(1, n));
+  }
+
+  function finiteOrNaN(v) {
+    if (v == null) return NaN;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : NaN;
+  }
+
+  function isValidQuotePx(v) {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 && n <= 1;
+  }
+
+  function normalizeSide(v) {
+    return String(v || '').toUpperCase() === 'DOWN' ? 'DOWN' : 'UP';
+  }
+
+  function sidePx(side, upBid, downBid) {
+    return normalizeSide(side) === 'DOWN' ? Number(downBid) : Number(upBid);
+  }
+
+  function computePartialLimitPx(entryPx, cfg) {
+    const px = clamp01(entryPx);
+    if (!(Number.isFinite(px) && px > 0)) return NaN;
+    const rawPartialPx = clamp01(px * (1 + Number(cfg.partialTargetPctBet) / 100));
+    const finalTpPx = clamp01(Number(cfg.finalTpPx));
+    if (Number.isFinite(finalTpPx) && finalTpPx > 0) {
+      return Math.min(rawPartialPx, finalTpPx);
+    }
+    return rawPartialPx;
+  }
+
+  function crossed(prevDiff, currDiff) {
+    if (!Number.isFinite(prevDiff) || !Number.isFinite(currDiff)) return false;
+    if (prevDiff === 0 || currDiff === 0) return prevDiff !== currDiff;
+    return (prevDiff > 0 && currDiff < 0) || (prevDiff < 0 && currDiff > 0);
+  }
+
+  function kalmanUpdate(state, measurement, q, r) {
+    const z = Number(measurement);
+    if (!Number.isFinite(z)) return state;
+    if (!state || !Number.isFinite(Number(state.x)) || !Number.isFinite(Number(state.p))) {
+      return { x: z, p: 1 };
+    }
+    const pPred = Number(state.p) + q;
+    const k = pPred / (pPred + r);
+    const x = Number(state.x) + k * (z - Number(state.x));
+    return { x: x, p: (1 - k) * pPred };
+  }
+
+  function trailingMin(series, start, endInclusive) {
+    let m = Infinity;
+    for (let i = start; i <= endInclusive; i += 1) {
+      const v = Number(series[i]);
+      if (!Number.isFinite(v)) continue;
+      if (v < m) m = v;
+    }
+    return Number.isFinite(m) ? m : NaN;
+  }
+
+  function detectLiveSafeInflectionAt(series, i, cfg, sideState) {
+    if (!Array.isArray(series) || i < 1 || !sideState) return null;
+    const prev = Number(series[i - 1]);
+    const cur = Number(series[i]);
+    if (!Number.isFinite(prev) || !Number.isFinite(cur)) return null;
+
+    if (!Number.isFinite(sideState.peakVal)) {
+      sideState.peakVal = cur;
+      sideState.peakIdx = i;
+      sideState.negStreak = 0;
+      return null;
+    }
+
+    const slope = cur - prev;
+    if (cur >= sideState.peakVal) {
+      sideState.peakVal = cur;
+      sideState.peakIdx = i;
+      sideState.negStreak = 0;
+      return null;
+    }
+
+    if (slope <= cfg.inflectNegSlopeMax) sideState.negStreak += 1;
+    else sideState.negStreak = 0;
+
+    if (sideState.negStreak < cfg.inflectNegConfirmTicks) return null;
+    if (!Number.isFinite(sideState.peakVal) || sideState.peakVal < cfg.inflectPeakMin) return null;
+
+    const drop = sideState.peakVal - cur;
+    if (!Number.isFinite(drop) || drop < cfg.inflectMinDrop) return null;
+
+    const lookback = Math.max(3, Math.floor(Number(cfg.inflectPromLookback) || 22));
+    const baselineStart = Math.max(0, sideState.peakIdx - lookback + 1);
+    const baseline = trailingMin(series, baselineStart, sideState.peakIdx);
+    if (!Number.isFinite(baseline)) return null;
+    const prominence = sideState.peakVal - baseline;
+    if (!Number.isFinite(prominence) || prominence < cfg.inflectPromMin) return null;
+
+    if (
+      Number.isFinite(sideState.lastEmitPeakIdx) &&
+      sideState.peakIdx - sideState.lastEmitPeakIdx < cfg.inflectMinSpacingTicks
+    ) {
+      return null;
+    }
+
+    sideState.lastEmitPeakIdx = sideState.peakIdx;
+    return {
+      peakIdx: sideState.peakIdx,
+      peakVal: sideState.peakVal,
+      detectIdx: i,
+      detectVal: cur,
+      drop: drop,
+      prominence: prominence,
+    };
+  }
+
+  function cloneSimple(v) {
+    if (v == null) return null;
+    try {
+      return JSON.parse(JSON.stringify(v));
+    } catch {
+      return null;
+    }
+  }
+
+  function resolveCheckpoint(observed, startIdx, targetMs, cutoffMs) {
+    if (!Array.isArray(observed) || !observed.length) return null;
+    let best = null;
+    let fallback = null;
+    const maxLocalDist = Math.max(0, Number(cutoffMs) - Number(targetMs));
+    let nextStartIdx = Math.max(0, Math.floor(Number(startIdx) || 0));
+    for (let i = nextStartIdx; i < observed.length; i += 1) {
+      const row = observed[i];
+      const tMs = Number(row && row.tMs);
+      if (!Number.isFinite(tMs)) continue;
+      if (tMs > cutoffMs) break;
+      nextStartIdx = Math.max(0, i - 1);
+      fallback = {
+        tMs,
+        dist: Math.abs(tMs - targetMs),
+        upBid: Number(row.upBid),
+        downBid: Number(row.downBid),
+      };
+      const dist = Math.abs(tMs - targetMs);
+      if (dist > maxLocalDist + 1e-9) continue;
+      if (
+        !best ||
+        dist < best.dist - 1e-9 ||
+        (Math.abs(dist - best.dist) <= 1e-9 && tMs < best.tMs)
+      ) {
+        best = {
+          tMs,
+          dist,
+          upBid: Number(row.upBid),
+          downBid: Number(row.downBid),
+        };
+      }
+    }
+    return {
+      point: best || fallback,
+      nextStartIdx,
+    };
+  }
+
+  function buildResampleWindow(resampled, lookbackMs, minSamples, side) {
+    if (!Array.isArray(resampled) || !resampled.length) return null;
+    const normalizedSide = normalizeSide(side);
+    const latest = resampled[resampled.length - 1];
+    const startMs = Number(latest.checkpointMs) - Number(lookbackMs);
+    const points = [];
+    for (let i = 0; i < resampled.length; i += 1) {
+      const row = resampled[i];
+      if (Number(row.checkpointMs) < startMs - 1e-9) continue;
+      points.push({
+        checkpointMs: Number(row.checkpointMs),
+        sourceTsMs: Number(row.sourceTsMs),
+        px: normalizedSide === 'DOWN' ? Number(row.downBid) : Number(row.upBid),
+      });
+    }
+    if (points.length < minSamples) return null;
+    let prev = Number(points[0].px);
+    if (!Number.isFinite(prev)) return null;
+    for (let i = 1; i < points.length; i += 1) {
+      const cur = Number(points[i].px);
+      if (!Number.isFinite(cur)) return null;
+      if (!(cur > prev)) return null;
+      prev = cur;
+    }
+    return {
+      points,
+      gain: Number(points[points.length - 1].px) - Number(points[0].px),
+      latestCheckpointMs: Number(latest.checkpointMs),
+    };
+  }
+
+  function latestPointsWithin(resampled, lookbackMs) {
+    if (!Array.isArray(resampled) || !resampled.length) return [];
+    const latest = resampled[resampled.length - 1];
+    const startMs = Number(latest.checkpointMs) - Number(lookbackMs);
+    return resampled.filter((row) => Number(row.checkpointMs) >= startMs - 1e-9);
+  }
+
+  function sidePoints(rows, side) {
+    const normalizedSide = normalizeSide(side);
+    return rows.map((row) => ({
+      checkpointMs: Number(row.checkpointMs),
+      sourceTsMs: Number(row.sourceTsMs),
+      px: normalizedSide === 'DOWN' ? Number(row.downBid) : Number(row.upBid),
+    })).filter((row) => Number.isFinite(row.px));
+  }
+
+  function collapseAdjacentPlateauPoints(points) {
+    if (!Array.isArray(points) || !points.length) return [];
+    const collapsed = [];
+    for (let i = 0; i < points.length; i += 1) {
+      const point = points[i];
+      const px = Number(point && point.px);
+      if (!Number.isFinite(px)) continue;
+      const prev = collapsed.length ? collapsed[collapsed.length - 1] : null;
+      if (prev && Math.abs(Number(prev.px) - px) <= 1e-9) {
+        collapsed[collapsed.length - 1] = {
+          checkpointMs: Number(point.checkpointMs),
+          sourceTsMs: Number(point.sourceTsMs),
+          px,
+        };
+        continue;
+      }
+      collapsed.push({
+        checkpointMs: Number(point.checkpointMs),
+        sourceTsMs: Number(point.sourceTsMs),
+        px,
+      });
+    }
+    return collapsed;
+  }
+
+  function computeEmaSeries(points, periodSamples) {
+    if (!Array.isArray(points) || !points.length) return [];
+    const n = Math.max(1, Math.floor(Number(periodSamples) || 1));
+    const alpha = 2 / (n + 1);
+    const out = [];
+    let ema = Number(points[0].px);
+    out.push(ema);
+    for (let i = 1; i < points.length; i += 1) {
+      const px = Number(points[i].px);
+      ema = (alpha * px) + ((1 - alpha) * ema);
+      out.push(ema);
+    }
+    return out;
+  }
+
+  function buildIterationSignal(resampled, cfg, side) {
+    const normalizedSide = normalizeSide(side);
+    const lookbackMs = Math.max(
+      Number(cfg.rollingLowLookbackMs),
+      Number(cfg.recentHighLookbackMs),
+      Number(cfg.emaSlowMs) * 3
+    );
+    const rows = latestPointsWithin(resampled, lookbackMs);
+    const rawPoints = sidePoints(rows, normalizedSide);
+    if (rawPoints.length < Math.max(4, Math.ceil(Number(cfg.emaSlowMs) / Number(cfg.resampleMs)))) return null;
+    const plateauCollapsedPoints = collapseAdjacentPlateauPoints(rawPoints);
+    const points = plateauCollapsedPoints.length >= Math.max(3, Number(cfg.minSlopeSamples) || 0)
+      ? plateauCollapsedPoints
+      : rawPoints;
+
+    const latest = points[points.length - 1];
+    const latestPx = Number(latest.px);
+    if (!(Number.isFinite(latestPx) && latestPx >= Number(cfg.entryBreakoutThr))) return null;
+
+    const fastSamplesTarget = Math.max(2, Math.round(Number(cfg.emaFastMs) / Number(cfg.resampleMs)));
+    const fastSamples = Math.max(2, Math.min(points.length - 1, fastSamplesTarget));
+    const slowSamplesTarget = Math.max(fastSamples + 1, Math.round(Number(cfg.emaSlowMs) / Number(cfg.resampleMs)));
+    const slowSamples = Math.max(fastSamples + 1, Math.min(points.length, slowSamplesTarget));
+    if (points.length < slowSamples) return null;
+    const fastSeries = computeEmaSeries(points, fastSamples);
+    const slowSeries = computeEmaSeries(points, slowSamples);
+    if (fastSeries.length < 2 || slowSeries.length < 2) return null;
+
+    const emaFast = Number(fastSeries[fastSeries.length - 1]);
+    const emaSlow = Number(slowSeries[slowSeries.length - 1]);
+    const emaFastPrev = Number(fastSeries[fastSeries.length - 2]);
+    const emaSlope = emaFast - emaFastPrev;
+    if (!(Number.isFinite(emaFast) && Number.isFinite(emaSlow) && Number.isFinite(emaSlope))) return null;
+    if (!(emaFast > emaSlow)) return null;
+    if (!(emaSlope >= Number(cfg.emaSlopeMinPx))) return null;
+
+    const rollingLowStartMs = Number(latest.checkpointMs) - Number(cfg.rollingLowLookbackMs);
+    const recentHighStartMs = Number(latest.checkpointMs) - Number(cfg.recentHighLookbackMs);
+    const rollingLowPoints = points.filter((point) => Number(point.checkpointMs) >= rollingLowStartMs - 1e-9);
+    const recentHighPoints = points.filter((point) => Number(point.checkpointMs) >= recentHighStartMs - 1e-9);
+    if (!rollingLowPoints.length || !recentHighPoints.length) return null;
+
+    const rollingLow = Math.min(...rollingLowPoints.map((point) => Number(point.px)));
+    const recentHigh = Math.max(...recentHighPoints.map((point) => Number(point.px)));
+    if (!(latestPx >= (rollingLow + Number(cfg.recoveryMinPx)))) return null;
+    if (!(latestPx >= (recentHigh - Number(cfg.breakoutEpsilonPx)))) return null;
+
+    return {
+      side: normalizedSide,
+      px: latestPx,
+      latestCheckpointMs: Number(latest.checkpointMs),
+      emaFast,
+      emaSlow,
+      emaSlope,
+      rollingLow,
+      recentHigh,
+      points,
+    };
+  }
+
+  const TradeStrategy = {};
+  TradeStrategy.VERSION = PRESET.name;
+  TradeStrategy.STRATEGY_ID = PRESET.strategyId;
+  TradeStrategy.EXECUTION_MODEL = 'strategy_runtime';
+
+  TradeStrategy.makeStrategy = function makeStrategy(params) {
+    const presetLadder = Array.isArray(PRESET.profitProtectLadder)
+      ? PRESET.profitProtectLadder.map((x) => ({
+          triggerPctBet: Number(x.triggerPctBet),
+          stopPx: Number(x.stopPx),
+        }))
+      : [];
+
+    const cfg = {
+      ...PRESET,
+      sizingProfile: String(params && params.sizingProfile || PRESET.sizingProfile).trim() || PRESET.sizingProfile,
+      minEntrySec: PRESET.minEntrySec,
+      entryBreakoutThr: PRESET.entryBreakoutThr,
+      crossReentryThr: PRESET.crossReentryThr,
+      maxEntriesPerSession: Math.max(1, Math.floor(toNum(params && params.maxEntriesPerSession, PRESET.maxEntriesPerSession))),
+      bet: Math.max(1, toNum(params && params.bet, PRESET.bet)),
+      fixedEntryShares: Math.max(0, toNum(params && params.fixedEntryShares, PRESET.fixedEntryShares)),
+      stopLossPx: clamp01(toNum(params && params.stopLossPx, toNum(params && params.stop, PRESET.stopLossPx))),
+      stopConfirmTicks: Math.max(1, Math.floor(toNum(params && params.stopConfirmTicks, PRESET.stopConfirmTicks))),
+      profitProtectLadder: presetLadder,
+      partialStagePctBet: Math.max(0, toNum(params && params.partialStagePctBet, PRESET.partialStagePctBet)),
+      partialArmPctBet: Math.max(0, toNum(params && params.partialArmPctBet, PRESET.partialArmPctBet)),
+      partialTargetPctBet: Math.max(0, toNum(params && params.partialTargetPctBet, PRESET.partialTargetPctBet)),
+      partialQtyPct: Math.max(0, Math.min(1, toNum(params && params.partialQtyPct, PRESET.partialQtyPct))),
+      partialFixedShares: Math.max(0, toNum(params && params.partialFixedShares, PRESET.partialFixedShares)),
+      partialTriggerCapPx: clamp01(toNum(params && params.partialTriggerCapPx, PRESET.partialTriggerCapPx)),
+      finalTpTriggerPx: clamp01(toNum(params && params.finalTpTriggerPx, PRESET.finalTpTriggerPx)),
+      finalTpPx: clamp01(toNum(params && params.finalTpPx, PRESET.finalTpPx)),
+      tpCancelBelowPx: clamp01(toNum(params && params.tpCancelBelowPx, PRESET.tpCancelBelowPx)),
+      emergencyTpPx: clamp01(toNum(params && params.emergencyTpPx, PRESET.emergencyTpPx)),
+      profitLockMinPeakPctBet: Math.max(0, toNum(params && params.profitLockMinPeakPctBet, PRESET.profitLockMinPeakPctBet)),
+      profitLockDrawdownPct: Math.max(0, Math.min(0.95, toNum(params && params.profitLockDrawdownPct, PRESET.profitLockDrawdownPct))),
+      profitLockConfirmTicks: Math.max(1, Math.floor(toNum(params && params.profitLockConfirmTicks, PRESET.profitLockConfirmTicks))),
+      kalmanQ: Math.max(0, toNum(params && params.kalmanQ, PRESET.kalmanQ)),
+      kalmanR: Math.max(1e-12, toNum(params && params.kalmanR, PRESET.kalmanR)),
+      inflectEps: Math.max(0, toNum(params && params.inflectEps, PRESET.inflectEps)),
+      inflectPeakMin: clamp01(toNum(params && params.inflectPeakMin, PRESET.inflectPeakMin)),
+      inflectNegConfirmTicks: Math.max(1, Math.floor(toNum(params && params.inflectNegConfirmTicks, PRESET.inflectNegConfirmTicks))),
+      inflectNegSlopeMax: toNum(params && params.inflectNegSlopeMax, PRESET.inflectNegSlopeMax),
+      inflectMinDrop: Math.max(0, toNum(params && params.inflectMinDrop, PRESET.inflectMinDrop)),
+      inflectPromLookback: Math.max(3, Math.floor(toNum(params && params.inflectPromLookback, PRESET.inflectPromLookback))),
+      inflectPromMin: Math.max(0, toNum(params && params.inflectPromMin, PRESET.inflectPromMin)),
+      inflectMinSpacingTicks: Math.max(0, Math.floor(toNum(params && params.inflectMinSpacingTicks, PRESET.inflectMinSpacingTicks))),
+      exitNegSlopeConfirmTicks: Math.max(1, Math.floor(toNum(params && params.exitNegSlopeConfirmTicks, PRESET.exitNegSlopeConfirmTicks))),
+      rawCrossCooldownSec: Math.max(0, toNum(params && params.rawCrossCooldownSec, PRESET.rawCrossCooldownSec)),
+      resampleMs: Math.max(25, Math.floor(toNum(params && params.resampleMs, PRESET.resampleMs))),
+      checkpointDelayMs: Math.max(0, Math.floor(toNum(params && params.checkpointDelayMs, PRESET.checkpointDelayMs))),
+      slopeLookbackMs: Math.max(250, Math.floor(toNum(params && params.slopeLookbackMs, PRESET.slopeLookbackMs))),
+      minSlopeSamples: Math.max(2, Math.floor(toNum(params && params.minSlopeSamples, PRESET.minSlopeSamples))),
+      emaFastMs: Math.max(50, Math.floor(toNum(params && params.emaFastMs, PRESET.emaFastMs))),
+      emaSlowMs: Math.max(100, Math.floor(toNum(params && params.emaSlowMs, PRESET.emaSlowMs))),
+      rollingLowLookbackMs: Math.max(250, Math.floor(toNum(params && params.rollingLowLookbackMs, PRESET.rollingLowLookbackMs))),
+      recentHighLookbackMs: Math.max(100, Math.floor(toNum(params && params.recentHighLookbackMs, PRESET.recentHighLookbackMs))),
+      recoveryMinPx: Math.max(0, toNum(params && params.recoveryMinPx, PRESET.recoveryMinPx)),
+      breakoutEpsilonPx: Math.max(0, toNum(params && params.breakoutEpsilonPx, PRESET.breakoutEpsilonPx)),
+      emaSlopeMinPx: Math.max(0, toNum(params && params.emaSlopeMinPx, PRESET.emaSlopeMinPx)),
+      entryConfirmTimeoutMs: Math.max(250, Math.floor(toNum(params && params.entryConfirmTimeoutMs, PRESET.entryConfirmTimeoutMs))),
+      sessionSec: Math.max(1, toNum(params && params.sessionSec, PRESET.sessionSec)),
+      entryCutoffSec: Math.max(0, toNum(params && params.entryCutoffSec, PRESET.entryCutoffSec)),
+      acceptSyntheticQuoteMaxAgeMs: Math.max(250, Math.floor(toNum(params && params.acceptSyntheticQuoteMaxAgeMs, PRESET.acceptSyntheticQuoteMaxAgeMs))),
+    };
+
+    const seed = params && params.initialState != null && typeof params.initialState === 'object'
+      ? cloneSimple(params.initialState)
+      : null;
+    function seedNum(key, fallback) {
+      return seed && Number.isFinite(Number(seed[key])) ? Number(seed[key]) : fallback;
+    }
+    function seedInt(key, fallback) {
+      return Math.floor(seedNum(key, fallback));
+    }
+
+    let tickIdx = seedInt('tickIdx', -1);
+    let lastElapsedSec = seedNum('lastElapsedSec', 0);
+    let lastUpBid = isValidQuotePx(seed && seed.lastUpBid) ? Number(seed.lastUpBid) : NaN;
+    let lastDownBid = isValidQuotePx(seed && seed.lastDownBid) ? Number(seed.lastDownBid) : NaN;
+    let lastRawDiff = seedNum('lastRawDiff', NaN);
+    let crossCooldownUntilMs = seedNum('crossCooldownUntilMs', -Infinity);
+    let nextCheckpointMs = seedNum('nextCheckpointMs', cfg.resampleMs);
+    let lastResampleSourceTsMs = seedNum('lastResampleSourceTsMs', NaN);
+    let observedSearchStartIdx = seedInt('observedSearchStartIdx', 0);
+    const observed = Array.isArray(seed && seed.observed)
+      ? cloneSimple(seed.observed).filter((row) => isValidQuotePx(row && row.upBid) && isValidQuotePx(row && row.downBid))
+      : [];
+    const resampled = Array.isArray(seed && seed.resampled)
+      ? cloneSimple(seed.resampled).filter((row) => isValidQuotePx(row && row.upBid) && isValidQuotePx(row && row.downBid))
+      : [];
+
+    let upKState = seed && seed.upKState && typeof seed.upKState === 'object' ? cloneSimple(seed.upKState) : null;
+    let dnKState = seed && seed.dnKState && typeof seed.dnKState === 'object' ? cloneSimple(seed.dnKState) : null;
+    const upKal = Array.isArray(seed && seed.upKal) ? cloneSimple(seed.upKal) : [];
+    const dnKal = Array.isArray(seed && seed.dnKal) ? cloneSimple(seed.dnKal) : [];
+    const inflectStateBySide = seed && seed.inflectStateBySide && typeof seed.inflectStateBySide === 'object'
+      ? cloneSimple(seed.inflectStateBySide)
+      : {
+          UP: { peakVal: NaN, peakIdx: -1, negStreak: 0, lastEmitPeakIdx: -1 },
+          DOWN: { peakVal: NaN, peakIdx: -1, negStreak: 0, lastEmitPeakIdx: -1 },
+        };
+
+    let entriesThisSession = Math.max(0, seedInt('entriesThisSession', 0));
+    let singlePartialTakenThisSession = !!(seed && seed.singlePartialTakenThisSession);
+    let pureObservedTicks = Math.max(0, seedInt('pureObservedTicks', 0));
+    let nonPureSkippedTicks = Math.max(0, seedInt('nonPureSkippedTicks', 0));
+    let acceptedSyntheticTicks = Math.max(0, seedInt('acceptedSyntheticTicks', 0));
+    let finalSyntheticTicks = Math.max(0, seedInt('finalSyntheticTicks', 0));
+    let duplicateQuoteSeqSkippedTicks = Math.max(0, seedInt('duplicateQuoteSeqSkippedTicks', 0));
+    let lastAcceptedQuoteSeq = Number.isFinite(seedNum('lastAcceptedQuoteSeq', NaN)) ? seedNum('lastAcceptedQuoteSeq', NaN) : null;
+    let lastAcceptedUpBid = isValidQuotePx(seed && seed.lastAcceptedUpBid)
+      ? Number(seed.lastAcceptedUpBid)
+      : isValidQuotePx(observed.length ? observed[observed.length - 1].upBid : NaN)
+        ? Number(observed[observed.length - 1].upBid)
+        : NaN;
+    let lastAcceptedDownBid = isValidQuotePx(seed && seed.lastAcceptedDownBid)
+      ? Number(seed.lastAcceptedDownBid)
+      : isValidQuotePx(observed.length ? observed[observed.length - 1].downBid : NaN)
+        ? Number(observed[observed.length - 1].downBid)
+        : NaN;
+    let lastQuoteMeta = seed && seed.lastQuoteMeta && typeof seed.lastQuoteMeta === 'object'
+      ? cloneSimple(seed.lastQuoteMeta)
+      : null;
+    const rearmBlocked = seed && seed.rearmBlocked && typeof seed.rearmBlocked === 'object'
+      ? {
+          UP: !!seed.rearmBlocked.UP,
+          DOWN: !!seed.rearmBlocked.DOWN,
+        }
+      : { UP: false, DOWN: false };
+    let activeTrade = seed && seed.activeTrade && typeof seed.activeTrade === 'object'
+      ? cloneSimple(seed.activeTrade)
+      : null;
+    if (activeTrade && activeTrade.partial && typeof activeTrade.partial === 'object') {
+      activeTrade.partial.stageTriggered = !!activeTrade.partial.stageTriggered;
+      activeTrade.partial.armTriggered = !!activeTrade.partial.armTriggered;
+      activeTrade.partial.orderPlaced = !!activeTrade.partial.orderPlaced;
+      activeTrade.partial.filled = !!activeTrade.partial.filled;
+      activeTrade.partial.completed = !!activeTrade.partial.completed;
+      activeTrade.partial.requestedAtMs = Number.isFinite(Number(activeTrade.partial.requestedAtMs))
+        ? Number(activeTrade.partial.requestedAtMs)
+        : null;
+    }
+    if (activeTrade) {
+      activeTrade.profitLockBreachStreak = Math.max(0, Math.floor(Number(activeTrade.profitLockBreachStreak || 0)));
+    }
+    if (activeTrade && Number.isFinite(Number(activeTrade.tradeNum))) {
+      entriesThisSession = Math.max(entriesThisSession, Math.floor(Number(activeTrade.tradeNum)));
+    }
+
+    function betUsdForTradeNum(_tradeNum) {
+      const tradeNum = Math.max(1, Math.floor(Number(_tradeNum) || 1));
+      const profile = String(cfg.sizingProfile || '').trim().toLowerCase();
+      let windows = null;
+      if (profile === 'gold_bets_v1' || profile === 'gold bets v1') {
+        windows = GOLD_BETS_V1_WINDOWS[tradeNum] || [];
+      } else if (profile === 'gold_bets_v2' || profile === 'gold bets v2') {
+        windows = GOLD_BETS_V2_WINDOWS[tradeNum] || [];
+      } else if (profile === 'gold_bets_v3' || profile === 'gold bets v3') {
+        windows = GOLD_BETS_V3_WINDOWS[tradeNum] || [];
+      }
+      if (Array.isArray(windows) && windows.length) {
+        for (let i = 0; i < windows.length; i += 1) {
+          const w = windows[i];
+          if (lastElapsedSec >= Number(w.startSec) && lastElapsedSec < Number(w.endSec)) {
+            return Math.max(cfg.bet, Number(w.betUsd));
+          }
+        }
+      }
+      return cfg.bet;
+    }
+
+    const observedRetentionMs = Math.max(
+      cfg.resampleMs * 4,
+      cfg.checkpointDelayMs + cfg.resampleMs * 2
+    );
+    const snapshotResampleLookbackMs = Math.max(
+      Number(cfg.slopeLookbackMs),
+      Number(cfg.rollingLowLookbackMs),
+      Number(cfg.recentHighLookbackMs),
+      Number(cfg.emaSlowMs) * 3
+    ) + (cfg.resampleMs * 4);
+    const snapshotObservedLookbackMs = Math.max(
+      1000,
+      snapshotResampleLookbackMs,
+      Number(cfg.entryConfirmTimeoutMs)
+    );
+    const snapshotKalTail = Math.max(64, Math.ceil(snapshotResampleLookbackMs / Math.max(1, cfg.resampleMs)));
+
+    function trimObserved(nowMs) {
+      if (!Array.isArray(observed) || observed.length <= 2) return;
+      const cutoffMs = Math.max(0, Number(nowMs) - Number(snapshotObservedLookbackMs) - Number(observedRetentionMs));
+      let trimCount = 0;
+      while (trimCount < (observed.length - 2)) {
+        const tMs = Number(observed[trimCount] && observed[trimCount].tMs);
+        if (!Number.isFinite(tMs) || tMs >= cutoffMs) break;
+        trimCount += 1;
+      }
+      if (trimCount > 0) {
+        observed.splice(0, trimCount);
+        observedSearchStartIdx = Math.max(0, observedSearchStartIdx - trimCount);
+      }
+    }
+
+    function maybeFinalizeCheckpoints(nowMs) {
+      while ((nextCheckpointMs + cfg.checkpointDelayMs) <= (nowMs + 1e-9)) {
+        const resolved = resolveCheckpoint(
+          observed,
+          observedSearchStartIdx,
+          nextCheckpointMs,
+          nextCheckpointMs + cfg.checkpointDelayMs
+        );
+        if (resolved && Number.isFinite(Number(resolved.nextStartIdx))) {
+          observedSearchStartIdx = Math.max(0, Math.floor(Number(resolved.nextStartIdx)));
+        }
+        const point = resolved && resolved.point ? resolved.point : null;
+        if (
+          point &&
+          Number(point.tMs) !== Number(lastResampleSourceTsMs) &&
+          isValidQuotePx(point.upBid) &&
+          isValidQuotePx(point.downBid)
+        ) {
+          resampled.push({
+            checkpointMs: nextCheckpointMs,
+            sourceTsMs: Number(point.tMs),
+            upBid: Number(point.upBid),
+            downBid: Number(point.downBid),
+          });
+          lastResampleSourceTsMs = Number(point.tMs);
+        }
+        nextCheckpointMs += cfg.resampleMs;
+      }
+      trimObserved(nowMs);
+    }
+
+    function computeCurrentStopPx(trade) {
+      let stopPx = cfg.stopLossPx;
+      const peakGross = Number(trade && trade.peakGrossPnlUsd);
+      const betUsd = Number(trade && trade.betUsd);
+      if (!(Number.isFinite(peakGross) && Number.isFinite(betUsd) && betUsd > 0)) return stopPx;
+      for (let i = 0; i < cfg.profitProtectLadder.length; i += 1) {
+        const rung = cfg.profitProtectLadder[i];
+        const triggerUsd = betUsd * Number(rung.triggerPctBet) / 100;
+        if (peakGross >= triggerUsd) {
+          stopPx = Math.max(stopPx, Number(rung.stopPx));
+        }
+      }
+      return stopPx;
+    }
+
+    function partialSharesForEntry(shares) {
+      const totalShares = Number(shares);
+      const fixedShares = Number(cfg.partialFixedShares);
+      if (!(Number.isFinite(totalShares) && totalShares > 0)) return 0;
+      if (Number.isFinite(fixedShares) && fixedShares > 0) {
+        return Math.max(0, Math.min(totalShares, fixedShares));
+      }
+      return Math.max(0, totalShares * cfg.partialQtyPct);
+    }
+
+    function currentGrossPnlUsd(trade, markPx) {
+      if (!trade) return NaN;
+      const realizedGross = Number(trade.realizedGrossPnlUsd || 0);
+      const curShares = Number(trade.currentShares);
+      const entryPx = Number(trade.entryPx);
+      if (!(Number.isFinite(markPx) && Number.isFinite(curShares) && Number.isFinite(entryPx))) {
+        return realizedGross;
+      }
+      return realizedGross + ((markPx - entryPx) * curShares);
+    }
+
+    function buildPendingExitSnapshot() {
+      if (!activeTrade) return null;
+      if (activeTrade.exitPending) {
+        return {
+          side: activeTrade.side,
+          type: activeTrade.exitPending.type,
+          exitPx: activeTrade.exitPending.exitPx,
+          shares: activeTrade.exitPending.shares,
+          qtyPct: activeTrade.exitPending.qtyPct,
+          orderType: activeTrade.exitPending.orderType,
+          feeMode: activeTrade.exitPending.feeMode || null,
+          exitReason: activeTrade.exitPending.stopReason || null,
+          atSec: lastElapsedSec,
+        };
+      }
+      const partial = activeTrade.partial;
+      if (
+        partial &&
+        partial.orderPlaced &&
+        !singlePartialTakenThisSession &&
+        !partial.filled &&
+        Number.isFinite(Number(partial.limitPx)) &&
+        Number.isFinite(Number(partial.shares)) &&
+        Number(partial.shares) > 0
+      ) {
+        return {
+          side: activeTrade.side,
+          type: 'PARTIAL_TP_27',
+          exitPx: Number(partial.limitPx),
+          shares: Number(partial.shares),
+          orderType: 'LIMIT',
+          feeMode: 'none',
+          exitReason: 'PARTIAL_STAGE12_ARM27_OR_095_TARGET27',
+          atSec: lastElapsedSec,
+        };
+      }
+      return null;
+    }
+
+    function armTradeEntry(side, entryPx, sideKal, nowMs, extra) {
+      if (!(entriesThisSession < cfg.maxEntriesPerSession)) return null;
+      const px = clamp01(entryPx);
+      if (!(Number.isFinite(px) && px > 0)) return null;
+      const fixedEntryShares = Number(cfg.fixedEntryShares);
+      const useFixedEntryShares = Number.isFinite(fixedEntryShares) && fixedEntryShares > 0;
+      const betUsdPlanned = betUsdForTradeNum(entriesThisSession + 1);
+      const entryFill = useFixedEntryShares
+        ? null
+        : computeEntryFromBudget(betUsdPlanned, px, { feeMode: 'taker', allowZeroOrOne: false });
+      const shares = useFixedEntryShares
+        ? fixedEntryShares
+        : Number(entryFill && entryFill.shares || 0);
+      const betUsd = useFixedEntryShares ? (shares * px) : betUsdPlanned;
+      if (!(Number.isFinite(shares) && shares > 0)) return null;
+      entriesThisSession += 1;
+      activeTrade = {
+        tradeNum: entriesThisSession,
+        status: 'enter_pending',
+        intentTsMs: Number(nowMs),
+        intentEntryPx: px,
+        side: normalizeSide(side),
+        betUsd: betUsd,
+        entryPx: px,
+        entryTsMs: Number(nowMs),
+        entrySec: lastElapsedSec,
+        originalShares: shares,
+        currentShares: shares,
+        realizedGrossPnlUsd: 0,
+        peakGrossPnlUsd: 0,
+        lastSideKal: Number.isFinite(Number(sideKal)) ? Number(sideKal) : NaN,
+        entryTag: String(extra && extra.tag || '').trim() || undefined,
+        negSlopeStreak: 0,
+        profitLockBreachStreak: 0,
+        stopBreachStreak: 0,
+        partial: {
+          orderPlaced: false,
+          filled: false,
+          completed: false,
+          shares: partialSharesForEntry(shares),
+          limitPx: computePartialLimitPx(px, cfg),
+          stageTriggered: false,
+          armTriggered: false,
+          fillDetectedTsMs: null,
+          requestedAtMs: null,
+        },
+        exitPending: null,
+      };
+      return {
+        enter: {
+          side: normalizeSide(side),
+          entryPx: px,
+          notionalUsd: betUsd,
+          betUsd: betUsd,
+          shares: shares,
+          orderType: 'MARKET',
+          entryFeeMode: 'taker',
+          ...(String(extra && extra.tag || '').trim() ? { tag: String(extra.tag).trim() } : {}),
+        },
+      };
+    }
+
+    function queueFullExit(type, exitPx, extra) {
+      if (!activeTrade) return null;
+      const spec = {
+        type: String(type || 'EXIT').toUpperCase(),
+        side: activeTrade.side,
+        exitPx: Number.isFinite(Number(exitPx)) ? clamp01(exitPx) : undefined,
+        shares: Number.isFinite(Number(activeTrade.currentShares)) ? Number(activeTrade.currentShares) : undefined,
+        qtyPct: undefined,
+        orderType: String(extra && extra.orderType || 'MARKET').toUpperCase(),
+        tag: String(extra && extra.tag || '').trim() || undefined,
+        stopReason: String(extra && extra.stopReason || '').trim() || undefined,
+        feeMode: String(extra && extra.feeMode || '').trim().toLowerCase() || undefined,
+      };
+      activeTrade.exitPending = spec;
+      return {
+        exit: {
+          type: spec.type,
+          side: spec.side,
+          ...(Number.isFinite(Number(spec.exitPx)) ? { exitPx: Number(spec.exitPx) } : {}),
+          ...(Number.isFinite(Number(spec.shares)) ? { shares: Number(spec.shares) } : {}),
+          orderType: spec.orderType,
+          ...(spec.tag ? { tag: spec.tag } : {}),
+          ...(spec.stopReason ? { stopReason: spec.stopReason } : {}),
+          ...(spec.feeMode ? { feeMode: spec.feeMode } : {}),
+        },
+      };
+    }
+
+    function maybeEvaluateImmediateRiskExit(upBid, downBid, t, nowMs) {
+      if (!activeTrade || activeTrade.status !== 'open') return null;
+      const markPx = sidePx(activeTrade.side, upBid, downBid);
+      if (!Number.isFinite(markPx)) return null;
+      const currentStopPx = computeCurrentStopPx(activeTrade);
+      if (Number.isFinite(currentStopPx) && markPx <= currentStopPx) {
+        activeTrade.stopBreachStreak = Number(activeTrade.stopBreachStreak || 0) + 1;
+      } else {
+        activeTrade.stopBreachStreak = 0;
+      }
+      const stopTriggered =
+        Number.isFinite(currentStopPx) &&
+        Number(activeTrade.stopBreachStreak || 0) >= cfg.stopConfirmTicks;
+      if (stopTriggered) {
+        const stopLabel =
+          currentStopPx >= 0.60 ? 'STOP_PROTECTED_060'
+            : currentStopPx >= 0.55 ? 'STOP_PROTECTED_055'
+              : currentStopPx >= 0.50 ? 'STOP_PROTECTED_050'
+                : 'STOP_LOSS_RAW';
+        return queueFullExit(stopLabel, markPx, {
+          orderType: 'MARKET',
+          stopReason: 'RAW_STOP_LADDER',
+          feeMode: 'taker',
+        });
+      }
+      if (t && t.isFinal) {
+        return queueFullExit('SETTLE', markPx, {
+          orderType: 'MARKET',
+          stopReason: 'SESSION_FINAL',
+          feeMode: 'none',
+        });
+      }
+      return null;
+    }
+
+    function maybeSyncTradeFromRuntime(t, nowMs) {
+      const pos = t && t.position && typeof t.position === 'object' ? t.position : null;
+      const observedVenuePosition =
+        pos && pos.observedVenuePosition && typeof pos.observedVenuePosition === 'object'
+          ? pos.observedVenuePosition
+          : null;
+      const runtimeEntered = !!pos?.entered && (pos?.side === 'UP' || pos?.side === 'DOWN');
+      const observedVenueEntered =
+        !!observedVenuePosition?.entered &&
+        (observedVenuePosition?.side === 'UP' || observedVenuePosition?.side === 'DOWN') &&
+        Number.isFinite(Number(observedVenuePosition?.shares)) &&
+        Number(observedVenuePosition?.shares) > 1e-9;
+      const effectiveEntered = runtimeEntered || observedVenueEntered;
+      const runtimeSide = runtimeEntered
+        ? normalizeSide(pos.side)
+        : (observedVenueEntered ? normalizeSide(observedVenuePosition.side) : null);
+      const runtimeShares = Number(
+        runtimeEntered
+          ? (pos && pos.shares)
+          : (observedVenueEntered ? observedVenuePosition.shares : null)
+      );
+      const runtimeEntryPx = Number(
+        runtimeEntered
+          ? (pos && pos.entryPx)
+          : (observedVenueEntered ? observedVenuePosition.entryPx : null)
+      );
+      const runtimeNotionalUsd = Number(
+        runtimeEntered
+          ? (pos && pos.notionalUsd)
+          : (observedVenueEntered ? observedVenuePosition.notionalUsd : null)
+      );
+      const runtimeEntryRejectedAtMs = Number(pos && pos.entryRejectedAtMs);
+      const runtimePartialRejectedAtMs = Number(pos && pos.partialTpRejectedAtMs);
+      const runtimePendingTpLimitPx = Number(pos && pos.pendingTpLimitPx);
+      const runtimePendingTpShares = Number(pos && pos.pendingTpShares);
+      const runtimePendingTpExitType = String(pos && pos.pendingTpExitType || '').trim().toUpperCase();
+      const runtimePartialArmed =
+        effectiveEntered &&
+        runtimePendingTpExitType === 'PARTIAL_TP_27' &&
+        Number.isFinite(runtimePendingTpLimitPx) &&
+        runtimePendingTpLimitPx > 0 &&
+        Number.isFinite(runtimePendingTpShares) &&
+        runtimePendingTpShares > 1e-9;
+      const partialRequestFreshMs = 750;
+
+      if (!activeTrade && effectiveEntered) {
+        const inferredBetUsd = Number.isFinite(runtimeNotionalUsd) && runtimeNotionalUsd > 0
+          ? runtimeNotionalUsd
+          : cfg.bet;
+        const shares = Number.isFinite(runtimeShares) && runtimeShares > 0
+          ? runtimeShares
+          : (
+              Number.isFinite(runtimeEntryPx) && runtimeEntryPx > 0
+                ? (inferredBetUsd / runtimeEntryPx)
+                : 0
+            );
+        activeTrade = {
+          tradeNum: Math.min(entriesThisSession + 1, cfg.maxEntriesPerSession),
+          status: 'open',
+          intentTsMs: Number(nowMs),
+          intentEntryPx: runtimeEntryPx,
+          side: runtimeSide,
+          betUsd: inferredBetUsd,
+          entryPx: runtimeEntryPx,
+          entryTsMs: Number(nowMs),
+          entrySec: lastElapsedSec,
+          originalShares: shares,
+          currentShares: shares,
+          realizedGrossPnlUsd: 0,
+          peakGrossPnlUsd: 0,
+          lastSideKal: NaN,
+          negSlopeStreak: 0,
+          profitLockBreachStreak: 0,
+          stopBreachStreak: 0,
+          partial: {
+            orderPlaced: runtimePartialArmed,
+            filled: false,
+            completed: false,
+            shares: partialSharesForEntry(shares),
+            limitPx: computePartialLimitPx(runtimeEntryPx, cfg),
+            stageTriggered: false,
+            armTriggered: false,
+            fillDetectedTsMs: null,
+            requestedAtMs: null,
+          },
+          exitPending: null,
+        };
+        entriesThisSession = Math.max(entriesThisSession, Number(activeTrade.tradeNum) || 0);
+        return;
+      }
+
+      if (!activeTrade) return;
+
+      if (
+        activeTrade.status === 'enter_pending' &&
+        !runtimeEntered &&
+        Number.isFinite(runtimeEntryRejectedAtMs) &&
+        runtimeEntryRejectedAtMs >= Number(activeTrade.intentTsMs || 0)
+      ) {
+        entriesThisSession = Math.max(0, entriesThisSession - 1);
+        activeTrade = null;
+        return;
+      }
+
+      if (effectiveEntered && runtimeSide === activeTrade.side) {
+        if (Number.isFinite(runtimeEntryPx) && runtimeEntryPx > 0) {
+          activeTrade.entryPx = runtimeEntryPx;
+          activeTrade.intentEntryPx = runtimeEntryPx;
+          if (activeTrade.partial) {
+            activeTrade.partial.limitPx = computePartialLimitPx(runtimeEntryPx, cfg);
+          }
+        }
+        if (activeTrade.status === 'enter_pending') {
+          activeTrade.status = 'open';
+          if (Number.isFinite(runtimeShares) && runtimeShares > 0) {
+            activeTrade.originalShares = runtimeShares;
+            activeTrade.currentShares = runtimeShares;
+            activeTrade.partial.shares = partialSharesForEntry(runtimeShares);
+          }
+          if (cfg.immediateDualTpOnFill && activeTrade.partial) {
+            activeTrade.partial.stageTriggered = true;
+            activeTrade.partial.armTriggered = true;
+            activeTrade.partial.orderPlaced = runtimePartialArmed;
+            activeTrade.partial.completed = false;
+          }
+        } else if (activeTrade.status !== 'open') {
+          activeTrade.status = 'open';
+        }
+
+        if (activeTrade.partial) {
+          if (runtimePartialArmed && !activeTrade.partial.filled && !activeTrade.partial.completed) {
+            activeTrade.partial.orderPlaced = true;
+            activeTrade.partial.requestedAtMs = null;
+          } else if (
+            !activeTrade.partial.filled &&
+            !activeTrade.partial.completed &&
+            Number.isFinite(runtimePartialRejectedAtMs) &&
+            runtimePartialRejectedAtMs >= Number(activeTrade.intentTsMs || 0)
+          ) {
+            activeTrade.partial.orderPlaced = false;
+            activeTrade.partial.requestedAtMs = null;
+          } else if (
+            !activeTrade.partial.filled &&
+            !activeTrade.partial.completed &&
+            Number.isFinite(Number(activeTrade.partial.requestedAtMs)) &&
+            (Number(nowMs) - Number(activeTrade.partial.requestedAtMs)) >= partialRequestFreshMs
+          ) {
+            // Live partial fills can land seconds after the original request. Clearing the
+            // "placed" flag should not reopen the strategy to another partial once shares
+            // actually start decreasing for the still-open position.
+            activeTrade.partial.orderPlaced = false;
+            activeTrade.partial.requestedAtMs = null;
+          }
+        }
+
+        if (Number.isFinite(runtimeShares) && runtimeShares > 0) {
+          const prevShares = Number(activeTrade.currentShares);
+          const partialRequestWasLiveOrObserved =
+            runtimePartialArmed ||
+            !!activeTrade.partial.orderPlaced ||
+            Number.isFinite(Number(activeTrade.partial.requestedAtMs));
+          if (
+            activeTrade.partial &&
+            !activeTrade.partial.filled &&
+            !activeTrade.partial.completed &&
+            !singlePartialTakenThisSession &&
+            partialRequestWasLiveOrObserved &&
+            Number.isFinite(prevShares) &&
+            runtimeShares < (prevShares - 1e-6)
+          ) {
+            const soldShares = Math.max(0, prevShares - runtimeShares);
+            const minimumMeaningfulPartialShares = Math.max(
+              0.5,
+              Math.min(Number(activeTrade.partial.shares || 0), 1)
+            );
+            if (soldShares >= minimumMeaningfulPartialShares) {
+              // Treat the first in-position share reduction as the single partial, even if
+              // the original request aged out of the freshness window before the venue fill
+              // was observed locally.
+              singlePartialTakenThisSession = true;
+              activeTrade.partial.filled = true;
+              activeTrade.partial.completed = true;
+              activeTrade.partial.orderPlaced = false;
+              activeTrade.partial.requestedAtMs = null;
+              activeTrade.partial.fillDetectedTsMs = Number(nowMs);
+              activeTrade.realizedGrossPnlUsd += soldShares * (Number(activeTrade.partial.limitPx) - Number(activeTrade.entryPx));
+            }
+          }
+          activeTrade.currentShares = runtimeShares;
+        }
+        return;
+      }
+
+      if (!runtimeEntered) {
+        if (activeTrade.status === 'enter_pending') {
+          if ((Number(nowMs) - Number(activeTrade.intentTsMs || nowMs)) >= cfg.entryConfirmTimeoutMs) {
+            entriesThisSession = Math.max(0, entriesThisSession - 1);
+            activeTrade = null;
+          }
+          return;
+        }
+
+        if (activeTrade.exitPending) {
+          const exitedSide = activeTrade.side;
+          const exitPx = Number(activeTrade.exitPending.exitPx);
+          const exitType = String(activeTrade.exitPending.type || '').toUpperCase();
+          if (exitType.includes('STOP')) {
+            rearmBlocked[exitedSide] = false;
+          } else if (!(Number.isFinite(exitPx) && exitPx < cfg.crossReentryThr)) {
+            rearmBlocked[exitedSide] = true;
+          } else {
+            rearmBlocked[exitedSide] = false;
+          }
+          activeTrade = null;
+          return;
+        }
+
+        // If runtime state already says the trade is gone and there is no
+        // explicit pending exit left to reconcile, prefer immediate rearm over
+        // preserving a stale same-side block. This keeps later Trade 2/3 lanes
+        // eligible after stop/repair flows instead of deadlocking on the prior
+        // side indefinitely.
+        rearmBlocked[activeTrade.side] = false;
+        activeTrade = null;
+      }
+    }
+
+    function maybeSelectEntry(upBid, downBid) {
+      if (!(entriesThisSession < cfg.maxEntriesPerSession)) return null;
+      const candidates = [];
+      const upSignal = buildIterationSignal(resampled, cfg, 'UP');
+      const dnSignal = buildIterationSignal(resampled, cfg, 'DOWN');
+      if (
+        !rearmBlocked.UP &&
+        Number.isFinite(upBid) &&
+        upBid >= cfg.entryBreakoutThr &&
+        upSignal
+      ) {
+        candidates.push({
+          side: 'UP',
+          px: upBid,
+          gain: Number(upSignal.px) - Number(upSignal.rollingLow),
+          emaSpread: Number(upSignal.emaFast) - Number(upSignal.emaSlow),
+          emaSlope: Number(upSignal.emaSlope),
+          latestCheckpointMs: upSignal.latestCheckpointMs,
+        });
+      }
+      if (
+        !rearmBlocked.DOWN &&
+        Number.isFinite(downBid) &&
+        downBid >= cfg.entryBreakoutThr &&
+        dnSignal
+      ) {
+        candidates.push({
+          side: 'DOWN',
+          px: downBid,
+          gain: Number(dnSignal.px) - Number(dnSignal.rollingLow),
+          emaSpread: Number(dnSignal.emaFast) - Number(dnSignal.emaSlow),
+          emaSlope: Number(dnSignal.emaSlope),
+          latestCheckpointMs: dnSignal.latestCheckpointMs,
+        });
+      }
+      if (!candidates.length) return null;
+      candidates.sort((a, b) => {
+        if (Number(b.gain) !== Number(a.gain)) return Number(b.gain) - Number(a.gain);
+        if (Number(b.emaSpread) !== Number(a.emaSpread)) return Number(b.emaSpread) - Number(a.emaSpread);
+        if (Number(b.emaSlope) !== Number(a.emaSlope)) return Number(b.emaSlope) - Number(a.emaSlope);
+        if (Number(b.px) !== Number(a.px)) return Number(b.px) - Number(a.px);
+        return String(a.side).localeCompare(String(b.side));
+      });
+      const selected = candidates[0];
+      if (!activeTrade) return selected;
+      const activeSide = normalizeSide(activeTrade.side);
+      const selectedSide = normalizeSide(selected && selected.side);
+      const canFlipOppositeBreakout =
+        activeTrade.status === 'open' &&
+        !!activeSide &&
+        !!selectedSide &&
+        activeSide !== selectedSide;
+      return canFlipOppositeBreakout ? selected : null;
+    }
+
+    return {
+      onTick: function onTick(t) {
+        const quoteMeta = t && t.quoteMeta && typeof t.quoteMeta === 'object'
+          ? cloneSimple(t.quoteMeta)
+          : null;
+        const upRaw = finiteOrNaN(t && t.upBid);
+        const downRaw = finiteOrNaN(t && t.downBid);
+        const upBid = isValidQuotePx(upRaw) ? upRaw : (isValidQuotePx(lastUpBid) ? lastUpBid : NaN);
+        const downBid = isValidQuotePx(downRaw) ? downRaw : (isValidQuotePx(lastDownBid) ? lastDownBid : NaN);
+        if (!isValidQuotePx(upBid) || !isValidQuotePx(downBid)) return null;
+        lastUpBid = upBid;
+        lastDownBid = downBid;
+
+        const elapsedSec = Number(t && t.elapsedSec);
+        if (!Number.isFinite(elapsedSec)) return null;
+        if (elapsedSec + 1 < lastElapsedSec) {
+          tickIdx = -1;
+          lastElapsedSec = 0;
+          lastUpBid = NaN;
+          lastDownBid = NaN;
+          lastRawDiff = NaN;
+          crossCooldownUntilMs = -Infinity;
+          nextCheckpointMs = cfg.resampleMs;
+          lastResampleSourceTsMs = NaN;
+          observedSearchStartIdx = 0;
+          observed.length = 0;
+          resampled.length = 0;
+          upKal.length = 0;
+          dnKal.length = 0;
+          upKState = null;
+          dnKState = null;
+          inflectStateBySide.UP = { peakVal: NaN, peakIdx: -1, negStreak: 0, lastEmitPeakIdx: -1 };
+          inflectStateBySide.DOWN = { peakVal: NaN, peakIdx: -1, negStreak: 0, lastEmitPeakIdx: -1 };
+          entriesThisSession = 0;
+          singlePartialTakenThisSession = false;
+          rearmBlocked.UP = false;
+          rearmBlocked.DOWN = false;
+          activeTrade = null;
+          pureObservedTicks = 0;
+          nonPureSkippedTicks = 0;
+          acceptedSyntheticTicks = 0;
+          finalSyntheticTicks = 0;
+          duplicateQuoteSeqSkippedTicks = 0;
+          lastAcceptedQuoteSeq = null;
+          lastAcceptedUpBid = NaN;
+          lastAcceptedDownBid = NaN;
+          lastQuoteMeta = null;
+        }
+        lastElapsedSec = elapsedSec;
+        const nowMs = elapsedSec * 1000;
+        const isPureQuote = !quoteMeta || quoteMeta.pure !== false;
+        const allowSyntheticFinal = !!(t && t.isFinal && quoteMeta && quoteMeta.allowSyntheticFinal);
+        const quoteSource = String(quoteMeta && quoteMeta.source || '').trim().toLowerCase();
+        const quotePairAgeMs = Number(quoteMeta && quoteMeta.pairAgeMs);
+        const syntheticExecutionMaxAgeMs = Math.max(25, Math.min(Number(cfg.acceptSyntheticQuoteMaxAgeMs), 100));
+        const allowFreshSyntheticQuote =
+          !isPureQuote &&
+          (quoteSource === 'rest_pump' || quoteSource === 'rest_fallback') &&
+          Number.isFinite(quotePairAgeMs) &&
+          quotePairAgeMs >= 0 &&
+          quotePairAgeMs <= syntheticExecutionMaxAgeMs;
+        lastQuoteMeta = quoteMeta;
+
+        if (!isPureQuote && !allowSyntheticFinal && !allowFreshSyntheticQuote) {
+          nonPureSkippedTicks += 1;
+          maybeSyncTradeFromRuntime(t, nowMs);
+          return null;
+        }
+        if (allowFreshSyntheticQuote) {
+          acceptedSyntheticTicks += 1;
+        }
+        if (!isPureQuote && allowSyntheticFinal) {
+          finalSyntheticTicks += 1;
+          maybeSyncTradeFromRuntime(t, nowMs);
+          if (activeTrade && activeTrade.exitPending) {
+            const spec = activeTrade.exitPending;
+            return {
+              exit: {
+                type: String(spec.type || 'EXIT'),
+                side: activeTrade.side,
+                ...(Number.isFinite(Number(spec.exitPx)) ? { exitPx: Number(spec.exitPx) } : {}),
+                ...(Number.isFinite(Number(spec.shares)) ? { shares: Number(spec.shares) } : {}),
+                orderType: String(spec.orderType || 'MARKET'),
+                ...(spec.tag ? { tag: spec.tag } : {}),
+                ...(spec.stopReason ? { stopReason: spec.stopReason } : {}),
+                ...(spec.feeMode ? { feeMode: String(spec.feeMode) } : {}),
+              },
+            };
+          }
+          if (activeTrade && activeTrade.status === 'open') {
+            const markPx = sidePx(activeTrade.side, upBid, downBid);
+            return queueFullExit('SETTLE', markPx, {
+              orderType: 'MARKET',
+              stopReason: 'SESSION_FINAL',
+              feeMode: 'none',
+            });
+          }
+          return null;
+        }
+
+        const quoteSeq = Number.isFinite(Number(quoteMeta?.quoteSeq))
+          ? Number(quoteMeta?.quoteSeq)
+          : null;
+        if (
+          !allowSyntheticFinal &&
+          quoteSeq != null &&
+          lastAcceptedQuoteSeq != null &&
+          Number(quoteSeq) === Number(lastAcceptedQuoteSeq) &&
+          Number(upBid) === Number(lastAcceptedUpBid) &&
+          Number(downBid) === Number(lastAcceptedDownBid)
+        ) {
+          duplicateQuoteSeqSkippedTicks += 1;
+          maybeSyncTradeFromRuntime(t, nowMs);
+          const fastRiskExit = maybeEvaluateImmediateRiskExit(upBid, downBid, t, nowMs);
+          if (fastRiskExit) return fastRiskExit;
+          return null;
+        }
+
+        tickIdx += 1;
+        pureObservedTicks += 1;
+        if (quoteSeq != null) lastAcceptedQuoteSeq = Number(quoteSeq);
+        lastAcceptedUpBid = Number(upBid);
+        lastAcceptedDownBid = Number(downBid);
+        observed.push({ tMs: nowMs, upBid: upBid, downBid: downBid });
+        maybeFinalizeCheckpoints(nowMs);
+
+        upKState = kalmanUpdate(upKState, upBid, cfg.kalmanQ, cfg.kalmanR);
+        dnKState = kalmanUpdate(dnKState, downBid, cfg.kalmanQ, cfg.kalmanR);
+        const upK = Number(upKState && upKState.x);
+        const dnK = Number(dnKState && dnKState.x);
+        upKal.push(Number.isFinite(upK) ? upK : NaN);
+        dnKal.push(Number.isFinite(dnK) ? dnK : NaN);
+
+        const curDiff = Number.isFinite(upBid) && Number.isFinite(downBid) ? (upBid - downBid) : NaN;
+        if (crossed(lastRawDiff, curDiff)) {
+          crossCooldownUntilMs = Math.max(Number(crossCooldownUntilMs || -Infinity), nowMs + (cfg.rawCrossCooldownSec * 1000));
+        }
+        lastRawDiff = curDiff;
+
+        if (upBid < cfg.crossReentryThr) rearmBlocked.UP = false;
+        if (downBid < cfg.crossReentryThr) rearmBlocked.DOWN = false;
+
+        maybeSyncTradeFromRuntime(t, nowMs);
+
+        if (activeTrade && activeTrade.exitPending) {
+          const spec = activeTrade.exitPending;
+          return {
+            exit: {
+              type: String(spec.type || 'EXIT'),
+              side: activeTrade.side,
+              ...(Number.isFinite(Number(spec.exitPx)) ? { exitPx: Number(spec.exitPx) } : {}),
+              ...(Number.isFinite(Number(spec.shares)) ? { shares: Number(spec.shares) } : {}),
+              orderType: String(spec.orderType || 'MARKET'),
+              ...(spec.tag ? { tag: spec.tag } : {}),
+              ...(spec.stopReason ? { stopReason: spec.stopReason } : {}),
+              ...(spec.feeMode ? { feeMode: String(spec.feeMode) } : {}),
+            },
+          };
+        }
+
+        if (activeTrade && activeTrade.status === 'open') {
+          const markPx = sidePx(activeTrade.side, upBid, downBid);
+          const sideKal = activeTrade.side === 'DOWN' ? dnK : upK;
+          const sideSeries = activeTrade.side === 'DOWN' ? dnKal : upKal;
+          const grossPnlUsd = currentGrossPnlUsd(activeTrade, markPx);
+          if (Number.isFinite(grossPnlUsd)) {
+            activeTrade.peakGrossPnlUsd = Math.max(Number(activeTrade.peakGrossPnlUsd || 0), grossPnlUsd);
+          }
+
+          if (Number.isFinite(sideKal) && Number.isFinite(activeTrade.lastSideKal)) {
+            const slope = sideKal - activeTrade.lastSideKal;
+            if (Number.isFinite(slope) && slope <= cfg.inflectNegSlopeMax) activeTrade.negSlopeStreak += 1;
+            else activeTrade.negSlopeStreak = 0;
+          } else {
+            activeTrade.negSlopeStreak = 0;
+          }
+          if (Number.isFinite(sideKal)) activeTrade.lastSideKal = sideKal;
+
+          const currentStopPx = computeCurrentStopPx(activeTrade);
+          if (Number.isFinite(markPx) && Number.isFinite(currentStopPx) && markPx <= currentStopPx) {
+            activeTrade.stopBreachStreak = Number(activeTrade.stopBreachStreak || 0) + 1;
+          } else {
+            activeTrade.stopBreachStreak = 0;
+          }
+          const stopTriggered =
+            Number.isFinite(markPx) &&
+            Number.isFinite(currentStopPx) &&
+            Number(activeTrade.stopBreachStreak || 0) >= cfg.stopConfirmTicks;
+          const stopLabel = stopTriggered
+            ? (currentStopPx >= 0.60 ? 'STOP_PROTECTED_060'
+              : currentStopPx >= 0.55 ? 'STOP_PROTECTED_055'
+                : currentStopPx >= 0.50 ? 'STOP_PROTECTED_050'
+                  : 'STOP_LOSS_RAW')
+            : null;
+
+          const profitLockArmUsd = Number(activeTrade.betUsd) * cfg.profitLockMinPeakPctBet;
+          const armReached =
+            Number.isFinite(Number(activeTrade.peakGrossPnlUsd)) &&
+            Number(activeTrade.peakGrossPnlUsd) >= profitLockArmUsd;
+
+          if (stopTriggered) {
+            return queueFullExit(stopLabel, markPx, {
+              orderType: 'MARKET',
+              stopReason: 'RAW_STOP_LADDER',
+              feeMode: 'taker',
+            });
+          }
+
+          if (t && t.isFinal) {
+            return queueFullExit('SETTLE', markPx, {
+              orderType: 'MARKET',
+              stopReason: 'SESSION_FINAL',
+              feeMode: 'none',
+            });
+          }
+
+          const partialProfitTriggerPx = Number(activeTrade.partial.limitPx);
+          const partialTriggerCapPx = clamp01(Number(cfg.partialTriggerCapPx));
+          const finalTpTriggerPx = clamp01(Number(cfg.finalTpTriggerPx));
+          const finalTpPx = clamp01(Number(cfg.finalTpPx));
+          const emergencyTpPx = clamp01(Number(cfg.emergencyTpPx));
+          const partialArmTriggerPx = Math.min(
+            Number.isFinite(partialProfitTriggerPx) ? partialProfitTriggerPx : Infinity,
+            Number.isFinite(partialTriggerCapPx) ? partialTriggerCapPx : 0.95
+          );
+          if (
+            !activeTrade.partial.stageTriggered &&
+            Number.isFinite(markPx) &&
+            Number.isFinite(partialArmTriggerPx) &&
+            markPx >= partialArmTriggerPx
+          ) {
+            activeTrade.partial.stageTriggered = true;
+          }
+          if (
+            activeTrade.partial.stageTriggered &&
+            !activeTrade.partial.armTriggered &&
+            Number.isFinite(markPx) &&
+            Number.isFinite(partialArmTriggerPx) &&
+            markPx >= partialArmTriggerPx
+          ) {
+            activeTrade.partial.armTriggered = true;
+          }
+          if (
+            activeTrade.partial.stageTriggered &&
+            activeTrade.partial.armTriggered &&
+            !singlePartialTakenThisSession &&
+            !activeTrade.partial.orderPlaced &&
+            !activeTrade.partial.filled &&
+            !activeTrade.partial.completed &&
+            !(
+              Number.isFinite(Number(activeTrade.partial.requestedAtMs)) &&
+              (Number(nowMs) - Number(activeTrade.partial.requestedAtMs)) < 750
+            ) &&
+            Number(activeTrade.currentShares) > 1e-9
+          ) {
+            const partialShares = Math.max(
+              0,
+              Math.min(Number(activeTrade.currentShares), Number(activeTrade.partial.shares))
+            );
+            const partialLimitPx = clamp01(Number(activeTrade.partial.limitPx));
+            if (partialShares > 1e-9 && Number.isFinite(partialLimitPx) && partialLimitPx > 0) {
+              activeTrade.partial.requestedAtMs = Number(nowMs);
+              activeTrade.partial.completed = false;
+              return {
+                exit: {
+                  type: 'PARTIAL_TP_27',
+                  side: activeTrade.side,
+                  exitPx: partialLimitPx,
+                  shares: partialShares,
+                  orderType: 'LIMIT',
+                  feeMode: 'none',
+                  tag: 'PARTIAL_STAGE12_ARM27_OR_095_TARGET27',
+                },
+              };
+            }
+          }
+
+          if (
+            activeTrade.partial.completed &&
+            Number(activeTrade.currentShares) > 1e-9 &&
+            Number.isFinite(markPx) &&
+            Number.isFinite(finalTpTriggerPx) &&
+            finalTpTriggerPx > 0 &&
+            markPx >= finalTpTriggerPx &&
+            Number.isFinite(emergencyTpPx) &&
+            emergencyTpPx > 0 &&
+            markPx >= emergencyTpPx
+          ) {
+            return queueFullExit('EMERGENCY_TP_099', emergencyTpPx, {
+              orderType: 'MARKET',
+              tag: 'EMERGENCY_TP_099',
+              stopReason: 'EMERGENCY_TP_099',
+              feeMode: 'taker',
+            });
+          }
+
+          if (
+            activeTrade.partial.completed &&
+            Number(activeTrade.currentShares) > 1e-9 &&
+            Number.isFinite(markPx) &&
+            Number.isFinite(finalTpTriggerPx) &&
+            finalTpTriggerPx > 0 &&
+            markPx >= finalTpTriggerPx &&
+            Number.isFinite(emergencyTpPx) &&
+            Number.isFinite(finalTpPx) &&
+            finalTpPx > 0 &&
+            markPx >= finalTpTriggerPx
+          ) {
+            return queueFullExit('FINAL_TP_098', finalTpPx, {
+              orderType: 'LIMIT',
+              tag: 'FINAL_TP_098',
+              feeMode: 'none',
+            });
+          }
+
+          if (
+            armReached &&
+            Number.isFinite(grossPnlUsd) &&
+            grossPnlUsd > 0 &&
+            activeTrade.negSlopeStreak >= cfg.exitNegSlopeConfirmTicks
+          ) {
+            const floorUsd = Number(activeTrade.peakGrossPnlUsd) * (1 - cfg.profitLockDrawdownPct);
+            if (grossPnlUsd <= floorUsd) {
+              activeTrade.profitLockBreachStreak = Number(activeTrade.profitLockBreachStreak || 0) + 1;
+            } else {
+              activeTrade.profitLockBreachStreak = 0;
+            }
+            if (Number(activeTrade.profitLockBreachStreak || 0) >= cfg.profitLockConfirmTicks) {
+              return queueFullExit('PROFIT_LOCK', markPx, {
+                orderType: 'MARKET',
+                stopReason: 'PROFIT_LOCK_DRAWDOWN',
+                feeMode: 'taker',
+              });
+            }
+          } else {
+            activeTrade.profitLockBreachStreak = 0;
+          }
+
+          if (armReached) {
+            const inflectEvt = detectLiveSafeInflectionAt(
+              sideSeries,
+              tickIdx,
+              cfg,
+              inflectStateBySide[activeTrade.side]
+            );
+            if (inflectEvt) {
+              return queueFullExit('INFLECT_DOWN', markPx, {
+                orderType: 'MARKET',
+                stopReason: 'INFLECTION_ROLLOVER',
+                feeMode: 'taker',
+              });
+            }
+          }
+
+          return null;
+        }
+
+        if (!(lastElapsedSec >= cfg.minEntrySec)) return null;
+        if (Number.isFinite(crossCooldownUntilMs) && nowMs < crossCooldownUntilMs) return null;
+        if (Number.isFinite(cfg.entryCutoffSec) && lastElapsedSec >= cfg.entryCutoffSec) return null;
+        if (
+          Number.isFinite(cfg.sessionSec) &&
+          Number.isFinite(cfg.entryCutoffSec) &&
+          cfg.entryCutoffSec > cfg.sessionSec
+        ) return null;
+
+        const candidate = maybeSelectEntry(upBid, downBid);
+        if (!candidate) return null;
+        const sideKal = candidate.side === 'DOWN' ? dnK : upK;
+        return armTradeEntry(candidate.side, candidate.px, sideKal, nowMs, { tag: candidate.tag });
+      },
+
+      snapshot: function snapshot() {
+        const latestResampled = resampled.length ? resampled[resampled.length - 1] : null;
+        const resampleSnapshotStartMs = latestResampled
+          ? (Number(latestResampled.checkpointMs) - Number(snapshotResampleLookbackMs))
+          : -Infinity;
+        const observedSnapshotStartMs = (lastElapsedSec * 1000) - Number(snapshotObservedLookbackMs);
+        const observedTail = observed.filter((row) => Number(row && row.tMs) >= observedSnapshotStartMs - 1e-9);
+        const resampledTail = resampled.filter((row) => Number(row && row.checkpointMs) >= resampleSnapshotStartMs - 1e-9);
+        const upKalTail = upKal.slice(-snapshotKalTail);
+        const dnKalTail = dnKal.slice(-snapshotKalTail);
+        const currentStopPx = activeTrade ? computeCurrentStopPx(activeTrade) : null;
+        return {
+          preset: cfg.name,
+          strategyId: PRESET.strategyId,
+          cfg: {
+            minEntrySec: cfg.minEntrySec,
+            entryBreakoutThr: cfg.entryBreakoutThr,
+            sizingProfile: cfg.sizingProfile,
+            crossReentryThr: cfg.crossReentryThr,
+            maxEntriesPerSession: cfg.maxEntriesPerSession,
+            bet: cfg.bet,
+            stopLossPx: cfg.stopLossPx,
+            stopConfirmTicks: cfg.stopConfirmTicks,
+            profitProtectLadder: cloneSimple(cfg.profitProtectLadder),
+            partialStagePctBet: cfg.partialStagePctBet,
+            partialArmPctBet: cfg.partialArmPctBet,
+            partialTargetPctBet: cfg.partialTargetPctBet,
+            partialQtyPct: cfg.partialQtyPct,
+            partialFixedShares: cfg.partialFixedShares,
+            finalTpTriggerPx: cfg.finalTpTriggerPx,
+            finalTpPx: cfg.finalTpPx,
+            emergencyTpPx: cfg.emergencyTpPx,
+            profitLockMinPeakPctBet: cfg.profitLockMinPeakPctBet,
+            profitLockDrawdownPct: cfg.profitLockDrawdownPct,
+            profitLockConfirmTicks: cfg.profitLockConfirmTicks,
+            rawCrossCooldownSec: cfg.rawCrossCooldownSec,
+            resampleMs: cfg.resampleMs,
+            checkpointDelayMs: cfg.checkpointDelayMs,
+            slopeLookbackMs: cfg.slopeLookbackMs,
+            minSlopeSamples: cfg.minSlopeSamples,
+            emaFastMs: cfg.emaFastMs,
+            emaSlowMs: cfg.emaSlowMs,
+            rollingLowLookbackMs: cfg.rollingLowLookbackMs,
+            recentHighLookbackMs: cfg.recentHighLookbackMs,
+            recoveryMinPx: cfg.recoveryMinPx,
+            breakoutEpsilonPx: cfg.breakoutEpsilonPx,
+            emaSlopeMinPx: cfg.emaSlopeMinPx,
+            entryConfirmTimeoutMs: cfg.entryConfirmTimeoutMs,
+            sessionSec: cfg.sessionSec,
+            entryCutoffSec: cfg.entryCutoffSec,
+          },
+          state: {
+            tickIdx,
+            elapsedSec: lastElapsedSec,
+            lastElapsedSec,
+            lastUpBid,
+            lastDownBid,
+            lastRawDiff,
+            crossCooldownUntilMs,
+            nextCheckpointMs,
+            lastResampleSourceTsMs,
+            observedSearchStartIdx,
+            entriesThisSession: entriesThisSession,
+            singlePartialTakenThisSession: !!singlePartialTakenThisSession,
+            pureObservedTicks,
+            nonPureSkippedTicks,
+            acceptedSyntheticTicks,
+            finalSyntheticTicks,
+            duplicateQuoteSeqSkippedTicks,
+            lastAcceptedQuoteSeq,
+            lastAcceptedUpBid,
+            lastAcceptedDownBid,
+            lastQuoteMeta: cloneSimple(lastQuoteMeta),
+            rearmBlocked: { UP: !!rearmBlocked.UP, DOWN: !!rearmBlocked.DOWN },
+            crossCooldownUntilSec: Number.isFinite(crossCooldownUntilMs) ? (crossCooldownUntilMs / 1000) : null,
+            observedCount: observed.length,
+            resampleCount: resampled.length,
+            observed: cloneSimple(observedTail),
+            resampled: cloneSimple(resampledTail),
+            latestResampled,
+            upKal: cloneSimple(upKalTail),
+            downKal: cloneSimple(dnKalTail),
+            upKState: cloneSimple(upKState),
+            dnKState: cloneSimple(dnKState),
+            inflectStateBySide: cloneSimple(inflectStateBySide),
+            activeTrade: activeTrade
+              ? {
+                  tradeNum: activeTrade.tradeNum,
+                  status: activeTrade.status,
+                  side: activeTrade.side,
+                  betUsd: activeTrade.betUsd,
+                  entryPx: activeTrade.entryPx,
+                  entrySec: activeTrade.entrySec,
+                  currentShares: activeTrade.currentShares,
+                  originalShares: activeTrade.originalShares,
+                  realizedGrossPnlUsd: activeTrade.realizedGrossPnlUsd,
+                  peakGrossPnlUsd: activeTrade.peakGrossPnlUsd,
+                  negSlopeStreak: activeTrade.negSlopeStreak,
+                  profitLockBreachStreak: activeTrade.profitLockBreachStreak,
+                  stopBreachStreak: activeTrade.stopBreachStreak,
+                  currentStopPx,
+                  partial: cloneSimple(activeTrade.partial),
+                  exitPending: cloneSimple(activeTrade.exitPending),
+                }
+              : null,
+            pendingExit: buildPendingExitSnapshot(),
+          },
+        };
+      },
+    };
+  };
+
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = TradeStrategy;
+  }
+  if (typeof window !== 'undefined') {
+    window.TradeStrategy = TradeStrategy;
+  }
+})();
