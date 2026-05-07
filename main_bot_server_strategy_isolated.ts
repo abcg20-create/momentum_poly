@@ -1098,6 +1098,14 @@ const QUOTE_DISLOCATION_CONFIRM_MIN_MS = Math.max(
   150,
   Number(process.env.QUOTE_DISLOCATION_CONFIRM_MIN_MS || 900)
 );
+const QUOTE_DISLOCATION_WS_CONFIRM_MIN_COUNT = Math.max(
+  QUOTE_DISLOCATION_CONFIRM_MIN_COUNT,
+  Number(process.env.QUOTE_DISLOCATION_WS_CONFIRM_MIN_COUNT || 12)
+);
+const QUOTE_DISLOCATION_WS_CONFIRM_MIN_MS = Math.max(
+  QUOTE_DISLOCATION_CONFIRM_MIN_MS,
+  Number(process.env.QUOTE_DISLOCATION_WS_CONFIRM_MIN_MS || 6000)
+);
 const QUOTE_DISLOCATION_MAX_SAMPLE_GAP_MS = Math.max(
   150,
   Number(process.env.QUOTE_DISLOCATION_MAX_SAMPLE_GAP_MS || 1200)
@@ -2343,6 +2351,46 @@ let quoteFallbackLastMs = 0;
 let quoteFallbackTriggerCount = 0;
 let quoteFallbackSuccessCount = 0;
 let quoteFallbackErrorCount = 0;
+
+function shouldQuarantineCanonicalQuotePair(rowLike: QuotePairCacheRow | null, reason: string): boolean {
+  if (!rowLike) return false;
+  if (
+    String(current?.upToken || "") !== String(rowLike.upToken || "") ||
+    String(current?.downToken || "") !== String(rowLike.downToken || "")
+  ) {
+    return false;
+  }
+  if (!Number.isFinite(Number(rowLike.upBid)) || !Number.isFinite(Number(rowLike.downBid))) return false;
+  const quarantined = shouldQuarantineQuoteDislocation(rowLike, rowLike.upBid, rowLike.downBid, nowMs());
+  if (quarantined) {
+    const key = `canonical_quote_quarantine:${String(current?.slug || "")}:${reason}`;
+    const last = Number(((shouldQuarantineCanonicalQuotePair as any).__lastWarnMs?.get(key) ?? 0));
+    const now = nowMs();
+    if (!Number.isFinite(last) || now - last >= 5000) {
+      if (!(shouldQuarantineCanonicalQuotePair as any).__lastWarnMs) {
+        (shouldQuarantineCanonicalQuotePair as any).__lastWarnMs = new Map<string, number>();
+      }
+      (shouldQuarantineCanonicalQuotePair as any).__lastWarnMs.set(key, now);
+      console.warn(
+        `[QUOTE CCR HOLD] session=${String(current?.slug || "")} reason=${reason} source=${String(rowLike.source || "")} ` +
+        `up=${Number(rowLike.upBid).toFixed(4)} down=${Number(rowLike.downBid).toFixed(4)} ` +
+        `lastGoodUp=${String(lastGoodObservedBids.upBid)} lastGoodDown=${String(lastGoodObservedBids.downBid)}`
+      );
+    }
+  }
+  return quarantined;
+}
+
+function commitQuotePairCache(rowLike: QuotePairCacheRow, reason: string): boolean {
+  const seq = Number.isFinite(Number(rowLike.seq)) && Number(rowLike.seq) > 0
+    ? Math.max(Number(rowLike.seq), quotePairSeq + 1)
+    : quotePairSeq + 1;
+  const row = { ...rowLike, seq };
+  if (shouldQuarantineCanonicalQuotePair(row, reason)) return false;
+  quotePairSeq = seq;
+  quotePairCache = row;
+  return true;
+}
 let quoteStreamWs: WebSocket | null = null;
 let quoteStreamConnected = false;
 let quoteStreamReconnectTimer: NodeJS.Timeout | null = null;
@@ -2695,7 +2743,19 @@ function shouldQuarantineQuoteDislocation(
     Number.isFinite(Number(prev.firstSampleAtMs)) && Number.isFinite(Number(prev.lastSampleAtMs))
       ? Math.max(0, Number(prev.lastSampleAtMs) - Number(prev.firstSampleAtMs))
       : 0;
-  if (Number(prev.count || 0) >= QUOTE_DISLOCATION_CONFIRM_MIN_COUNT && spanMs >= QUOTE_DISLOCATION_CONFIRM_MIN_MS) {
+  const pair = pairLike && typeof pairLike === "object" ? pairLike : null;
+  const pairSource = String(pair?.source || "").trim();
+  const crossChannelConfirmed =
+    pairSource === "rest_pump" ||
+    pairSource === "rest_fallback" ||
+    pairSource === "rest_prewarm";
+  const confirmMinCount = crossChannelConfirmed
+    ? QUOTE_DISLOCATION_CONFIRM_MIN_COUNT
+    : QUOTE_DISLOCATION_WS_CONFIRM_MIN_COUNT;
+  const confirmMinMs = crossChannelConfirmed
+    ? QUOTE_DISLOCATION_CONFIRM_MIN_MS
+    : QUOTE_DISLOCATION_WS_CONFIRM_MIN_MS;
+  if (Number(prev.count || 0) >= confirmMinCount && spanMs >= confirmMinMs) {
     currentSessionQuoteDislocationCandidate = null;
     return false;
   }
@@ -3457,7 +3517,7 @@ function maybeUpdatePairCacheFromTokenRows(upToken: string, downToken: string): 
   const isPureWs =
     String(upRow.source || "") === "ws_direct" &&
     String(downRow.source || "") === "ws_direct";
-  quotePairCache = {
+  const nextPair: QuotePairCacheRow = {
     upToken: String(upToken),
     downToken: String(downToken),
     upBid: clamp01(upBid),
@@ -3473,8 +3533,9 @@ function maybeUpdatePairCacheFromTokenRows(upToken: string, downToken: string): 
     observedAtMs: nowMs(),
     synthetic: !isPureWs,
     pure: isPureWs,
-    seq: ++quotePairSeq,
+    seq: quotePairSeq + 1,
   };
+  if (!commitQuotePairCache(nextPair, "token_rows")) return;
   if (
     String(current?.slug || "").trim() &&
     String(current?.upToken || "") === String(upToken || "") &&
@@ -3483,7 +3544,7 @@ function maybeUpdatePairCacheFromTokenRows(upToken: string, downToken: string): 
     recordCanonicalQuoteSample(
       String(current.slug || ""),
       current?.startMs,
-      quotePairCache.tsMs,
+      nextPair.tsMs,
       clamp01(upBid),
       clamp01(downBid)
     );
@@ -3929,7 +3990,7 @@ function prewarmQuotePairForTokens(upTokenLike: any, downTokenLike: any, reason:
     const upBid = Number(reconciled.up?.bid);
     const downBid = Number(reconciled.down?.bid);
     if (Number.isFinite(upBid) && Number.isFinite(downBid)) {
-      quotePairCache = {
+      const nextPair: QuotePairCacheRow = {
         upToken,
         downToken,
         upBid: clamp01(upBid),
@@ -3942,9 +4003,9 @@ function prewarmQuotePairForTokens(upTokenLike: any, downTokenLike: any, reason:
         observedAtMs: nowMs(),
         synthetic: true,
         pure: false,
-        seq: ++quotePairSeq,
+        seq: quotePairSeq + 1,
       };
-      if (String(current?.slug || "").trim()) {
+      if (commitQuotePairCache(nextPair, "rest_prewarm") && String(current?.slug || "").trim()) {
         recordCanonicalQuoteSample(
           String(current.slug || ""),
           current?.startMs,
@@ -4021,7 +4082,7 @@ async function quotePumpTick(): Promise<void> {
     const upBid = Number(reconciled.up?.bid);
     const downBid = Number(reconciled.down?.bid);
     if (Number.isFinite(upBid) && Number.isFinite(downBid)) {
-      quotePairCache = {
+      const nextPair: QuotePairCacheRow = {
         upToken,
         downToken,
         upBid: clamp01(upBid),
@@ -4034,9 +4095,9 @@ async function quotePumpTick(): Promise<void> {
         observedAtMs: nowMs(),
         synthetic: true,
         pure: false,
-        seq: ++quotePairSeq,
+        seq: quotePairSeq + 1,
       };
-      if (String(current?.slug || "").trim()) {
+      if (commitQuotePairCache(nextPair, "rest_pump") && String(current?.slug || "").trim()) {
         recordCanonicalQuoteSample(
           String(current.slug || ""),
           current?.startMs,
@@ -4084,7 +4145,7 @@ async function triggerQuoteFallbackIfLagged(lagMs: number | null, reason: string
     const upBid = Number(reconciled.up?.bid);
     const downBid = Number(reconciled.down?.bid);
     if (Number.isFinite(upBid) && Number.isFinite(downBid)) {
-      quotePairCache = {
+      const nextPair: QuotePairCacheRow = {
         upToken,
         downToken,
         upBid: clamp01(upBid),
@@ -4097,9 +4158,9 @@ async function triggerQuoteFallbackIfLagged(lagMs: number | null, reason: string
         observedAtMs: nowMs(),
         synthetic: true,
         pure: false,
-        seq: ++quotePairSeq,
+        seq: quotePairSeq + 1,
       };
-      if (String(current?.slug || "").trim()) {
+      if (commitQuotePairCache(nextPair, "rest_fallback") && String(current?.slug || "").trim()) {
         recordCanonicalQuoteSample(
           String(current.slug || ""),
           current?.startMs,
@@ -4286,7 +4347,41 @@ function buildQuoteBroadcastPayload() {
   const upToken = String(current?.upToken || "");
   const downToken = String(current?.downToken || "");
   const pairFresh = (upToken && downToken) ? getCachedQuotePair(upToken, downToken, QUOTE_MAX_STALE_MS) : null;
-  const pairAny = pairFresh || ((upToken && downToken) ? getCachedQuotePair(upToken, downToken, Number.POSITIVE_INFINITY) : null);
+  let pairAny = pairFresh || ((upToken && downToken) ? getCachedQuotePair(upToken, downToken, Number.POSITIVE_INFINITY) : null);
+  const sessionAgeMs =
+    Number.isFinite(Number(current?.startMs)) && Number(current?.startMs) > 0
+      ? Math.max(0, now - Number(current.startMs))
+      : Number.POSITIVE_INFINITY;
+  const rawPairTrusted =
+    !!pairAny &&
+    Number.isFinite(Number(pairAny.upBid)) &&
+    Number.isFinite(Number(pairAny.downBid)) &&
+    isQuotePairTrustedForCurrentSession(pairAny, pairAny.upBid, pairAny.downBid, sessionAgeMs) &&
+    !shouldQuarantineQuoteDislocation(pairAny, pairAny.upBid, pairAny.downBid, now);
+  const lastGoodAgeMs =
+    Number.isFinite(Number(lastGoodObservedBids.tsMs)) && Number(lastGoodObservedBids.tsMs) > 0
+      ? Math.max(0, now - Number(lastGoodObservedBids.tsMs))
+      : null;
+  if (!rawPairTrusted && Number.isFinite(Number(lastGoodAgeMs)) && Number(lastGoodAgeMs) <= QUOTE_HOLD_LAST_GOOD_MS) {
+    if (
+      Number.isFinite(Number(lastGoodObservedBids.upBid)) &&
+      Number.isFinite(Number(lastGoodObservedBids.downBid))
+    ) {
+      pairAny = {
+        upBid: Number(lastGoodObservedBids.upBid),
+        downBid: Number(lastGoodObservedBids.downBid),
+        upAsk: null,
+        downAsk: null,
+        tsMs: Number(lastGoodObservedBids.tsMs),
+        source: "last_good_hold",
+        upstreamTsMs: null,
+        observedAtMs: Number(lastGoodObservedBids.tsMs),
+        synthetic: false,
+        pure: true,
+        seq: null,
+      };
+    }
+  }
   const pairLagMs =
     Number.isFinite(Number(pairAny?.tsMs)) && Number(pairAny?.tsMs) > 0
       ? Math.max(0, now - Number(pairAny?.tsMs))
@@ -19844,13 +19939,32 @@ async function tickBotRuntime(instance: BotInstance, triggerCtx?: QuoteTickTrigg
       seq: Number.isFinite(Number(triggerCtx?.pairSeq)) ? Number(triggerCtx?.pairSeq) : Number(pair?.seq),
     };
     const runtimeQuoteTrusted = isQuotePairTrustedForCurrentSession(runtimePairMeta, upBA?.bid, downBA?.bid, sessionAgeMs);
+    const runtimeQuoteDislocationQuarantined =
+      runtimeQuoteTrusted && shouldQuarantineQuoteDislocation(runtimePairMeta, upBA?.bid, downBA?.bid, tickTsMs);
     const existingRuntimeTrusted =
       isValidOutcomeBidValue(rt.upBid) &&
       isValidOutcomeBidValue(rt.downBid) &&
       !isEdgeDominantQuotePair(rt.upBid, rt.downBid);
-    if (!runtimeQuoteTrusted && isEdgeDominantQuotePair(upBA?.bid, downBA?.bid)) {
-      upBA.bid = existingRuntimeTrusted ? Number(rt.upBid) : null;
-      downBA.bid = existingRuntimeTrusted ? Number(rt.downBid) : null;
+    if (!runtimeQuoteTrusted || runtimeQuoteDislocationQuarantined) {
+      const lastGoodAgeMs =
+        Number.isFinite(Number(lastGoodObservedBids.tsMs)) && Number(lastGoodObservedBids.tsMs) > 0
+          ? Math.max(0, tickTsMs - Number(lastGoodObservedBids.tsMs))
+          : null;
+      const canUseLastGood =
+        Number.isFinite(Number(lastGoodAgeMs)) &&
+        Number(lastGoodAgeMs) <= QUOTE_HOLD_LAST_GOOD_MS &&
+        Number.isFinite(Number(lastGoodObservedBids.upBid)) &&
+        Number.isFinite(Number(lastGoodObservedBids.downBid));
+      if (canUseLastGood) {
+        upBA.bid = Number(lastGoodObservedBids.upBid);
+        downBA.bid = Number(lastGoodObservedBids.downBid);
+      } else if (existingRuntimeTrusted) {
+        upBA.bid = Number(rt.upBid);
+        downBA.bid = Number(rt.downBid);
+      } else if (isEdgeDominantQuotePair(upBA?.bid, downBA?.bid) || runtimeQuoteDislocationQuarantined) {
+        upBA.bid = null;
+        downBA.bid = null;
+      }
     }
     markTickStage("quote_setup");
     rt.upBid = isValidOutcomeBidValue(upBA?.bid) ? Number(upBA.bid) : null;
