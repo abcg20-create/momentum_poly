@@ -1082,6 +1082,26 @@ const QUOTE_EDGE_TRUST_MAX_SAMPLE_GAP_MS = Math.max(
   120,
   Number(process.env.QUOTE_EDGE_TRUST_MAX_SAMPLE_GAP_MS || 800)
 );
+const QUOTE_DISLOCATION_EDGE_MIN_PX = Math.max(
+  0.80,
+  Math.min(0.995, Number(process.env.QUOTE_DISLOCATION_EDGE_MIN_PX || 0.95))
+);
+const QUOTE_DISLOCATION_MIN_MOVE_PX = Math.max(
+  0.05,
+  Math.min(0.50, Number(process.env.QUOTE_DISLOCATION_MIN_MOVE_PX || 0.12))
+);
+const QUOTE_DISLOCATION_CONFIRM_MIN_COUNT = Math.max(
+  2,
+  Number(process.env.QUOTE_DISLOCATION_CONFIRM_MIN_COUNT || 3)
+);
+const QUOTE_DISLOCATION_CONFIRM_MIN_MS = Math.max(
+  150,
+  Number(process.env.QUOTE_DISLOCATION_CONFIRM_MIN_MS || 900)
+);
+const QUOTE_DISLOCATION_MAX_SAMPLE_GAP_MS = Math.max(
+  150,
+  Number(process.env.QUOTE_DISLOCATION_MAX_SAMPLE_GAP_MS || 1200)
+);
 const QUOTE_STREAM_TS_MAX_AGE_MS = Math.max(200, Number(process.env.QUOTE_STREAM_TS_MAX_AGE_MS || 1500));
 const QUOTE_STREAM_TS_MAX_FUTURE_MS = Math.max(20, Number(process.env.QUOTE_STREAM_TS_MAX_FUTURE_MS || 250));
 const INFLECTION_SYNTHETIC_STRATEGY_MAX_AGE_MS = Math.max(
@@ -2592,6 +2612,95 @@ function isQuotePairTrustedForCurrentSession(
   if (streakSpanMs < QUOTE_EDGE_TRUST_STREAK_MIN_MS) return false;
   return true;
 }
+
+function isNearEdgeDominantQuotePair(upBidRaw: any, downBidRaw: any): boolean {
+  const upBid = Number(upBidRaw);
+  const downBid = Number(downBidRaw);
+  if (!(Number.isFinite(upBid) && Number.isFinite(downBid))) return false;
+  const edge = Number(QUOTE_DISLOCATION_EDGE_MIN_PX);
+  return (
+    (upBid >= edge && downBid <= (1 - edge)) ||
+    (downBid >= edge && upBid <= (1 - edge))
+  );
+}
+
+function quoteDislocationSampleKey(pairLike: any, fallbackTsMsRaw: any): string {
+  const pair = pairLike && typeof pairLike === "object" ? pairLike : null;
+  if (Number.isFinite(Number(pair?.seq))) return `seq:${Number(pair.seq)}`;
+  if (Number.isFinite(Number(pair?.tsMs)) && Number(pair.tsMs) > 0) return `ts:${Math.round(Number(pair.tsMs))}`;
+  if (Number.isFinite(Number(pair?.observedAtMs)) && Number(pair.observedAtMs) > 0) {
+    return `obs:${Math.round(Number(pair.observedAtMs))}`;
+  }
+  return `now:${Math.round(Number(fallbackTsMsRaw) || nowMs())}`;
+}
+
+function shouldQuarantineQuoteDislocation(
+  pairLike: any,
+  upBidRaw: any,
+  downBidRaw: any,
+  nowTickMsRaw?: any
+): boolean {
+  const prevUp = Number(lastGoodObservedBids.upBid);
+  const prevDown = Number(lastGoodObservedBids.downBid);
+  const upBid = Number(upBidRaw);
+  const downBid = Number(downBidRaw);
+  if (
+    !(Number.isFinite(prevUp) && Number.isFinite(prevDown) && Number.isFinite(upBid) && Number.isFinite(downBid)) ||
+    !isNearEdgeDominantQuotePair(prevUp, prevDown)
+  ) {
+    currentSessionQuoteDislocationCandidate = null;
+    return false;
+  }
+  const prevSide = dominantOutcomeSideForQuotePair(prevUp, prevDown);
+  const nextSide = dominantOutcomeSideForQuotePair(upBid, downBid);
+  if (!prevSide || prevSide !== nextSide || isNearEdgeDominantQuotePair(upBid, downBid)) {
+    currentSessionQuoteDislocationCandidate = null;
+    return false;
+  }
+  const prevWinner = prevSide === "UP" ? prevUp : prevDown;
+  const prevLoser = prevSide === "UP" ? prevDown : prevUp;
+  const nextWinner = nextSide === "UP" ? upBid : downBid;
+  const nextLoser = nextSide === "UP" ? downBid : upBid;
+  const winnerDrop = prevWinner - nextWinner;
+  const loserRise = nextLoser - prevLoser;
+  if (winnerDrop < QUOTE_DISLOCATION_MIN_MOVE_PX || loserRise < QUOTE_DISLOCATION_MIN_MOVE_PX) {
+    currentSessionQuoteDislocationCandidate = null;
+    return false;
+  }
+
+  const nowTickMs = Number.isFinite(Number(nowTickMsRaw)) ? Number(nowTickMsRaw) : nowMs();
+  const sampleKey = quoteDislocationSampleKey(pairLike, nowTickMs);
+  const prev = currentSessionQuoteDislocationCandidate;
+  if (
+    !prev ||
+    prev.side !== nextSide ||
+    !Number.isFinite(Number(prev.lastSampleAtMs)) ||
+    (nowTickMs - Number(prev.lastSampleAtMs)) > QUOTE_DISLOCATION_MAX_SAMPLE_GAP_MS
+  ) {
+    currentSessionQuoteDislocationCandidate = {
+      side: nextSide,
+      count: 1,
+      firstSampleAtMs: nowTickMs,
+      lastSampleAtMs: nowTickMs,
+      lastSampleKey: sampleKey,
+    };
+    return true;
+  }
+  if (String(prev.lastSampleKey || "") !== sampleKey) {
+    prev.count = Number(prev.count || 0) + 1;
+    prev.lastSampleAtMs = nowTickMs;
+    prev.lastSampleKey = sampleKey;
+  }
+  const spanMs =
+    Number.isFinite(Number(prev.firstSampleAtMs)) && Number.isFinite(Number(prev.lastSampleAtMs))
+      ? Math.max(0, Number(prev.lastSampleAtMs) - Number(prev.firstSampleAtMs))
+      : 0;
+  if (Number(prev.count || 0) >= QUOTE_DISLOCATION_CONFIRM_MIN_COUNT && spanMs >= QUOTE_DISLOCATION_CONFIRM_MIN_MS) {
+    currentSessionQuoteDislocationCandidate = null;
+    return false;
+  }
+  return true;
+}
 type UserStreamOrderState = {
   orderId: string;
   marketId: string | null;
@@ -2613,6 +2722,13 @@ type UserStreamOrderState = {
 };
 
 type SessionTrustedEdgeQuoteStreak = {
+  side: OutcomeSide | null;
+  count: number;
+  firstSampleAtMs: number | null;
+  lastSampleAtMs: number | null;
+  lastSampleKey: string | null;
+};
+type SessionQuoteDislocationCandidate = {
   side: OutcomeSide | null;
   count: number;
   firstSampleAtMs: number | null;
@@ -28823,6 +28939,7 @@ let lastGoodObservedBids: { upBid: number | null; downBid: number | null; tsMs: 
 };
 let currentSessionTrustedQuoteSeenAtMs: number | null = null;
 let currentSessionTrustedEdgeQuoteStreak: SessionTrustedEdgeQuoteStreak | null = null;
+let currentSessionQuoteDislocationCandidate: SessionQuoteDislocationCandidate | null = null;
 
 // Startup safety: never open a new position in the first session observed after restart.
 let entryBlockActive = true;
@@ -42553,6 +42670,7 @@ function maybeStartCurrent5mMarketResolve(reason: string): void {
         lastGoodObservedBids = { upBid: null, downBid: null, tsMs: null };
         currentSessionTrustedQuoteSeenAtMs = null;
         currentSessionTrustedEdgeQuoteStreak = null;
+        currentSessionQuoteDislocationCandidate = null;
       }
       console.log(
         `[SESSION TOKENS READY] reason=${reason} slug=${current.slug} up=${current.upToken} down=${current.downToken}`
@@ -51542,6 +51660,7 @@ async function mainLoop() {
         lastGoodObservedBids = { upBid: null, downBid: null, tsMs: null };
         currentSessionTrustedQuoteSeenAtMs = null;
         currentSessionTrustedEdgeQuoteStreak = null;
+        currentSessionQuoteDislocationCandidate = null;
       }
         sessionRolloverCriticalUntilMs = nowMs() + ROLLOVER_CRITICAL_WINDOW_MS;
         if (sessionRolloverDeferredLiveReconcileTimer) {
@@ -51657,7 +51776,10 @@ async function mainLoop() {
         Number.isFinite(Number(upBid)) &&
         Number.isFinite(Number(dnBid)) &&
         isQuoteStreamHealthyForPairUse(streamAgeForPair);
-      const quotePairTrusted = isQuotePairTrustedForCurrentSession(pair, upBid, dnBid, sessionAgeMs);
+      let quotePairTrusted = isQuotePairTrustedForCurrentSession(pair, upBid, dnBid, sessionAgeMs);
+      const quotePairDislocationQuarantined =
+        quotePairTrusted && shouldQuarantineQuoteDislocation(pair, upBid, dnBid, nowTickMs);
+      if (quotePairDislocationQuarantined) quotePairTrusted = false;
       if (!quotePairTrusted) {
         upBid = null;
         dnBid = null;
@@ -51703,7 +51825,7 @@ async function mainLoop() {
           if (!(mainLoop as any).__lastPairHoldWarnMs) (mainLoop as any).__lastPairHoldWarnMs = new Map<string, number>();
           (mainLoop as any).__lastPairHoldWarnMs.set(key, nowTickMs);
           console.warn(
-            `[QUOTE HOLD] session=${current.slug} reason=${pair ? "stale_pair" : "missing_pair"} ` +
+            `[QUOTE HOLD] session=${current.slug} reason=${quotePairDislocationQuarantined ? "quote_dislocation_quarantine" : (pair ? "stale_pair" : "missing_pair")} ` +
             `pairAgeMs=${String(pairAgeMs)} up=${String(upBA.bid)} down=${String(dnBA.bid)}`
           );
         }
